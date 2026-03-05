@@ -83,6 +83,9 @@ mod tests {
             runtime: RuntimeSnapshot {
                 running: 2,
                 retrying: 1,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
             },
             issues: vec![
                 IssueSnapshot {
@@ -134,6 +137,9 @@ mod tests {
             runtime: RuntimeSnapshot {
                 running: 1,
                 retrying: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
             },
             issues: vec![],
         };

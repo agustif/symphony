@@ -20,6 +20,7 @@ pub use state_handlers::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use symphony_observability::{RuntimeSnapshot, StateSnapshot};
     use symphony_testkit::{issue_snapshot, runtime_snapshot, state_snapshot};
 
     #[test]
@@ -56,6 +57,26 @@ mod tests {
         assert_eq!(response.body["counts"]["running"], 2);
         assert_eq!(response.body["running"][0]["issue_identifier"], "SYM-7");
         assert_eq!(response.body["retrying"][0]["attempt"], 2);
+    }
+
+    #[test]
+    fn serves_state_endpoint_with_codex_totals() {
+        let snapshot = StateSnapshot {
+            runtime: RuntimeSnapshot {
+                running: 1,
+                retrying: 0,
+                input_tokens: 100,
+                output_tokens: 50,
+                total_tokens: 150,
+            },
+            issues: vec![issue_snapshot("SYM-9", "SYM-9", "Running", 0)],
+        };
+
+        let response = handle_get(STATE_ROUTE, &snapshot);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["codex_totals"]["input_tokens"], 100);
+        assert_eq!(response.body["codex_totals"]["output_tokens"], 50);
+        assert_eq!(response.body["codex_totals"]["total_tokens"], 150);
     }
 
     #[test]

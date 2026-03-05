@@ -133,6 +133,9 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let (snapshot_tx, _) = tokio::sync::watch::channel(RuntimeSnapshot {
             running: 0,
             retrying: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
         });
         Self {
             tracker,
@@ -344,6 +347,9 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let _ = self.snapshot_tx.send(RuntimeSnapshot {
             running: state.running.len(),
             retrying: state.retry_attempts.len(),
+            input_tokens: state.codex_totals.input_tokens,
+            output_tokens: state.codex_totals.output_tokens,
+            total_tokens: state.codex_totals.total_tokens,
         });
 
         Ok(TickResult { state, commands })
@@ -396,6 +402,9 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let _ = self.snapshot_tx.send(RuntimeSnapshot {
             running: state.running.len(),
             retrying: state.retry_attempts.len(),
+            input_tokens: state.codex_totals.input_tokens,
+            output_tokens: state.codex_totals.output_tokens,
+            total_tokens: state.codex_totals.total_tokens,
         });
 
         Ok(WorkerExitResult {
@@ -416,6 +425,9 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let _ = self.snapshot_tx.send(RuntimeSnapshot {
             running: state.running.len(),
             retrying: state.retry_attempts.len(),
+            input_tokens: state.codex_totals.input_tokens,
+            output_tokens: state.codex_totals.output_tokens,
+            total_tokens: state.codex_totals.total_tokens,
         });
 
         Ok(())
@@ -456,6 +468,9 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         RuntimeSnapshot {
             running: state.running.len(),
             retrying: state.retry_attempts.len(),
+            input_tokens: state.codex_totals.input_tokens,
+            output_tokens: state.codex_totals.output_tokens,
+            total_tokens: state.codex_totals.total_tokens,
         }
     }
 
@@ -884,6 +899,9 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let _ = self.snapshot_tx.send(RuntimeSnapshot {
             running: state.running.len(),
             retrying: state.retry_attempts.len(),
+            input_tokens: state.codex_totals.input_tokens,
+            output_tokens: state.codex_totals.output_tokens,
+            total_tokens: state.codex_totals.total_tokens,
         });
 
         self.process_tick_commands(commands, config).await;
@@ -925,6 +943,9 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let _ = self.snapshot_tx.send(RuntimeSnapshot {
             running: state.running.len(),
             retrying: state.retry_attempts.len(),
+            input_tokens: state.codex_totals.input_tokens,
+            output_tokens: state.codex_totals.output_tokens,
+            total_tokens: state.codex_totals.total_tokens,
         });
 
         for command in commands {
@@ -2058,6 +2079,11 @@ mod tests {
         assert_eq!(state.codex_totals.input_tokens, 100);
         assert_eq!(state.codex_totals.output_tokens, 50);
         assert_eq!(state.codex_totals.total_tokens, 150);
+
+        let snapshot = runtime.snapshot().await;
+        assert_eq!(snapshot.input_tokens, 100);
+        assert_eq!(snapshot.output_tokens, 50);
+        assert_eq!(snapshot.total_tokens, 150);
     }
 
     #[tokio::test]

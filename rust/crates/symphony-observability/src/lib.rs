@@ -22,6 +22,9 @@ mod tests {
         let snapshot = RuntimeSnapshot {
             running: 0,
             retrying: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
         };
         assert_eq!(snapshot.running + snapshot.retrying, 0);
         assert_eq!(snapshot.spec_view().counts.running, 0);
@@ -33,6 +36,9 @@ mod tests {
             runtime: RuntimeSnapshot {
                 running: 1,
                 retrying: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
             },
             issues: vec![IssueSnapshot {
                 id: IssueId("SYM-42".to_owned()),

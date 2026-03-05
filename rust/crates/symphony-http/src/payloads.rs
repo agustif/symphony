@@ -253,7 +253,12 @@ impl From<&StateSnapshot> for StateApiView {
             },
             running,
             retrying,
-            codex_totals: TokenTotalsView::default(),
+            codex_totals: TokenTotalsView {
+                input_tokens: snapshot.runtime.input_tokens,
+                output_tokens: snapshot.runtime.output_tokens,
+                total_tokens: snapshot.runtime.total_tokens,
+                seconds_running: 0.0,
+            },
             rate_limits: None,
             runtime: RuntimeLegacyView::from(&snapshot.runtime),
             issues: legacy_issues,

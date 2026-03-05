@@ -3,7 +3,13 @@ use symphony_observability::{IssueSnapshot, RuntimeSnapshot, StateSnapshot};
 use crate::issue_id;
 
 pub fn runtime_snapshot(running: usize, retrying: usize) -> RuntimeSnapshot {
-    RuntimeSnapshot { running, retrying }
+    RuntimeSnapshot {
+        running,
+        retrying,
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+    }
 }
 
 pub fn issue_snapshot(

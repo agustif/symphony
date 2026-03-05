@@ -1,9 +1,9 @@
 # symphony-observability Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 70%
-- Done: task map defined, snapshot placeholder structs added, and control-byte sanitization helpers landed with tests.
-- In Progress: issue-view parity, redaction helpers, and aggregation depth.
+- Completion: 78%
+- Done: task map defined, snapshot placeholder structs added, control-byte sanitization helpers landed with tests, and cumulative token counters now flow from runtime state into snapshot/API views.
+- In Progress: issue-view parity, redaction helpers, throughput buckets, and queue timing views.
 - Remaining: full SPEC parity and production rollout gates.
 
 ## Scope
@@ -25,7 +25,7 @@ Own runtime snapshot model, metrics aggregation, and display-ready view shaping.
 
 ## Epic O2: Aggregation
 ### Task O2.1: Token and throughput accounting
-- [ ] Subtask O2.1.1: Cumulative token counters.
+- [x] Subtask O2.1.1: Cumulative token counters.
 - [ ] Subtask O2.1.2: Rolling throughput buckets.
 
 ### Task O2.2: Queue and timing views
@@ -44,8 +44,8 @@ Own runtime snapshot model, metrics aggregation, and display-ready view shaping.
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 13.3 runtime snapshot interface | Partial | Finalize running/retrying/totals/rate-limit schemas and required fields | `O1.1` |
+| Sec. 13.3 runtime snapshot interface | Counts and cumulative token totals implemented | Finalize per-issue and rate-limit schemas and required fields | `O1.1`, `O2.1` |
 | Sec. 13.4 human-readable status surface | Partial helpers only | Add display-ready shaping for countdowns, queue state, and health markers | `O2.2` |
-| Sec. 13.5 session metrics and token accounting | Partial | Implement full cumulative and per-issue accounting including throughput windows | `O2.1` |
+| Sec. 13.5 session metrics and token accounting | Cumulative totals implemented | Add per-issue accounting and throughput windows | `O2.1` |
 | Sec. 13.6 humanized event summaries | Not complete | Add sanitization and summary utilities with deterministic formatting | `O1.2`, `O3.1` |
 <!-- SPEC_GAP_MAP_END -->
