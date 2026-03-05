@@ -18,12 +18,20 @@ pub trait TrackerClient: Send + Sync {
         }
         let states = states
             .iter()
-            .map(TrackerState::as_str)
+            .filter_map(TrackerState::normalized_key)
             .collect::<HashSet<_>>();
+        if states.is_empty() {
+            return Ok(Vec::new());
+        }
         let issues = self.fetch_candidates().await?;
         Ok(issues
             .into_iter()
-            .filter(|issue| states.contains(issue.state.as_str()))
+            .filter(|issue| {
+                issue
+                    .state
+                    .normalized_key()
+                    .is_some_and(|state| states.contains(&state))
+            })
             .collect())
     }
 
@@ -43,5 +51,30 @@ pub trait TrackerClient: Send + Sync {
             }
         }
         Ok(states_by_id)
+    }
+
+    async fn fetch_terminal_candidates(
+        &self,
+        terminal_states: &[TrackerState],
+    ) -> Result<Vec<TrackerIssue>, TrackerError> {
+        if terminal_states.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.fetch_candidates_by_states(terminal_states).await
+    }
+
+    async fn fetch_terminal_states_by_ids(
+        &self,
+        ids: &[IssueId],
+        terminal_states: &[TrackerState],
+    ) -> Result<HashMap<IssueId, TrackerState>, TrackerError> {
+        if ids.is_empty() || terminal_states.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let states = self.fetch_states_by_ids(ids).await?;
+        Ok(states
+            .into_iter()
+            .filter(|(_, state)| state.is_terminal(terminal_states))
+            .collect())
     }
 }

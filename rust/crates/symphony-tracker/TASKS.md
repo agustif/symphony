@@ -16,22 +16,22 @@ Own tracker abstraction contracts and normalized issue model.
 
 ## Epic T1: Contract Design
 ### Task T1.1: Core trait surface
-- [ ] Subtask T1.1.1: Candidate fetch contract.
-- [ ] Subtask T1.1.2: Fetch-by-IDs state refresh contract.
-- [ ] Subtask T1.1.3: Fetch-by-states contract.
+- [x] Subtask T1.1.1: Candidate fetch contract.
+- [x] Subtask T1.1.2: Fetch-by-IDs state refresh contract.
+- [x] Subtask T1.1.3: Fetch-by-states contract.
 
 ### Task T1.2: Domain normalization
-- [ ] Subtask T1.2.1: Canonical issue DTO and state normalization.
+- [x] Subtask T1.2.1: Canonical issue DTO and state normalization.
 - [ ] Subtask T1.2.2: Blocker and assignee semantics representation.
 
 ## Epic T2: Error Model
 ### Task T2.1: Typed errors
-- [ ] Subtask T2.1.1: Transport/status/graphql/validation error variants.
-- [ ] Subtask T2.1.2: Runtime-friendly display/context payloads.
+- [x] Subtask T2.1.1: Transport/status/graphql/validation error variants.
+- [x] Subtask T2.1.2: Runtime-friendly display/context payloads.
 
 ## Epic T3: Tests
 ### Task T3.1: Trait contract tests
-- [ ] Subtask T3.1.1: Fake adapter compliance tests.
+- [x] Subtask T3.1.1: Fake adapter compliance tests.
 - [ ] Subtask T3.1.2: Error mapping tests.
 
 ## Exit Criteria

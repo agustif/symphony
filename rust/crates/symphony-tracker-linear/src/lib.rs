@@ -2,7 +2,7 @@
 
 mod graphql;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -10,23 +10,29 @@ use serde::{Serialize, de::DeserializeOwned};
 use symphony_domain::IssueId;
 use symphony_tracker::{TrackerClient, TrackerError, TrackerIssue, TrackerState};
 
+const LINEAR_PAGE_SIZE: usize = 100;
+
 const FETCH_CANDIDATES_QUERY: &str = r#"
-query FetchCandidates {
-  issues {
+query FetchCandidates($first: Int!, $after: String) {
+  issues(first: $first, after: $after) {
     nodes {
       id
       identifier
       state {
         name
       }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
     }
   }
 }
 "#;
 
 const FETCH_CANDIDATES_BY_STATES_QUERY: &str = r#"
-query FetchCandidatesByStates($states: [String!]!) {
-  issues(filter: { state: { name: { in: $states } } }) {
+query FetchCandidatesByStates($states: [String!]!, $first: Int!, $after: String) {
+  issues(first: $first, after: $after, filter: { state: { name: { in: $states } } }) {
     nodes {
       id
       identifier
@@ -34,18 +40,26 @@ query FetchCandidatesByStates($states: [String!]!) {
         name
       }
     }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
   }
 }
 "#;
 
 const FETCH_STATES_BY_IDS_QUERY: &str = r#"
-query FetchStatesByIds($ids: [String!]!) {
-  issues(filter: { id: { in: $ids } }) {
+query FetchStatesByIds($ids: [String!]!, $first: Int!, $after: String) {
+  issues(first: $first, after: $after, filter: { id: { in: $ids } }) {
     nodes {
       id
       state {
         name
       }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
     }
   }
 }
@@ -83,14 +97,45 @@ impl LinearTracker {
     }
 
     async fn fetch_all_candidates(&self) -> Result<Vec<TrackerIssue>, TrackerError> {
-        let data: graphql::IssuesData = self
-            .post_graphql(FETCH_CANDIDATES_QUERY, graphql::EmptyVariables)
-            .await?;
-        data.issues
-            .nodes
-            .into_iter()
-            .map(normalize_tracker_issue)
-            .collect()
+        let mut issues = Vec::new();
+        let mut seen_cursors = HashSet::new();
+        let mut seen_issue_ids = HashSet::new();
+        let mut after = None;
+
+        loop {
+            let data: graphql::IssuesData = self
+                .post_graphql(
+                    FETCH_CANDIDATES_QUERY,
+                    graphql::PaginationVariables {
+                        first: LINEAR_PAGE_SIZE,
+                        after: after.clone(),
+                    },
+                )
+                .await?;
+            for node in data.issues.nodes {
+                let issue = normalize_tracker_issue(node)?;
+                if !seen_issue_ids.insert(issue.id.0.clone()) {
+                    return Err(TrackerError::payload(format!(
+                        "graphql payload has duplicate issue id `{}`",
+                        issue.id.0
+                    )));
+                }
+                issues.push(issue);
+            }
+            let next_cursor = next_page_cursor(data.issues.page_info, "issues.pageInfo.endCursor")?;
+            if let Some(cursor) = next_cursor {
+                if !seen_cursors.insert(cursor.clone()) {
+                    return Err(TrackerError::payload(format!(
+                        "graphql pagination cursor repeated: `{cursor}`"
+                    )));
+                }
+                after = Some(cursor);
+                continue;
+            }
+            break;
+        }
+
+        Ok(issues)
     }
 
     async fn post_graphql<V, D>(&self, query: &'static str, variables: V) -> Result<D, TrackerError>
@@ -121,7 +166,18 @@ impl LinearTracker {
         let response = serde_json::from_slice::<graphql::GraphQlResponse<D>>(&body)
             .map_err(|err| TrackerError::payload(format!("invalid graphql payload: {err}")))?;
         if !response.errors.is_empty() {
-            let messages = response.errors.into_iter().map(|err| err.message).collect();
+            let messages = response
+                .errors
+                .into_iter()
+                .map(|err| {
+                    let message = err.message.trim().to_owned();
+                    if message.is_empty() {
+                        "unknown graphql error".to_owned()
+                    } else {
+                        message
+                    }
+                })
+                .collect();
             return Err(TrackerError::graphql(messages));
         }
         response
@@ -157,6 +213,47 @@ fn normalize_tracker_state(
     ))
 }
 
+fn normalize_state_filters(states: &[TrackerState]) -> Vec<String> {
+    let mut normalized_states = Vec::new();
+    let mut seen = HashSet::new();
+    for state in states {
+        let normalized = state.normalized();
+        if normalized.is_empty() {
+            continue;
+        }
+        let state_key = normalized.to_ascii_lowercase();
+        if seen.insert(state_key) {
+            normalized_states.push(normalized);
+        }
+    }
+    normalized_states
+}
+
+fn normalize_requested_ids(ids: &[IssueId]) -> Result<Vec<String>, TrackerError> {
+    let mut normalized_ids = Vec::new();
+    let mut seen = HashSet::new();
+    for issue_id in ids {
+        let normalized = normalize_non_empty(issue_id.0.clone(), "variables.ids[]")?;
+        if seen.insert(normalized.clone()) {
+            normalized_ids.push(normalized);
+        }
+    }
+    Ok(normalized_ids)
+}
+
+fn next_page_cursor(
+    page_info: graphql::PageInfo,
+    field: &'static str,
+) -> Result<Option<String>, TrackerError> {
+    if !page_info.has_next_page {
+        return Ok(None);
+    }
+    let cursor = page_info.end_cursor.ok_or_else(|| {
+        TrackerError::payload(format!("graphql payload field `{field}` is missing"))
+    })?;
+    Ok(Some(normalize_non_empty(cursor, field)?))
+}
+
 #[async_trait]
 impl TrackerClient for LinearTracker {
     async fn fetch_candidates(&self) -> Result<Vec<TrackerIssue>, TrackerError> {
@@ -174,19 +271,51 @@ impl TrackerClient for LinearTracker {
         if states.is_empty() {
             return self.fetch_all_candidates().await;
         }
-        let data: graphql::IssuesData = self
-            .post_graphql(
-                FETCH_CANDIDATES_BY_STATES_QUERY,
-                graphql::FetchIssuesByStatesVariables {
-                    states: states.iter().map(ToString::to_string).collect(),
-                },
-            )
-            .await?;
-        data.issues
-            .nodes
-            .into_iter()
-            .map(normalize_tracker_issue)
-            .collect()
+        let state_filters = normalize_state_filters(states);
+        if state_filters.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut issues = Vec::new();
+        let mut seen_cursors = HashSet::new();
+        let mut seen_issue_ids = HashSet::new();
+        let mut after = None;
+
+        loop {
+            let data: graphql::IssuesData = self
+                .post_graphql(
+                    FETCH_CANDIDATES_BY_STATES_QUERY,
+                    graphql::FetchIssuesByStatesVariables {
+                        states: state_filters.clone(),
+                        first: LINEAR_PAGE_SIZE,
+                        after: after.clone(),
+                    },
+                )
+                .await?;
+            for node in data.issues.nodes {
+                let issue = normalize_tracker_issue(node)?;
+                if !seen_issue_ids.insert(issue.id.0.clone()) {
+                    return Err(TrackerError::payload(format!(
+                        "graphql payload has duplicate issue id `{}`",
+                        issue.id.0
+                    )));
+                }
+                issues.push(issue);
+            }
+            let next_cursor = next_page_cursor(data.issues.page_info, "issues.pageInfo.endCursor")?;
+            if let Some(cursor) = next_cursor {
+                if !seen_cursors.insert(cursor.clone()) {
+                    return Err(TrackerError::payload(format!(
+                        "graphql pagination cursor repeated: `{cursor}`"
+                    )));
+                }
+                after = Some(cursor);
+                continue;
+            }
+            break;
+        }
+
+        Ok(issues)
     }
 
     async fn fetch_states_by_ids(
@@ -196,18 +325,48 @@ impl TrackerClient for LinearTracker {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let data: graphql::IssueStatesData = self
-            .post_graphql(
-                FETCH_STATES_BY_IDS_QUERY,
-                graphql::FetchIssueStatesByIdsVariables {
-                    ids: ids.iter().map(|id| id.0.clone()).collect(),
-                },
-            )
-            .await?;
-        let mut states = HashMap::with_capacity(data.issues.nodes.len());
-        for issue in data.issues.nodes {
-            let (id, state) = normalize_tracker_state(issue)?;
-            states.insert(id, state);
+        let requested_ids = normalize_requested_ids(ids)?;
+        let requested_id_set = requested_ids.iter().cloned().collect::<HashSet<_>>();
+
+        let mut states = HashMap::new();
+        let mut seen_cursors = HashSet::new();
+        let mut after = None;
+
+        loop {
+            let data: graphql::IssueStatesData = self
+                .post_graphql(
+                    FETCH_STATES_BY_IDS_QUERY,
+                    graphql::FetchIssueStatesByIdsVariables {
+                        ids: requested_ids.clone(),
+                        first: LINEAR_PAGE_SIZE,
+                        after: after.clone(),
+                    },
+                )
+                .await?;
+            for issue in data.issues.nodes {
+                let (id, state) = normalize_tracker_state(issue)?;
+                if !requested_id_set.contains(&id.0) {
+                    continue;
+                }
+                if states.contains_key(&id) {
+                    return Err(TrackerError::payload(format!(
+                        "graphql payload has duplicate issue id `{}` for state refresh",
+                        id.0
+                    )));
+                }
+                states.insert(id, state);
+            }
+            let next_cursor = next_page_cursor(data.issues.page_info, "issues.pageInfo.endCursor")?;
+            if let Some(cursor) = next_cursor {
+                if !seen_cursors.insert(cursor.clone()) {
+                    return Err(TrackerError::payload(format!(
+                        "graphql pagination cursor repeated: `{cursor}`"
+                    )));
+                }
+                after = Some(cursor);
+                continue;
+            }
+            break;
         }
         Ok(states)
     }
