@@ -80,3 +80,15 @@ Deliver a production-grade Rust runtime for Symphony from first principles, with
 ### Task F.2: Operational readiness
 - [ ] Subtask F.2.1: Define runbook and failure playbooks in docs.
 - [ ] Subtask F.2.2: Define cutover checklist and rollback criteria.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Program |
+| --- | --- | --- | --- |
+| Sec. 4, Sec. 7, Sec. 8, Sec. 16 core orchestration model | Implemented across domain/runtime | Complete edge-case parity for every transition trigger and recovery branch | `C.1`, `D.1`, `D.2` |
+| Sec. 5 and Sec. 6 workflow and config contract | Implemented in workflow/config crates | Close CLI override + runtime-reload integration drift under live runs | `C.2`, `F.2` |
+| Sec. 9 and Sec. 15 workspace and safety constraints | Implemented with path containment and hooks | Add real-integration fault drills for hook failures and filesystem anomalies | `C.4`, `D.3` |
+| Sec. 10, Sec. 11, Sec. 12 adapter and prompt pipeline | Partially implemented across protocol/tracker/runtime | Complete handshake/approval contract and full tracker normalization parity | `C.3`, `D.1` |
+| Sec. 13, Sec. 14 observability and recovery | Partially implemented | Finish dashboard parity, failure playbooks, and restart recovery contract docs/tests | `C.4`, `F.2` |
+| Sec. 17 and Sec. 18 validation and DoD gates | Mostly green on unit/integration | Finish conformance matrix and make all required suites mandatory in CI | `D.1`, `D.2`, `D.3`, `F.1` |
+<!-- SPEC_GAP_MAP_END -->

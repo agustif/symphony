@@ -38,3 +38,14 @@ Own coding-agent app-server protocol transport, framing, and event translation.
 
 ## Exit Criteria
 - [x] Protocol crate is robust against malformed or mixed stream inputs.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 10.2 session startup handshake | Partial framing support exists | Implement complete initialize/session/new/turn/start ordering and validation | `P1.1` |
+| Sec. 10.3 stdout streaming contract | Implemented and tested | Add high-volume stream backpressure and reassembly stress tests | `P1.2`, `P3.1` |
+| Sec. 10.5 approval and user-input policy mapping | Partial | Map approvals and input-required messages to explicit runtime policy outcomes | `P2.1` |
+| Sec. 10.6 timeout and error mapping | Partial | Add typed timeout/retryable/non-retryable mapping and tests | `P2.1`, `P3.1` |
+| Sec. 17.5 app-server client validation | Partial | Build matrix cases for malformed protocol and interrupted streams | `P3.1` |
+<!-- SPEC_GAP_MAP_END -->

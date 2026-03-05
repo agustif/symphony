@@ -32,3 +32,13 @@ Define, implement, and enforce formal proofs for orchestrator invariants.
 
 ## Exit Criteria
 - [ ] Proof program is wired into CI and release gates.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 7.4 idempotency/recovery invariants | Partial formalization | Complete mapping from every reducer invariant to proof artifact | `P1.1` |
+| Sec. 8.3-8.4 concurrency and retry guarantees | Partial formalization | Extend proofs for slot accounting and bounded scheduling behavior | `P1.1`, `P2.1` |
+| Sec. 9.5 and Sec. 15.2 safety invariants | Workspace model proof present | Add canonicalization and race-sensitive proof obligations | `P2.1` |
+| Sec. 17 and Sec. 18 formal validation gate | Partial | Make proof checks mandatory in CI and release criteria | `P1.2` |
+<!-- SPEC_GAP_MAP_END -->

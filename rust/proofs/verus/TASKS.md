@@ -42,3 +42,13 @@ Implement Verus proofs for runtime-critical state invariants.
 
 ## Exit Criteria
 - [ ] All V1 and V2 proofs pass in CI.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 7 state machine invariants | `runtime_quick.rs` and `runtime_full.rs` verified | Add stronger lemmas for slot bounds and full transition rejection taxonomy | `V2.1` |
+| Sec. 8 retry/reconciliation progress obligations | `session_liveness.rs` verified | Extend to full scheduler fairness and eventual processing assumptions | `V2.2` |
+| Sec. 9.5 workspace safety invariants | `workspace_safety.rs` verified | Add proof obligations for path normalization edge and policy composition | `V2.2` |
+| Sec. 17/18 verification gate requirements | Proof scripts and references in place | Wire mandatory proof CI and stale-reference guard | `V3.1`, `V3.2` |
+<!-- SPEC_GAP_MAP_END -->

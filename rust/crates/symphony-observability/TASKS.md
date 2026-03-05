@@ -39,3 +39,13 @@ Own runtime snapshot model, metrics aggregation, and display-ready view shaping.
 
 ## Exit Criteria
 - [ ] Snapshot model supports both JSON API and dashboard rendering.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 13.3 runtime snapshot interface | Partial | Finalize running/retrying/totals/rate-limit schemas and required fields | `O1.1` |
+| Sec. 13.4 human-readable status surface | Partial helpers only | Add display-ready shaping for countdowns, queue state, and health markers | `O2.2` |
+| Sec. 13.5 session metrics and token accounting | Partial | Implement full cumulative and per-issue accounting including throughput windows | `O2.1` |
+| Sec. 13.6 humanized event summaries | Not complete | Add sanitization and summary utilities with deterministic formatting | `O1.2`, `O3.1` |
+<!-- SPEC_GAP_MAP_END -->

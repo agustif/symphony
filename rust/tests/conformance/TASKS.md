@@ -41,3 +41,14 @@ Encode specification conformance behavior from SPEC sections 17 and 18.
 
 ## Exit Criteria
 - [ ] Conformance matrix fully implemented and passing.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 17.1 workflow and config parsing | Partial | Fill missing malformed-front-matter and precedence edge matrix cases | `C1.1`, `C1.2` |
+| Sec. 17.2 workspace manager and safety | Partial | Add root-escape, hook timeout, and cleanup conformance cases | `C2.2` |
+| Sec. 17.3 tracker client | Partial | Add contract cases for missing issue/state and normalized payload fields | `C3.1` |
+| Sec. 17.4 orchestrator dispatch/retry/reconcile | Partial | Complete candidate ordering, backoff cap, and non-active reconciliation matrix | `C2.1`, `C2.2` |
+| Sec. 17.5 app-server protocol client | Partial | Add handshake ordering, approval path, and timeout mapping cases | `C3.2` |
+<!-- SPEC_GAP_MAP_END -->

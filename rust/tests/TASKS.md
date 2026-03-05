@@ -34,3 +34,12 @@ Deliver complete validation coverage from unit tests to long-running stress prof
 
 ## Exit Criteria
 - [ ] All child suites green with required thresholds.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 17.1-17.8 validation matrix | Partial suite coverage | Complete matrix ownership map and threshold enforcement | `T2.1`, `T1.2` |
+| Sec. 18.1 required conformance gates | Partially enforced | Promote conformance/interleavings/soak + proofs to required CI checks | `T1.2` |
+| Sec. 18.3 operational validation | Partial soak and failure tests | Add production-like long-run profiles and incident assertions | `T1.1` |
+<!-- SPEC_GAP_MAP_END -->

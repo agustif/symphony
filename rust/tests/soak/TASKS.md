@@ -30,3 +30,13 @@ Validate long-duration behavior under sustained load and failure churn.
 
 ## Exit Criteria
 - [ ] Soak profiles pass without memory/resource regressions.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 8.1 poll loop durability | Partial | Add sustained mixed-workload soak with bounded queue growth assertions | `S1.1` |
+| Sec. 8.4 retry backoff durability | Partial | Add long-run retry churn profile with cap and fairness validation | `S1.2` |
+| Sec. 14 failure/recovery strategy under load | Partial | Add tracker/protocol instability injections with recovery time objectives | `S2.1`, `S2.2` |
+| Sec. 18.3 operational validation | Partial | Define production soak acceptance thresholds and artifact requirements | `S1.2` |
+<!-- SPEC_GAP_MAP_END -->

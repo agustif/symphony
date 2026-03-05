@@ -38,3 +38,13 @@ Own executable entrypoint, startup wiring, flags, and host lifecycle behavior.
 
 ## Exit Criteria
 - [ ] CLI provides production-grade startup and control behavior.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 6.1 startup config precedence | Implemented for core paths | Complete all documented CLI overrides including logs root and HTTP options | `C1.1` |
+| Sec. 13.7 optional HTTP extension wiring | Partial | Add explicit CLI switches and startup wiring for HTTP server lifecycle | `C2.1` |
+| Sec. 14.2 failure and recovery host behavior | Partial | Implement signal-safe graceful shutdown and exit code contract | `C2.2` |
+| Sec. 17.7 CLI and host lifecycle validation | Partial | Add integration tests for startup failure modes and controlled shutdown | `C3.1` |
+<!-- SPEC_GAP_MAP_END -->

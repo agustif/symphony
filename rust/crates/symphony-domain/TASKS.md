@@ -43,3 +43,13 @@ Own pure domain types, reducer transitions, and invariant validation.
 
 ## Exit Criteria
 - [ ] Reducer and invariants are deterministic and fully tested.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 4.1 entities and Sec. 4.2 normalization | Implemented for core runtime entities | Add serialization-stable diagnostics payloads for all transition errors | `D1.2` |
+| Sec. 7 issue orchestration state machine | Core transitions implemented | Add remaining transition rejection detail and structured violation payloads | `D2.2`, `D3.1` |
+| Sec. 7.4 idempotency and recovery rules | Determinism validated | Expand sequence/property tests to multi-event interleavings | `D3.2` |
+| Sec. 16.4 and Sec. 16.6 reference reducer behavior | Implemented in reducer | Close residual mismatch checks between reducer events and algorithm pseudocode | `D2.1`, `D2.2` |
+<!-- SPEC_GAP_MAP_END -->

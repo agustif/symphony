@@ -39,3 +39,14 @@ Own typed runtime configuration, defaults, env resolution, and validation.
 
 ## Exit Criteria
 - [x] Runtime can load and validate effective config deterministically.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 6.1 resolution precedence and env indirection | Implemented | Finish exhaustive CLI override precedence coverage across every field | `C2.1` |
+| Sec. 6.2 dynamic reload semantics | Partial via typed model | Verify runtime application semantics with config stamp/version transitions | `C2.1`, `C3.1` |
+| Sec. 6.3 dispatch preflight validation | Mostly implemented | Add explicit preflight error taxonomy mapping for operator diagnostics | `C2.2` |
+| Sec. 6.4 field cheat-sheet parity | Implemented in schema | Add generated spec-drift check between schema fields and SPEC examples | `C3.1` |
+| Sec. 15.3 secret handling requirements | Partial | Add redaction guarantees for any config-derived diagnostics paths | `C2.2` |
+<!-- SPEC_GAP_MAP_END -->

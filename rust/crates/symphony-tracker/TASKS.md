@@ -36,3 +36,13 @@ Own tracker abstraction contracts and normalized issue model.
 
 ## Exit Criteria
 - [ ] Adapter contract is stable and integration-ready.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 11.1 required tracker operations | Implemented | Add strict guarantees around operation ordering and missing issue semantics | `T1.1`, `T3.1` |
+| Sec. 11.3 normalized issue model | Partial | Finish blocker and assignee representation fidelity | `T1.2` |
+| Sec. 11.4 typed error model | Implemented core variants | Add explicit mapping tests for each transport/graphql/validation category | `T3.1` |
+| Sec. 11.5 tracker write boundary | Partial | Encode hard guardrail that runtime performs no tracker writes from this interface | `T2.1` |
+<!-- SPEC_GAP_MAP_END -->

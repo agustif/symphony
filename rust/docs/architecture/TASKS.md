@@ -36,3 +36,13 @@ Document runtime structure, data flow, invariants, and module boundaries.
 
 ## Exit Criteria
 - [ ] Architecture docs cover all crates once, without duplication.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 3 system topology and dependencies | Partial | Complete layered crate dependency and data-ownership diagrams | `A1.1` |
+| Sec. 7-8 orchestration flow | Partial | Provide end-to-end state transition narratives for dispatch/retry/reconcile | `A1.2` |
+| Sec. 9 and Sec. 15 safety model | Partial | Expand documented invariants for filesystem and hook boundaries | `A2.1` |
+| Sec. 14 failure model | Partial | Document failure classes to recovery actions and operator controls | `A2.2` |
+<!-- SPEC_GAP_MAP_END -->

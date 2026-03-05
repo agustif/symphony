@@ -28,3 +28,13 @@ Stress concurrent interleavings for retry, dispatch, and reconciliation correctn
 
 ## Exit Criteria
 - [ ] Deterministic race harness catches no invariant violations.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 7.4 idempotency under repeated events | Partial | Add duplicate/reordered event schedules for reducer/runtime integration | `I1.1` |
+| Sec. 8.3 concurrency slot safety | Partial | Add stress races proving no duplicate dispatch under slot pressure | `I1.1`, `I1.2` |
+| Sec. 8.5 reconcile with concurrent retry events | Partial | Add terminal/non-active transition races during retry pop/requeue | `I1.2` |
+| Sec. 14.2 recovery behavior under races | Partial | Add deterministic assertions for claim release and retry continuity | `I2.1` |
+<!-- SPEC_GAP_MAP_END -->

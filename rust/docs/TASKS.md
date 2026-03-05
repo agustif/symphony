@@ -41,3 +41,14 @@ Deliver complete, non-duplicative documentation for architecture, decisions, and
 ## Exit Criteria
 - [ ] All child task maps are complete.
 - [ ] Docs reviewed against implemented APIs.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 3 system overview and Sec. 4 model docs | Partial | Complete source-of-truth architecture map with ownership and update cadence | `D1.1` |
+| Sec. 5-6 workflow/config contract docs | Partial | Add implementation-synchronized examples and drift checks | `D1.2` |
+| Sec. 7-10 runtime and protocol docs | Partial | Document full transition and app-server behavior with failure branches | `D1.2`, `D2.1` |
+| Sec. 13-15 observability and operations docs | Partial | Finish operator runbook, incident playbook, and safety procedures | `D2.1` |
+| Sec. 18 rollout checklist | Partial | Publish cutover and rollback checklist tied to CI and soak evidence | `D2.2` |
+<!-- SPEC_GAP_MAP_END -->

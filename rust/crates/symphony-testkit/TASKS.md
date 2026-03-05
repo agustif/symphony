@@ -34,3 +34,13 @@ Own reusable fixtures, fakes, and deterministic harness utilities across test su
 
 ## Exit Criteria
 - [ ] Cross-suite tests share deterministic utilities from this crate.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 17 test matrix shared harness needs | Partial utilities implemented | Provide complete deterministic fixtures for config/workflow/runtime/protocol scenarios | `K1.1`, `K1.2` |
+| Sec. 17.4 orchestrator conformance replay | Partial | Add reusable interleaving schedule generators with invariant assertions | `K2.1`, `K2.2` |
+| Sec. 17.5 protocol client robustness tests | Partial | Add stream fuzzing helpers and malformed event generators | `K1.2`, `K2.2` |
+| Sec. 18.1 conformance gates | Partial | Expose one-call harness entrypoints used by CI required suites | `K2.2` |
+<!-- SPEC_GAP_MAP_END -->

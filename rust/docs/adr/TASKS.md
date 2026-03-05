@@ -36,3 +36,13 @@ Capture and maintain architecture decisions with rationale and consequences.
 
 ## Exit Criteria
 - [ ] Every major architectural choice is represented as an ADR.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 3.2 abstraction levels and boundaries | Partial | Write ADRs for reducer-first boundaries and adapter contracts | `R1.1`, `R1.3` |
+| Sec. 8 scheduler model and Sec. 16 algorithms | Partial | Record runtime scheduling, timer semantics, and concurrency assumptions | `R1.2` |
+| Sec. 14 recovery strategy | Partial | Capture restart, degradation, and intervention policy decisions | `R2.2` |
+| Sec. 15 security and safety constraints | Partial | Document secret handling and hook safety policy as enforceable ADRs | `R2.1` |
+<!-- SPEC_GAP_MAP_END -->

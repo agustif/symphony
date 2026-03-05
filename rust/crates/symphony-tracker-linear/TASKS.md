@@ -42,3 +42,13 @@ Implement Linear GraphQL adapter against `symphony-tracker` contract.
 
 ## Exit Criteria
 - [ ] Linear adapter fully satisfies tracker trait behavior.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 11.2 Linear query semantics | Partial | Finish candidate filtering semantics for project and active-state sets | `L2.1` |
+| Sec. 11.3 normalization rules | Partial | Complete blocker/labels/priority/timestamps normalization parity | `L3.1` |
+| Sec. 11.4 error handling contract | Mostly implemented | Add timeout/backoff transport policy boundaries and tests | `L1.1`, `L3.2` |
+| Sec. 17.3 tracker validation matrix | Partial | Expand adapter contract tests to include pagination edge and missing-node cases | `L3.2` |
+<!-- SPEC_GAP_MAP_END -->

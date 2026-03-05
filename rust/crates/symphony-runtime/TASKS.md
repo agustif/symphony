@@ -49,3 +49,14 @@ Own async orchestration loop, scheduling, dispatch, reconciliation, and retry ex
 
 ## Exit Criteria
 - [ ] Runtime behavior matches required orchestration semantics.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 8.1-8.5 poll, dispatch, retry, reconcile loops | Core scheduler implemented | Add exhaustive parity for slot starvation, retry replacement, and reconcile error branches | `R1.2`, `R2.1`, `R2.2` |
+| Sec. 8.6 startup terminal workspace cleanup | Partial | Implement startup sweep and ordering guarantees for terminal cleanup | `R2.2` |
+| Sec. 10 app-server integration and Sec. 12 prompt assembly | Partially integrated | Complete approval/input-required loop and full prompt context semantics | `R3.1`, `R3.2` |
+| Sec. 14 recovery behavior and restart semantics | Partial | Add restart recovery policy and persistent partial-state recovery hooks | `R2.2`, `R4.1` |
+| Sec. 16.2-16.6 reference algorithms | Mostly implemented | Add algorithm-to-code traceability assertions in tests | `R4.1` |
+<!-- SPEC_GAP_MAP_END -->

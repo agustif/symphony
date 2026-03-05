@@ -39,3 +39,13 @@ Own HTTP observability/control endpoints and serialization contracts.
 
 ## Exit Criteria
 - [x] HTTP contract is stable and covered by integration tests.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 13.7.2 JSON REST API | `/state`, `/issue`, `/refresh` implemented | Complete standardized error schema and retryable/unavailable error payloads | `H2.1` |
+| Sec. 13.7.1 human dashboard | Not complete | Implement root dashboard rendering with safe escaping and degraded states | `H1.1`, `H2.2` |
+| Sec. 13.3 snapshot surface contract | Partial passthrough | Ensure output fields match observability schema exactly | `H2.2`, `H3.1` |
+| Sec. 17.6 observability endpoint validation | Partial | Add conformance tests for endpoint payload completeness and backward compatibility | `H3.1` |
+<!-- SPEC_GAP_MAP_END -->

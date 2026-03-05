@@ -38,3 +38,13 @@ Own `WORKFLOW.md` discovery, parsing, reload metadata, and prompt extraction.
 
 ## Exit Criteria
 - [x] Workflow loader supports runtime-safe reload semantics.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 5.1 file discovery and path resolution | Implemented | Keep cross-platform path edge-case regression checks in CI | `W1.1` |
+| Sec. 5.2-5.3 markdown and front matter schema | Implemented | Add drift checks against future SPEC schema additions | `W1.2`, `W3.1` |
+| Sec. 5.4 prompt template extraction | Implemented | Add additional template fixture coverage for multiline placeholder blocks | `W3.1` |
+| Sec. 5.5 error surface | Implemented | Preserve typed error compatibility in integration tests | `W2.2`, `W3.1` |
+<!-- SPEC_GAP_MAP_END -->

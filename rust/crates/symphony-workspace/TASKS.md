@@ -38,3 +38,13 @@ Own workspace path safety, lifecycle hooks, and issue workspace cleanup.
 
 ## Exit Criteria
 - [x] Workspace manager enforces filesystem safety invariants.
+
+<!-- SPEC_GAP_MAP_START -->
+## SPEC Gap Map
+| SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
+| --- | --- | --- | --- |
+| Sec. 9.1-9.2 workspace layout/create/reuse | Implemented | Add long-path and filesystem-permission edge-case testing | `W3.1` |
+| Sec. 9.4 workspace hooks | Implemented timeout/truncation contract | Add richer hook failure taxonomy surfaced to runtime/observability | `W2.2` |
+| Sec. 9.5 safety invariants and Sec. 15.2 filesystem safety | Implemented | Add symlink race and canonicalization regression tests under stress | `W3.1` |
+| Sec. 17.2 workspace validation matrix | Mostly covered | Add integration coverage for before_remove failure and rollback semantics | `W3.1` |
+<!-- SPEC_GAP_MAP_END -->
