@@ -1,34 +1,61 @@
-# Verus Proof Plan
+# Verus Proof Program
 
-This directory tracks formal proof execution for Rust runtime invariants and CI integration points.
+This directory hosts formal proof artifacts for runtime invariants and safety properties.
 
-## Invariants
+## Invariant classes
 
-- No running issue without claim.
-- Single-running-session invariant per issue.
+- Running implies claimed.
+- Single running session entry per issue.
 - Retry attempt monotonicity.
-- Release correctness across terminal and non-active transitions.
+- No simultaneous running and retry state.
+- Workspace path/key safety boundaries.
 
-## CI execution model
+## Execution model
 
 | Workflow | Trigger | Purpose | Entrypoint |
 | --- | --- | --- | --- |
-| `rust-ci` | `pull_request`, `push` to `main`, `workflow_dispatch` | Fast correctness checks for workspace quality gates. | `cargo fmt`, `cargo clippy`, `cargo test` |
-| `rust-proofs` | `workflow_dispatch`, weekly `schedule` | Skeleton pipeline for Verus proofs and long suites. | `proofs/verus/scripts/run-proof-checks.sh`, `proofs/verus/scripts/run-long-suite.sh` |
+| `rust-ci` | `pull_request`, `push` to `main`, `workflow_dispatch` | Fast workspace quality gates. | `cargo fmt`, `cargo clippy`, `cargo test` |
+| `rust-proofs` | `workflow_dispatch`, weekly `schedule` | Proof checks and long-suite orchestration. | `proofs/verus/scripts/run-proof-checks.sh`, `proofs/verus/scripts/run-long-suite.sh` |
 
 ## Script contract
 
-The `scripts/` directory exposes executable placeholders that are safe to run in CI today.
+- `scripts/run-proof-checks.sh` executes real Verus checks when `verus` is available.
+- `scripts/run-proof-checks.sh` falls back to specification formatting validation when `verus` is absent.
+- `scripts/run-long-suite.sh` remains placeholder-only until long suites are fully wired.
 
-- Placeholders validate input shape.
-- Placeholders print planned production commands.
-- Placeholders fail only on invalid arguments.
+See `scripts/README.md` for detailed command behavior.
 
-See `scripts/README.md` for rollout steps and command details.
+## Traceability map
 
-## Near-term rollout
+| Proof module | Rust implementation anchor | SPEC anchor |
+| --- | --- | --- |
+| `specs/runtime_quick.rs` | `crates/symphony-domain/src/lib.rs` (`reduce`, `validate_invariants`) | State model and core invariant sections (`claimed`, `running`, `retry_attempts`) |
+| `specs/runtime_full.rs` | `crates/symphony-domain/src/lib.rs` (`Claim`, `MarkRunning`, `QueueRetry`, `Release` chains) | Lifecycle transition semantics and retry handling |
+| `specs/session_liveness.rs` | `crates/symphony-runtime/src/lib.rs` orchestration tick behavior | Dispatch/retry/release progress requirements |
+| `specs/workspace_safety.rs` | `crates/symphony-workspace/src/lifecycle.rs` (`sanitize_workspace_key`, root containment checks) | Workspace safety and path containment requirements |
 
-1. Add initial Verus specs for session and issue-state invariants.
-2. Wire `run-proof-checks.sh` to real `verus` invocations.
-3. Add machine-readable proof summaries for CI artifact upload.
-4. Expand long suites from placeholder mode to deterministic test entrypoints.
+## Placement rationale
+
+Verus proofs stay in `rust/proofs/verus/` by default.
+This keeps production crates independent of proof-only dependencies and toolchains.
+Traceability is preserved through the mapping table above and mirrored task links.
+
+## Verus printable reference
+
+- Local snapshot: `reference/verus-guide-print.md`
+- Snapshot metadata and usage: `reference/README.md`
+- Regeneration script: `scripts/sync-verus-guide-print.sh`
+
+Regenerate from upstream clone:
+
+```bash
+rust/proofs/verus/scripts/sync-verus-guide-print.sh /tmp/verus-upstream
+```
+
+The proof runner and proof updates should follow options and semantics documented in that snapshot, especially CLI flags and proof attribute guidance.
+
+## Next rollout gates
+
+1. Replace remaining proof stubs with executable Verus model definitions.
+2. Export machine-readable proof summaries as CI artifacts.
+3. Replace placeholder long-suite script paths with concrete suite runners.

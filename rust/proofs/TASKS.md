@@ -1,8 +1,8 @@
 # Formal Verification Program
 
 ## Status Snapshot (2026-03-05)
-- Completion: 25%
-- Done: task map defined and initial implementation batch merged.
+- Completion: 42%
+- Done: task map defined, implementation batch merged, printable-reference workflow added, and concrete Verus reducer/workspace proof modules added.
 - In Progress: hardening, edge-case conformance, and proof depth.
 - Remaining: full SPEC parity and production rollout gates.
 

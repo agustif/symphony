@@ -1,133 +1,188 @@
-// Verus proof specification for Symphony runtime invariants
-// This file defines the core safety properties that must hold for all orchestrator state transitions
+// Verus quick proof suite for core Symphony reducer invariants.
+// Model aligns with rust/crates/symphony-domain/src/lib.rs reducer semantics.
 
 #![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(dead_code)]
 
-use builtin::*;
-use builtin_macros::*;
+use vstd::{map::*, prelude::*, set::*};
 
 verus! {
 
-/// Core invariant: Running implies claimed
-/// If an issue appears in the running map, it must also appear in the claimed set
-pub spec fn running_implies_claimed(
-    claimed: Set<IssueId>,
-    running: Map<IssueId, RunningEntry>
-) -> bool {
-    forall |id: IssueId| running.contains_key(id) ==> claimed.contains(id)
+pub type IssueId = int;
+
+pub struct RunningEntry {}
+
+pub struct RetryEntry {
+    pub attempt: nat,
 }
 
-/// Core invariant: Single running entry per issue
-/// Each issue can have at most one entry in the running map
-pub spec fn single_running_entry(running: Map<IssueId, RunningEntry>) -> bool {
-    forall |id: IssueId| #![auto]
-        running.contains_key(id) ==> running.dom().count(|k| k == id) == 1
+pub struct OrchestratorState {
+    pub claimed: Set<IssueId>,
+    pub running: Map<IssueId, RunningEntry>,
+    pub retry_attempts: Map<IssueId, RetryEntry>,
 }
 
-/// Core invariant: Retry attempt monotonicity
-/// Retry attempts must be strictly increasing when requeued
-pub spec fn retry_attempt_monotonic(
-    retry_attempts: Map<IssueId, RetryEntry>,
-    new_attempts: Map<IssueId, RetryEntry>
-) -> bool {
-    forall |id: IssueId|
-        retry_attempts.contains_key(id) && new_attempts.contains_key(id)
-        ==> new_attempts[id].attempt > retry_attempts[id].attempt
+pub enum Event {
+    Claim(IssueId),
+    MarkRunning(IssueId),
+    QueueRetry { issue_id: IssueId, attempt: nat },
+    Release(IssueId),
 }
 
-/// Core invariant: No running and retrying simultaneously
-/// An issue cannot be both running and in the retry queue
-pub spec fn no_running_and_retrying(
-    running: Map<IssueId, RunningEntry>,
-    retry_attempts: Map<IssueId, RetryEntry>
-) -> bool {
-    forall |id: IssueId|
-        !(running.contains_key(id) && retry_attempts.contains_key(id))
+pub open spec fn orchestrator_invariants(state: OrchestratorState) -> bool {
+    &&& forall|id: IssueId| state.running.dom().contains(id) ==> state.claimed.contains(id)
+    &&& forall|id: IssueId| state.retry_attempts.dom().contains(id) ==> state.claimed.contains(id)
+    &&& forall|id: IssueId|
+            !(state.running.dom().contains(id) && state.retry_attempts.dom().contains(id))
+    &&& forall|id: IssueId|
+            state.retry_attempts.dom().contains(id) ==> state.retry_attempts[id].attempt > 0
 }
 
-/// Core invariant: Retry attempts must be positive
-/// All retry attempt numbers must be >= 1
-pub spec fn retry_attempts_positive(retry_attempts: Map<IssueId, RetryEntry>) -> bool {
-    forall |id: IssueId|
-        retry_attempts.contains_key(id) ==> retry_attempts[id].attempt >= 1
+pub open spec fn apply_event(state: OrchestratorState, event: Event) -> OrchestratorState {
+    match event {
+        Event::Claim(issue_id) => {
+            if state.claimed.contains(issue_id) {
+                state
+            } else {
+                OrchestratorState {
+                    claimed: state.claimed.insert(issue_id),
+                    running: state.running,
+                    retry_attempts: state.retry_attempts,
+                }
+            }
+        },
+        Event::MarkRunning(issue_id) => {
+            if !state.claimed.contains(issue_id) || state.running.dom().contains(issue_id) {
+                state
+            } else {
+                OrchestratorState {
+                    claimed: state.claimed,
+                    running: state.running.insert(issue_id, RunningEntry {}),
+                    retry_attempts: state.retry_attempts.remove(issue_id),
+                }
+            }
+        },
+        Event::QueueRetry { issue_id, attempt } => {
+            if !state.claimed.contains(issue_id)
+                || attempt == 0
+                || (state.retry_attempts.dom().contains(issue_id)
+                    && state.retry_attempts[issue_id].attempt >= attempt)
+            {
+                state
+            } else {
+                OrchestratorState {
+                    claimed: state.claimed,
+                    running: state.running.remove(issue_id),
+                    retry_attempts: state.retry_attempts.insert(issue_id, RetryEntry { attempt }),
+                }
+            }
+        },
+        Event::Release(issue_id) => {
+            if !state.claimed.contains(issue_id) {
+                state
+            } else {
+                OrchestratorState {
+                    claimed: state.claimed.remove(issue_id),
+                    running: state.running.remove(issue_id),
+                    retry_attempts: state.retry_attempts.remove(issue_id),
+                }
+            }
+        },
+    }
 }
 
-/// Combined orchestrator state invariants
-pub spec fn orchestrator_invariants(state: OrchestratorState) -> bool {
-    &&& running_implies_claimed(state.claimed, state.running)
-    &&& single_running_entry(state.running)
-    &&& no_running_and_retrying(state.running, state.retry_attempts)
-    &&& retry_attempts_positive(state.retry_attempts)
+pub proof fn lemma_claim_preserves_invariants(state: OrchestratorState, issue_id: IssueId)
+    requires
+        orchestrator_invariants(state),
+    ensures
+        orchestrator_invariants(apply_event(state, Event::Claim(issue_id))),
+{
 }
 
-/// Proof that reduce preserves invariants
-pub proof fn reduce_preserves_invariants(
+pub proof fn lemma_mark_running_preserves_invariants(state: OrchestratorState, issue_id: IssueId)
+    requires
+        orchestrator_invariants(state),
+    ensures
+        orchestrator_invariants(apply_event(state, Event::MarkRunning(issue_id))),
+{
+}
+
+pub proof fn lemma_queue_retry_preserves_invariants(
     state: OrchestratorState,
-    event: Event,
-    new_state: OrchestratorState,
-    commands: Vec<Command>
+    issue_id: IssueId,
+    attempt: nat,
 )
     requires
         orchestrator_invariants(state),
-        let (ns, cmds) = reduce(state, event),
-        new_state == ns,
-        commands == cmds,
     ensures
-        orchestrator_invariants(new_state),
+        orchestrator_invariants(apply_event(state, Event::QueueRetry { issue_id, attempt })),
 {
-    // TODO: Implement proof by case analysis on event type
-    // Each event handler must preserve all invariants
 }
 
-/// Proof that MarkRunning requires claim
-pub proof fn mark_running_requires_claim(
-    state: OrchestratorState,
-    issue_id: IssueId,
-    new_state: OrchestratorState,
-    commands: Vec<Command>
-)
+pub proof fn lemma_release_preserves_invariants(state: OrchestratorState, issue_id: IssueId)
+    requires
+        orchestrator_invariants(state),
+    ensures
+        orchestrator_invariants(apply_event(state, Event::Release(issue_id))),
+{
+}
+
+pub proof fn lemma_apply_event_preserves_invariants(state: OrchestratorState, event: Event)
+    requires
+        orchestrator_invariants(state),
+    ensures
+        orchestrator_invariants(apply_event(state, event)),
+{
+    match event {
+        Event::Claim(issue_id) => {
+            lemma_claim_preserves_invariants(state, issue_id);
+        },
+        Event::MarkRunning(issue_id) => {
+            lemma_mark_running_preserves_invariants(state, issue_id);
+        },
+        Event::QueueRetry { issue_id, attempt } => {
+            lemma_queue_retry_preserves_invariants(state, issue_id, attempt);
+        },
+        Event::Release(issue_id) => {
+            lemma_release_preserves_invariants(state, issue_id);
+        },
+    }
+}
+
+pub proof fn lemma_mark_running_without_claim_is_noop(state: OrchestratorState, issue_id: IssueId)
     requires
         orchestrator_invariants(state),
         !state.claimed.contains(issue_id),
-        let (ns, cmds) = reduce(state, Event::MarkRunning(issue_id)),
-        new_state == ns,
-        commands == cmds,
     ensures
-        new_state == state,
-        commands.len() == 1,
-        commands[0] == Command::TransitionRejected {
-            issue_id: issue_id,
-            reason: TransitionRejection::MissingClaim,
-        },
+        apply_event(state, Event::MarkRunning(issue_id)) == state,
 {
-    // Proof that unclaimed issues cannot be marked as running
 }
 
-/// Proof that release clears all tracking
-pub proof fn release_clears_tracking(
+pub proof fn lemma_release_clears_tracking_for_claimed_issue(
     state: OrchestratorState,
     issue_id: IssueId,
-    new_state: OrchestratorState,
-    commands: Vec<Command>
 )
     requires
         orchestrator_invariants(state),
         state.claimed.contains(issue_id),
-        let (ns, cmds) = reduce(state, Event::Release(issue_id)),
-        new_state == ns,
-        commands == cmds,
     ensures
-        !new_state.claimed.contains(issue_id),
-        !new_state.running.contains_key(issue_id),
-        !new_state.retry_attempts.contains_key(issue_id),
+        !apply_event(state, Event::Release(issue_id)).claimed.contains(issue_id),
+        !apply_event(state, Event::Release(issue_id)).running.dom().contains(issue_id),
+        !apply_event(state, Event::Release(issue_id)).retry_attempts.dom().contains(issue_id),
 {
-    // Proof that release removes issue from all tracking structures
 }
 
-fn main() {
-    // Placeholder for Verus verification entry point
+pub proof fn lemma_queue_retry_requires_positive_attempt(
+    state: OrchestratorState,
+    issue_id: IssueId,
+)
+    requires
+        orchestrator_invariants(state),
+        state.claimed.contains(issue_id),
+    ensures
+        apply_event(state, Event::QueueRetry { issue_id, attempt: 0 }) == state,
+{
 }
 
-}
+fn main() {}
+
+} // verus!

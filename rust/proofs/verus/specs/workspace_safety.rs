@@ -1,151 +1,145 @@
-// Verus proof specification for workspace safety invariants
-// Proves that workspace operations maintain safety boundaries
+// Verus proof suite for workspace key/path safety contracts.
+// Model aligns with rust/crates/symphony-workspace/src/lifecycle.rs.
 
 #![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(dead_code)]
 
-use builtin::*;
-use builtin_macros::*;
+use vstd::{prelude::*, seq::*};
 
 verus! {
 
-/// Workspace path invariant: Path must be within root
-pub spec fn workspace_path_within_root(
-    workspace_root: Seq<char>,
-    workspace_path: Seq<char>
-) -> bool {
-    // workspace_path must have workspace_root as a prefix
-    workspace_path.len() >= workspace_root.len()
-        && workspace_root == workspace_path.subsequence(0, workspace_root.len())
+pub type PathText = Seq<char>;
+
+pub open spec fn is_safe_key_char(c: char) -> bool {
+    (c >= 'a' && c <= 'z')
+        || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9')
+        || c == '.'
+        || c == '_'
+        || c == '-'
 }
 
-/// Workspace key invariant: Key must be sanitized
-pub spec fn workspace_key_sanitized(key: Seq<char>) -> bool {
-    forall |i: int| 0 <= i < key.len() ==> {
-        let c = key[i];
-        (c >= 'a' && c <= 'z')
-            || (c >= 'A' && c <= 'Z')
-            || (c >= '0' && c <= '9')
-            || c == '.' || c == '_' || c == '-'
+pub open spec fn workspace_key_sanitized(key: PathText) -> bool {
+    forall|i: int| 0 <= i < key.len() ==> is_safe_key_char(key[i])
+}
+
+pub open spec fn sanitize_workspace_key(identifier: PathText) -> PathText {
+    if identifier.len() == 0 {
+        seq!['_']
+    } else {
+        Seq::new(identifier.len(), |i: int| if is_safe_key_char(identifier[i]) {
+            identifier[i]
+        } else {
+            '_'
+        })
     }
 }
 
-/// Proof that workspace path creation maintains containment
-pub proof fn workspace_creation_safe(
-    root: Seq<char>,
-    identifier: Seq<char>,
-    workspace_path: Seq<char>
+pub open spec fn root_prefix(root: PathText, candidate: PathText) -> bool {
+    &&& root.len() <= candidate.len()
+    &&& forall|i: int| 0 <= i < root.len() ==> root[i] == candidate[i]
+}
+
+pub open spec fn join_workspace_path(root: PathText, key: PathText) -> PathText {
+    if root.len() == 0 {
+        key
+    } else {
+        root + seq!['/'] + key
+    }
+}
+
+pub open spec fn workspace_key_allowed_for_path(key: PathText) -> bool {
+    &&& workspace_key_sanitized(key)
+    &&& key.len() > 0
+    &&& key != seq!['.']
+    &&& key != seq!['.', '.']
+}
+
+pub proof fn lemma_sanitize_produces_sanitized_key(identifier: PathText)
+    ensures
+        workspace_key_sanitized(sanitize_workspace_key(identifier)),
+{
+    if identifier.len() == 0 {
+    } else {
+        assert forall|i: int|
+            0 <= i < sanitize_workspace_key(identifier).len() implies
+                is_safe_key_char(sanitize_workspace_key(identifier)[i]) by {
+                if is_safe_key_char(identifier[i]) {
+                } else {
+                }
+            };
+    }
+}
+
+pub proof fn lemma_sanitize_key_non_empty(identifier: PathText)
+    ensures
+        sanitize_workspace_key(identifier).len() > 0,
+{
+    if identifier.len() == 0 {
+        assert(sanitize_workspace_key(identifier).len() == 1);
+    } else {
+        assert(sanitize_workspace_key(identifier).len() == identifier.len());
+        assert(identifier.len() > 0);
+    }
+}
+
+pub proof fn lemma_sanitize_removes_path_separator(identifier: PathText)
+    ensures
+        forall|i: int|
+            0 <= i < sanitize_workspace_key(identifier).len() ==> sanitize_workspace_key(identifier)[i] != '/',
+{
+    lemma_sanitize_produces_sanitized_key(identifier);
+    assert forall|i: int|
+        0 <= i < sanitize_workspace_key(identifier).len() implies sanitize_workspace_key(identifier)[i] != '/' by {
+            assert(is_safe_key_char(sanitize_workspace_key(identifier)[i]));
+        };
+}
+
+pub proof fn lemma_join_workspace_path_keeps_root_prefix(root: PathText, key: PathText)
+    ensures
+        root_prefix(root, join_workspace_path(root, key)),
+{
+    assert(root.len() <= join_workspace_path(root, key).len());
+    assert forall|i: int| 0 <= i < root.len() ==> root[i] == join_workspace_path(root, key)[i] by {
+        if root.len() == 0 {
+        } else {
+        }
+    };
+}
+
+pub proof fn lemma_dot_keys_rejected_by_workspace_policy()
+    ensures
+        !workspace_key_allowed_for_path(seq!['.']),
+        !workspace_key_allowed_for_path(seq!['.', '.']),
+{
+}
+
+pub proof fn lemma_sanitized_key_is_root_contained_when_allowed(
+    root: PathText,
+    identifier: PathText,
+)
+    ensures
+        workspace_key_allowed_for_path(sanitize_workspace_key(identifier))
+            ==> root_prefix(root, join_workspace_path(root, sanitize_workspace_key(identifier))),
+{
+    lemma_sanitize_produces_sanitized_key(identifier);
+    lemma_sanitize_key_non_empty(identifier);
+    lemma_join_workspace_path_keeps_root_prefix(root, sanitize_workspace_key(identifier));
+}
+
+pub proof fn lemma_worker_cwd_descendant_is_contained(
+    root: PathText,
+    key: PathText,
+    cwd_suffix: PathText,
 )
     requires
-        workspace_key_sanitized(sanitize_identifier(identifier)),
-        workspace_path == join_path(root, sanitize_identifier(identifier)),
+        workspace_key_allowed_for_path(key),
     ensures
-        workspace_path_within_root(root, workspace_path),
+        root_prefix(root, join_workspace_path(join_workspace_path(root, key), cwd_suffix)),
 {
-    // Proof that constructed workspace path stays within root
+    lemma_join_workspace_path_keeps_root_prefix(root, key);
+    lemma_join_workspace_path_keeps_root_prefix(join_workspace_path(root, key), cwd_suffix);
 }
 
-/// Proof that sanitize_identifier produces valid keys
-pub proof fn sanitize_produces_valid_keys(identifier: Seq<char>)
-    ensures
-        workspace_key_sanitized(sanitize_identifier(identifier)),
-{
-    // Proof that sanitization replaces all invalid characters with '_'
-}
+fn main() {}
 
-/// Proof that agent launch uses correct workspace
-pub proof fn agent_launch_uses_workspace(
-    workspace_root: Seq<char>,
-    issue_identifier: Seq<char>,
-    cwd: Seq<char>
-)
-    requires
-        workspace_key_sanitized(sanitize_identifier(issue_identifier)),
-        cwd == join_path(workspace_root, sanitize_identifier(issue_identifier)),
-    ensures
-        workspace_path_within_root(workspace_root, cwd),
-{
-    // Proof that agent process cwd is within workspace root
-}
-
-/// Proof that path traversal is prevented
-pub proof fn path_traversal_prevented(
-    workspace_root: Seq<char>,
-    malicious_identifier: Seq<char>
-)
-    requires
-        malicious_identifier.contains(".."),
-    ensures
-        let sanitized = sanitize_identifier(malicious_identifier);
-        !sanitized.contains(".."),
-        let workspace_path = join_path(workspace_root, sanitized);
-        workspace_path_within_root(workspace_root, workspace_path),
-{
-    // Proof that ".." sequences are sanitized away
-}
-
-/// Proof that absolute path outside root is rejected
-pub proof fn absolute_outside_root_rejected(
-    workspace_root: Seq<char>,
-    absolute_path: Seq<char>
-)
-    requires
-        absolute_path.len() > 0,
-        absolute_path[0] == '/', // Unix absolute path
-        !workspace_path_within_root(workspace_root, absolute_path),
-    ensures
-        !is_valid_workspace_path(workspace_root, absolute_path),
-{
-    // Proof that paths outside workspace root are rejected
-}
-
-/// Proof that symlink escape is prevented
-pub proof fn symlink_escape_prevented(
-    workspace_root: Seq<char>,
-    workspace_path: Seq<char>,
-    symlink_target: Seq<char>
-)
-    requires
-        workspace_path_within_root(workspace_root, workspace_path),
-        symlink_target.len() > 0,
-        symlink_target[0] == '/', // Absolute symlink
-        !workspace_path_within_root(workspace_root, symlink_target),
-    ensures
-        !is_safe_symlink(workspace_root, workspace_path, symlink_target),
-{
-    // Proof that symlinks pointing outside root are unsafe
-}
-
-/// Combined workspace safety specification
-pub spec fn workspace_safety_invariant(
-    workspace_root: Seq<char>,
-    workspace_path: Seq<char>,
-    workspace_key: Seq<char>
-) -> bool {
-    &&& workspace_key_sanitized(workspace_key)
-    &&& workspace_path_within_root(workspace_root, workspace_path)
-    &&& workspace_path == join_path(workspace_root, workspace_key)
-}
-
-/// Proof that workspace operations preserve safety
-pub proof fn workspace_operations_preserve_safety(
-    workspace_root: Seq<char>,
-    identifier: Seq<char>,
-    workspace_path: Seq<char>,
-    workspace_key: Seq<char>
-)
-    requires
-        workspace_key == sanitize_identifier(identifier),
-        workspace_path == join_path(workspace_root, workspace_key),
-    ensures
-        workspace_safety_invariant(workspace_root, workspace_path, workspace_key),
-{
-    // Proof that workspace creation maintains all safety invariants
-}
-
-fn main() {
-    // Placeholder for Verus verification entry point
-}
-
-}
+} // verus!

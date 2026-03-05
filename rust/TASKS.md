@@ -1,8 +1,8 @@
 # Rust Reimplementation Master Plan
 
 ## Status Snapshot (2026-03-05)
-- Completion: 55%
-- Done: parallel implementation batch merged across domain/runtime, config/workflow/workspace, tracker/linear, protocol/http/cli, docs, CI/proofs, and test scaffolds.
+- Completion: 59%
+- Done: parallel implementation batch merged across domain/runtime, config/workflow/workspace, tracker/linear, protocol/http/cli, docs, CI/proofs, test scaffolds, and concrete Verus proof module rewrites.
 - In Progress: spec-parity hardening, deeper orchestration behaviors, and formal proofs.
 - Remaining: full production-grade completion gates from conformance through rollout.
 

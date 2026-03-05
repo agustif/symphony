@@ -3,12 +3,18 @@ set -euo pipefail
 
 # Run Verus proof checks for Symphony runtime invariants
 # Usage: run-proof-checks.sh [--profile quick|full]
+#
+# Verus CLI note:
+# Use --rlimit (not --time-limit). Reference:
+# - proofs/verus/reference/verus-guide-print.md
+# - source chapter: reference-attributes.md
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROOF_DIR="$(dirname "$SCRIPT_DIR")"
 RUST_ROOT="$(cd "$PROOF_DIR/../.." && pwd)"
 
 profile="quick"
+verus_bin="${VERUS_BIN:-verus}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -46,11 +52,12 @@ echo "Proof dir: $PROOF_DIR"
 echo ""
 
 # Check if verus is available
-if ! command -v verus &> /dev/null; then
+if ! command -v "$verus_bin" &> /dev/null; then
     echo "WARNING: verus not found in PATH" >&2
     echo "Proof checks will run in specification-only mode" >&2
     echo ""
     echo "To install Verus, see: https://github.com/verus-lang/verus"
+    echo "Reference snapshot: $PROOF_DIR/reference/verus-guide-print.md"
     echo ""
     
     # Still validate that proof files are syntactically correct
@@ -81,9 +88,9 @@ if [[ "$profile" == "quick" ]]; then
     echo "  - No running and retrying simultaneously"
     echo ""
     
-    verus "$PROOF_DIR/specs/runtime_quick.rs" \
-        --crate-name symphony-proofs-quick \
-        --time-limit 300 \
+    "$verus_bin" "$PROOF_DIR/specs/runtime_quick.rs" \
+        --crate-name symphony_proofs_quick \
+        --rlimit 300 \
         2>&1 | tee /tmp/verus-quick.log
     
     if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
@@ -96,9 +103,9 @@ if [[ "$profile" == "quick" ]]; then
     fi
 else
     echo "Phase 1: Core Runtime Invariants"
-    verus "$PROOF_DIR/specs/runtime_quick.rs" \
-        --crate-name symphony-proofs-quick \
-        --time-limit 300 \
+    "$verus_bin" "$PROOF_DIR/specs/runtime_quick.rs" \
+        --crate-name symphony_proofs_quick \
+        --rlimit 300 \
         2>&1 | tee /tmp/verus-quick.log
     
     [[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
@@ -111,9 +118,9 @@ else
     echo "  - Terminal state handling"
     echo ""
     
-    verus "$PROOF_DIR/specs/runtime_full.rs" \
-        --crate-name symphony-proofs-full \
-        --time-limit 600 \
+    "$verus_bin" "$PROOF_DIR/specs/runtime_full.rs" \
+        --crate-name symphony_proofs_full \
+        --rlimit 600 \
         2>&1 | tee /tmp/verus-full.log
     
     [[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
@@ -126,9 +133,9 @@ else
     echo "  - Terminal cleanup"
     echo ""
     
-    verus "$PROOF_DIR/specs/session_liveness.rs" \
-        --crate-name symphony-proofs-liveness \
-        --time-limit 600 \
+    "$verus_bin" "$PROOF_DIR/specs/session_liveness.rs" \
+        --crate-name symphony_proofs_liveness \
+        --rlimit 600 \
         2>&1 | tee /tmp/verus-liveness.log
     
     [[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
@@ -140,9 +147,9 @@ else
     echo "  - Path traversal prevention"
     echo ""
     
-    verus "$PROOF_DIR/specs/workspace_safety.rs" \
-        --crate-name symphony-proofs-workspace \
-        --time-limit 300 \
+    "$verus_bin" "$PROOF_DIR/specs/workspace_safety.rs" \
+        --crate-name symphony_proofs_workspace \
+        --rlimit 300 \
         2>&1 | tee /tmp/verus-workspace.log
     
     [[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
