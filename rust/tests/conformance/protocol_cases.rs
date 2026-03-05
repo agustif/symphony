@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 use symphony_agent_protocol::{
-    LineOrigin, ProtocolError, StreamLineParser, decode_line, decode_stdout_line, stderr_message,
-    stdout_event,
+    LineOrigin, ProtocolError, ProtocolSequenceError, StreamLineParser, decode_line,
+    decode_stdout_line, stderr_message, stdout_event, validate_startup_turn_sequence,
 };
 use symphony_testkit::{protocol_stderr_line, protocol_stdout_line};
 
@@ -87,4 +87,29 @@ fn protocol_stream_keeps_interleaved_stdout_and_stderr_state_isolated() {
         .and_then(stdout_event)
         .expect("stdout event should decode after completion");
     assert_eq!(event.method, "turn.start");
+}
+
+#[test]
+fn protocol_handshake_sequence_accepts_startup_then_turn_lifecycle() {
+    let methods = [
+        "initialize",
+        "initialized",
+        "session/new",
+        "turn/start",
+        "turn/completed",
+    ];
+    assert!(validate_startup_turn_sequence(methods).is_ok());
+}
+
+#[test]
+fn protocol_handshake_sequence_rejects_turn_before_session_start() {
+    let methods = ["initialize", "initialized", "turn/start"];
+    let error = validate_startup_turn_sequence(methods).expect_err("must fail");
+    assert_eq!(
+        error,
+        ProtocolSequenceError::UnexpectedStartupMethod {
+            expected: "thread/start or session/new",
+            observed: "turn/start".to_owned(),
+        }
+    );
 }

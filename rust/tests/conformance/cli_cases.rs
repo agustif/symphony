@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use symphony_config::{CliOverrides, EnvProvider, apply_cli_overrides, from_front_matter_with_env};
+use symphony_config::{
+    CliOverrides, ConfigError, EnvProvider, apply_cli_overrides, from_front_matter_with_env,
+};
 use symphony_workflow::parse as parse_workflow;
 
 #[derive(Debug, Default)]
@@ -29,6 +31,14 @@ impl EnvProvider for TestEnv {
 fn config_from_workflow(workflow: &str, env: &dyn EnvProvider) -> symphony_config::RuntimeConfig {
     let parsed = parse_workflow(workflow).expect("workflow should parse");
     from_front_matter_with_env(&parsed.front_matter, env).expect("front matter should build config")
+}
+
+fn try_config_from_workflow(
+    workflow: &str,
+    env: &dyn EnvProvider,
+) -> Result<symphony_config::RuntimeConfig, ConfigError> {
+    let parsed = parse_workflow(workflow).expect("workflow should parse");
+    from_front_matter_with_env(&parsed.front_matter, env)
 }
 
 #[test]
@@ -83,4 +93,48 @@ Run tests.
 
     assert_eq!(applied.polling.interval_ms, 22_000);
     assert_eq!(applied.tracker.api_key.as_deref(), Some("env-token"));
+}
+
+#[test]
+fn linear_tracker_env_indirection_applies_default_endpoint() {
+    let env = TestEnv::from_entries(&[("LINEAR_API_KEY", "env-token")]);
+    let config = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+---
+Run tests.
+"#,
+        &env,
+    );
+
+    assert_eq!(config.tracker.endpoint, "https://api.linear.app/graphql");
+    assert_eq!(config.tracker.api_key.as_deref(), Some("env-token"));
+}
+
+#[test]
+fn invalid_config_field_type_is_rejected() {
+    let env = TestEnv::from_entries(&[("LINEAR_API_KEY", "env-token")]);
+    let error = try_config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+polling:
+  interval_ms: {}
+---
+Run tests.
+"#,
+        &env,
+    )
+    .expect_err("invalid polling interval type should fail");
+
+    assert_eq!(
+        error,
+        ConfigError::InvalidType {
+            field: "polling.interval_ms",
+            expected: "integer or string integer",
+        }
+    );
 }

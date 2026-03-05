@@ -1,8 +1,11 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use symphony_config::RuntimeConfig;
-use symphony_domain::{Command, IssueId, RunningEntry};
-use symphony_runtime::{RetryPolicy, Runtime, WorkerExit};
+use symphony_domain::{Command, Event, IssueId, OrchestratorState, RetryEntry, RunningEntry};
+use symphony_runtime::{
+    RetryPolicy, Runtime, WorkerExit, non_active_reconciliation_ids, terminal_reconciliation_ids,
+};
 use symphony_testkit::FakeTracker;
 use symphony_tracker::{TrackerIssue, TrackerState};
 
@@ -104,4 +107,93 @@ async fn exponential_backoff_conformance() {
         res_capped.retry_schedule.unwrap().delay,
         Duration::from_secs(100)
     );
+}
+
+#[tokio::test]
+async fn candidate_selection_skips_claimed_running_and_retrying_issues() {
+    let issue_claimed = TrackerIssue::new(IssueId("1".into()), "SYM-1", TrackerState::new("Todo"));
+    let issue_running = TrackerIssue::new(IssueId("2".into()), "SYM-2", TrackerState::new("Todo"));
+    let issue_retrying = TrackerIssue::new(IssueId("3".into()), "SYM-3", TrackerState::new("Todo"));
+    let issue_available =
+        TrackerIssue::new(IssueId("4".into()), "SYM-4", TrackerState::new("Todo"));
+
+    let tracker = Arc::new(FakeTracker::with_default_issues(vec![
+        issue_claimed.clone(),
+        issue_running.clone(),
+        issue_retrying.clone(),
+        issue_available.clone(),
+    ]));
+    let runtime = Runtime::new(tracker);
+
+    runtime
+        .update_agent(Event::Claim(issue_claimed.id.clone()))
+        .await
+        .expect("claim should apply");
+    runtime
+        .setup_running(issue_running.id.clone(), RunningEntry::default())
+        .await;
+    runtime
+        .setup_running(issue_retrying.id.clone(), RunningEntry::default())
+        .await;
+    runtime
+        .handle_worker_exit(
+            issue_retrying.id.clone(),
+            WorkerExit::Continuation,
+            &RetryPolicy::default(),
+        )
+        .await
+        .expect("retry should apply");
+
+    let mut config = RuntimeConfig::default();
+    config.agent.max_concurrent_agents = 10;
+
+    let tick = runtime
+        .run_tick(&config)
+        .await
+        .expect("tick should succeed");
+    assert_eq!(tick.commands, vec![Command::Dispatch(issue_available.id)]);
+}
+
+#[test]
+fn terminal_reconciliation_releases_claimed_running_and_retrying() {
+    let issue_terminal = IssueId("SYM-10".into());
+    let issue_other = IssueId("SYM-20".into());
+
+    let mut state = OrchestratorState::default();
+    state.claimed.insert(issue_terminal.clone());
+    state.claimed.insert(issue_other.clone());
+    state
+        .running
+        .insert(issue_terminal.clone(), RunningEntry::default());
+    state
+        .retry_attempts
+        .insert(issue_terminal.clone(), RetryEntry { attempt: 2 });
+
+    let terminal_ids = HashSet::from([issue_terminal.clone()]);
+    let releases = terminal_reconciliation_ids(&state, &terminal_ids);
+
+    assert_eq!(releases, vec![issue_terminal]);
+}
+
+#[test]
+fn non_active_reconciliation_preserves_running_retrying_and_active_candidates() {
+    let issue_stale = IssueId("SYM-11".into());
+    let issue_running = IssueId("SYM-12".into());
+    let issue_retrying = IssueId("SYM-13".into());
+    let issue_active_candidate = IssueId("SYM-14".into());
+
+    let mut state = OrchestratorState::default();
+    state.claimed.insert(issue_stale.clone());
+    state.claimed.insert(issue_running.clone());
+    state.claimed.insert(issue_retrying.clone());
+    state.claimed.insert(issue_active_candidate.clone());
+    state.running.insert(issue_running, RunningEntry::default());
+    state
+        .retry_attempts
+        .insert(issue_retrying, RetryEntry { attempt: 1 });
+
+    let active_ids = HashSet::from([issue_active_candidate]);
+    let stale = non_active_reconciliation_ids(&state, &active_ids);
+
+    assert_eq!(stale, vec![issue_stale]);
 }

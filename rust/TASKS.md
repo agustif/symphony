@@ -1,8 +1,8 @@
 # Rust Reimplementation Master Plan
 
 ## Status Snapshot (2026-03-05)
-- Completion: 61%
-- Done: parallel implementation batch merged across domain/runtime, config/workflow/workspace, tracker/linear, protocol/http/cli, docs, CI/proofs, test scaffolds, concrete Verus proof module rewrites, and proof CI installation/guard wiring.
+- Completion: 63%
+- Done: parallel implementation batch merged across domain/runtime, config/workflow/workspace, tracker/linear, protocol/http/cli, docs, CI/proofs, test scaffolds, concrete Verus proof module rewrites, proof CI installation/guard wiring, and explicit suite-gate CI jobs.
 - In Progress: spec-parity hardening, deeper orchestration behaviors, and formal proofs.
 - Remaining: full production-grade completion gates from conformance through rollout.
 
@@ -74,7 +74,7 @@ Deliver a production-grade Rust runtime for Symphony from first principles, with
 ## Epic F: CI and Operational Readiness
 ### Task F.1: CI matrix
 - [x] Subtask F.1.1: Add workspace fmt/clippy/test jobs.
-- [ ] Subtask F.1.2: Add conformance/interleaving/soak jobs.
+- [x] Subtask F.1.2: Add conformance/interleaving/soak jobs.
 - [x] Subtask F.1.3: Add Verus proof job.
 
 ### Task F.2: Operational readiness
