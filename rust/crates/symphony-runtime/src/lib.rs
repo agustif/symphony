@@ -160,7 +160,10 @@ impl<T: TrackerClient> Runtime<T> {
             left.identifier.cmp(&right.identifier)
         });
 
-        let mut candidate_ids: Vec<IssueId> = candidate_issues.iter().map(|issue| issue.id.clone()).collect();
+        let candidate_ids: Vec<IssueId> = candidate_issues
+            .iter()
+            .map(|issue| issue.id.clone())
+            .collect();
         let candidate_set: HashSet<IssueId> = candidate_ids.iter().cloned().collect();
 
         let mut state_guard = self.state.lock().await;
@@ -204,10 +207,10 @@ impl<T: TrackerClient> Runtime<T> {
         let mut running_by_state: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
         for issue in &issues {
-            if state.running.contains_key(&issue.id) {
-                if let Some(state_key) = issue.state.normalized_key() {
-                    *running_by_state.entry(state_key).or_insert(0) += 1;
-                }
+            if state.running.contains_key(&issue.id)
+                && let Some(state_key) = issue.state.normalized_key()
+            {
+                *running_by_state.entry(state_key).or_insert(0) += 1;
             }
         }
 
@@ -223,16 +226,15 @@ impl<T: TrackerClient> Runtime<T> {
             }
 
             let issue = issues.iter().find(|i| i.id == issue_id).unwrap();
-            if let Some(state_key) = issue.state.normalized_key() {
-                if let Some(&max_for_state) =
+            if let Some(state_key) = issue.state.normalized_key()
+                && let Some(&max_for_state) =
                     config.agent.max_concurrent_agents_by_state.get(&state_key)
-                {
-                    let current_for_state = running_by_state.get(&state_key).copied().unwrap_or(0);
-                    if current_for_state >= max_for_state as usize {
-                        continue;
-                    }
-                    *running_by_state.entry(state_key).or_insert(0) += 1;
+            {
+                let current_for_state = running_by_state.get(&state_key).copied().unwrap_or(0);
+                if current_for_state >= max_for_state as usize {
+                    continue;
                 }
+                *running_by_state.entry(state_key).or_insert(0) += 1;
             }
 
             state = apply_event(state, Event::Claim(issue_id.clone()), &mut commands)?;
@@ -307,10 +309,7 @@ impl<T: TrackerClient> Runtime<T> {
         })
     }
 
-    pub async fn update_agent(
-        &self,
-        event: Event,
-    ) -> Result<(), RuntimeError> {
+    pub async fn update_agent(&self, event: Event) -> Result<(), RuntimeError> {
         let mut state_guard = self.state.lock().await;
         let mut state = state_guard.clone();
         let mut commands = Vec::new();
@@ -328,6 +327,7 @@ impl<T: TrackerClient> Runtime<T> {
 
     /// Handle agent protocol updates with typed parameters
     /// Integrates protocol messages into runtime state with thread-safe updates
+    #[allow(clippy::too_many_arguments)]
     pub async fn handle_protocol_update(
         &self,
         issue_id: IssueId,
@@ -367,6 +367,13 @@ impl<T: TrackerClient> Runtime<T> {
         self.state.lock().await.clone()
     }
 
+    /// Sets up an issue as claimed and running. For testing purposes.
+    pub async fn setup_running(&self, issue_id: IssueId, entry: symphony_domain::RunningEntry) {
+        let mut state = self.state.lock().await;
+        state.claimed.insert(issue_id.clone());
+        state.running.insert(issue_id, entry);
+    }
+
     pub async fn run_poll_loop(
         &self,
         config: std::sync::Arc<tokio::sync::RwLock<RuntimeConfig>>,
@@ -375,7 +382,9 @@ impl<T: TrackerClient> Runtime<T> {
     ) {
         let initial_config = config.read().await.clone();
         let mut current_version = initial_config.version;
-        let mut interval = tokio::time::interval(Duration::from_millis(initial_config.polling.interval_ms.max(100)));
+        let mut interval = tokio::time::interval(Duration::from_millis(
+            initial_config.polling.interval_ms.max(100),
+        ));
 
         tracing::info!(
             poll_interval_ms = initial_config.polling.interval_ms,
@@ -506,6 +515,14 @@ fn apply_event(
 ) -> Result<OrchestratorState, InvariantError> {
     let (next_state, mut emitted) = reduce(state, event);
     validate_invariants(&next_state)?;
+
+    // Check for rejected transitions and convert to error
+    for cmd in &emitted {
+        if let Command::TransitionRejected { reason, .. } = cmd {
+            return Err(InvariantError::from(reason.clone()));
+        }
+    }
+
     commands.append(&mut emitted);
     Ok(next_state)
 }
@@ -548,7 +565,11 @@ mod tests {
         TrackerIssue {
             id: issue(id),
             identifier: id.to_owned(),
+            title: String::new(),
             state: TrackerState::new("Todo"),
+            priority: None,
+            description: None,
+            created_at: None,
         }
     }
 
@@ -851,12 +872,20 @@ mod tests {
                 TrackerIssue {
                     id: issue("SYM-4"),
                     identifier: "SYM-4".to_owned(),
+                    title: String::new(),
                     state: TrackerState::new("In Progress"),
+                    priority: None,
+                    description: None,
+                    created_at: None,
                 },
                 TrackerIssue {
                     id: issue("SYM-5"),
                     identifier: "SYM-5".to_owned(),
+                    title: String::new(),
                     state: TrackerState::new("In Progress"),
+                    priority: None,
+                    description: None,
+                    created_at: None,
                 },
             ])
             .await;
@@ -864,8 +893,14 @@ mod tests {
 
         let mut config = RuntimeConfig::default();
         config.agent.max_concurrent_agents = 4;
-        config.agent.max_concurrent_agents_by_state.insert("todo".to_owned(), 2);
-        config.agent.max_concurrent_agents_by_state.insert("in progress".to_owned(), 1);
+        config
+            .agent
+            .max_concurrent_agents_by_state
+            .insert("todo".to_owned(), 2);
+        config
+            .agent
+            .max_concurrent_agents_by_state
+            .insert("in progress".to_owned(), 1);
 
         let tick = runtime
             .run_tick(&config)
@@ -883,18 +918,21 @@ mod tests {
     async fn run_tick_stalls_and_queues_retry() {
         let issue_id = issue("SYM-99");
         let tracker = Arc::new(MutableTracker::default());
-        tracker
-            .set_candidates(vec![tracker_issue("SYM-99")])
-            .await;
+        tracker.set_candidates(vec![tracker_issue("SYM-99")]).await;
         let runtime = Runtime::new(Arc::clone(&tracker));
 
         // Mark it as running and explicitly set its last seen to the past
         {
             let mut state = runtime.state.lock().await;
             state.claimed.insert(issue_id.clone());
-            state.running.insert(issue_id.clone(), symphony_domain::RunningEntry::default());
+            state
+                .running
+                .insert(issue_id.clone(), symphony_domain::RunningEntry::default());
             let mut last_seen = runtime.last_seen.lock().await;
-            last_seen.insert(issue_id.clone(), std::time::Instant::now() - Duration::from_secs(400));
+            last_seen.insert(
+                issue_id.clone(),
+                std::time::Instant::now() - Duration::from_secs(400),
+            );
         }
 
         let mut config = RuntimeConfig::default();
@@ -960,7 +998,7 @@ mod tests {
                 Some("turn.start".to_owned()),
                 Some(1700000000),
                 Some("Processing issue".to_owned()),
-                Some(usage),
+                Some(usage.clone()),
             )
             .await
             .expect("protocol update should succeed");
@@ -976,7 +1014,10 @@ mod tests {
         assert_eq!(entry.codex_app_server_pid, Some(12345));
         assert_eq!(entry.last_codex_event, Some("turn.start".to_owned()));
         assert_eq!(entry.last_codex_timestamp, Some(1700000000));
-        assert_eq!(entry.last_codex_message, Some("Processing issue".to_owned()));
+        assert_eq!(
+            entry.last_codex_message,
+            Some("Processing issue".to_owned())
+        );
         assert_eq!(entry.usage, usage);
 
         // Check global totals updated

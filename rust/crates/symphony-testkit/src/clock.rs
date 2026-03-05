@@ -206,23 +206,20 @@ mod tests {
 
         // Spawn threads to concurrently advance time
         let mut join_handles = Vec::new();
-        for (_i, handle) in handles.into_iter().enumerate() {
+        for handle in handles.into_iter() {
             join_handles.push(thread::spawn(move || {
                 for _ in 0..10 {
                     handle.advance_ms(1);
                 }
-                handle.now_ms()
             }));
         }
 
-        // Wait for all threads and verify final state
-        let final_times: Vec<_> = join_handles
-            .into_iter()
-            .map(|h| h.join().unwrap())
-            .collect();
+        // Wait for all threads to complete
+        for h in join_handles {
+            h.join().unwrap();
+        }
 
-        // All threads should see the same final time
-        assert!(final_times.iter().all(|&t| t == 40));
+        // After all threads complete, clock should be 40ms (4 threads × 10ms each)
         assert_eq!(clock.now_ms(), 40);
     }
 

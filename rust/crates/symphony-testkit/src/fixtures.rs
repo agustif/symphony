@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use symphony_domain::{IssueId, OrchestratorState, RetryEntry};
+use symphony_domain::{IssueId, OrchestratorState, RetryEntry, RunningEntry};
 
 /// Snapshot of orchestrator state for testing and comparison
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,7 +37,7 @@ pub fn orchestrator_state_from_labels(
 
     for label in running {
         let id = issue_id(label);
-        state.running.insert(id.clone());
+        state.running.insert(id.clone(), RunningEntry::default());
         state.claimed.insert(id);
     }
 

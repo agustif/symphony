@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use symphony_config::CodexConfig;
+use symphony_domain::IssueId;
 use symphony_tracker::TrackerIssue;
 use symphony_workspace::{
-    HookExecutor, PreparedWorkspace, WorkspaceError, WorkspaceHooks, ensure_within_root, workspace_path,
+    HookExecutor, PreparedWorkspace, WorkspaceError, WorkspaceHooks, workspace_path,
 };
-use symphony_domain::IssueId;
 
 /// Context for spawning a worker with full workspace and prompt information
 #[derive(Clone)]
@@ -28,8 +28,8 @@ impl WorkerContext {
         codex_config: CodexConfig,
         prompt_template: String,
     ) -> Result<Self, WorkspaceError> {
-        // Validate workspace root is safe
-        ensure_within_root(&root, &issue.identifier)?;
+        // Validate workspace path is valid and within root
+        let _ = workspace_path(&root, &issue.identifier)?;
 
         Ok(Self {
             issue,
@@ -49,6 +49,7 @@ impl WorkerContext {
     /// Get the workspace path for this issue
     pub fn workspace_path(&self) -> PathBuf {
         workspace_path(&self.root, &self.issue.identifier)
+            .expect("workspace path should be valid after construction")
     }
 }
 
@@ -73,7 +74,12 @@ pub fn prepare_worker_workspace(
     ctx: &WorkerContext,
     executor: &impl HookExecutor,
 ) -> Result<PreparedWorkspace, WorkspaceError> {
-    prepare_workspace_with_hooks(&ctx.root, &ctx.issue.identifier, &ctx.hooks, executor)
+    symphony_workspace::prepare_workspace_with_hooks(
+        &ctx.root,
+        &ctx.issue.identifier,
+        &ctx.hooks,
+        executor,
+    )
 }
 
 /// Render prompt template with issue context
@@ -81,7 +87,8 @@ pub fn prepare_worker_workspace(
 pub fn render_prompt(ctx: &WorkerContext) -> Result<String, WorkerError> {
     // Simple placeholder replacement for now
     // Future enhancement: Use proper templating engine (e.g., handlebars, tera)
-    let description = ctx.issue.description.as_deref().unwrap_or(&String::new());
+    let empty = String::new();
+    let description = ctx.issue.description.as_deref().unwrap_or(&empty);
     let prompt = ctx
         .prompt_template
         .replace("{{issue_id}}", &ctx.issue.id.0)
@@ -106,7 +113,9 @@ mod tests {
             identifier: "SYM-123".to_owned(),
             title: "Test Issue".to_owned(),
             state: TrackerState::new("Todo"),
+            priority: None,
             description: Some("Test description".to_owned()),
+            created_at: None,
         };
         let root = std::env::temp_dir().join("test-workspaces");
         let hooks = WorkspaceHooks::default();

@@ -28,7 +28,7 @@ fn mark_running_conformance_always_claims_issue() {
     let trace = run_trace(vec![Event::MarkRunning(issue.clone())]);
 
     assert_eq!(validate_trace(&trace), Ok(()));
-    assert!(!trace.final_state.running.contains(&issue));
+    assert!(!trace.final_state.running.contains_key(&issue));
     assert!(!trace.final_state.claimed.contains(&issue));
 }
 
@@ -40,7 +40,9 @@ fn release_conformance_clears_seeded_retry_tracking() {
         .retry_attempts
         .insert(issue.clone(), RetryEntry { attempt: 3 });
     state.claimed.insert(issue.clone());
-    state.running.insert(issue.clone());
+    state
+        .running
+        .insert(issue.clone(), symphony_domain::RunningEntry::default());
 
     let trace = run_trace_from_state(state, vec![Event::Release(issue)]);
 

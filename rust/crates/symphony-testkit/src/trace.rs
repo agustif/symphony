@@ -1,5 +1,5 @@
 use symphony_domain::{
-    reduce, validate_invariants, Command, Event, InvariantError, OrchestratorState,
+    Command, Event, InvariantError, OrchestratorState, reduce, validate_invariants,
 };
 
 // Use StateSnapshot from fixtures module

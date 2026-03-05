@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, broadcast, RwLock};
-use symphony_cli::{build_validated_startup_config_from_args, CliStartupError};
+use symphony_cli::{CliStartupError, build_validated_startup_config_from_args};
+use symphony_config::{ProcessEnv, from_front_matter_with_env};
 use symphony_runtime::Runtime;
-use symphony_tracker_linear::LinearTracker;
 use symphony_tracker::TrackerState;
+use symphony_tracker_linear::LinearTracker;
 use symphony_workflow::WorkflowReloader;
-use symphony_config::{from_front_matter_with_env, ProcessEnv};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -28,29 +28,42 @@ async fn main() -> anyhow::Result<()> {
 
     // 1. Load initial workflow and config
     let mut reloader = WorkflowReloader::load_from_path(&startup_config.workflow_path)?;
-    let initial_config = from_front_matter_with_env(&reloader.current().document.front_matter, &ProcessEnv)?;
+    let initial_config =
+        from_front_matter_with_env(&reloader.current().document.front_matter, &ProcessEnv)?;
 
     let config_arc = Arc::new(RwLock::new(initial_config.clone()));
-    
+
     // 2. Initialize Tracker
-    let tracker = Arc::new(LinearTracker::new(
-        initial_config.tracker.endpoint.clone(),
-        initial_config.tracker.api_key.clone().unwrap_or_default(),
-    ).with_candidate_states(initial_config.tracker.active_states.iter().map(TrackerState::new).collect()));
+    let tracker = Arc::new(
+        LinearTracker::new(
+            initial_config.tracker.endpoint.clone(),
+            initial_config.tracker.api_key.clone().unwrap_or_default(),
+        )
+        .with_candidate_states(
+            initial_config
+                .tracker
+                .active_states
+                .iter()
+                .map(TrackerState::new)
+                .collect(),
+        ),
+    );
 
     // 3. Initialize Runtime
     let runtime = Arc::new(Runtime::new(tracker.clone()));
-    
+
     let (refresh_tx, refresh_rx) = mpsc::channel(1);
     let (shutdown_tx, _) = broadcast::channel(1);
-    
+
     let shutdown_rx = shutdown_tx.subscribe();
     let runtime_poll = runtime.clone();
     let config_poll = config_arc.clone();
-    
+
     // 4. Start Poll Loop
     let poll_handle = tokio::spawn(async move {
-        runtime_poll.run_poll_loop(config_poll, refresh_rx, shutdown_rx).await;
+        runtime_poll
+            .run_poll_loop(config_poll, refresh_rx, shutdown_rx)
+            .await;
     });
 
     // 5. Start Workflow Watcher (simple polling for now)
@@ -87,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::signal::ctrl_c().await?;
     println!("Shutting down...");
     let _ = shutdown_tx.send(());
-    
+
     let _ = tokio::join!(poll_handle, watcher_handle);
 
     Ok(())

@@ -117,6 +117,15 @@ mod tests {
         let args = CliArgs {
             workflow: None,
             config: PathBuf::from("symphony.runtime.json"),
+            polling_interval_ms: None,
+            max_concurrent_agents: None,
+            max_turns: None,
+            max_retry_backoff_ms: None,
+            workspace_root: None,
+            log_level: None,
+            tracker_endpoint: None,
+            tracker_api_key: None,
+            tracker_project_slug: None,
         };
 
         let startup = startup_config_from_cli(args, &cwd);

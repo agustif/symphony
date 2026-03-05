@@ -760,7 +760,7 @@ tracker:
         );
 
         // Manually set codex command to empty after parsing to test validation
-        if let Some(Value::Mapping(codex)) = front_matter.get_mut(&yaml_key("codex")) {
+        if let Some(Value::Mapping(codex)) = front_matter.get_mut(yaml_key("codex")) {
             codex.insert(yaml_key("command"), Value::String("".to_string()));
         } else {
             front_matter.insert(yaml_key("codex"), {

@@ -44,7 +44,7 @@ impl FakeTrackerResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FakeTrackerConfig {
     /// Whether to simulate network latency
     pub latency: Option<Duration>,
@@ -52,16 +52,6 @@ pub struct FakeTrackerConfig {
     pub fail_after: Option<usize>,
     /// Custom error message for failures
     pub error_message: Option<String>,
-}
-
-impl Default for FakeTrackerConfig {
-    fn default() -> Self {
-        Self {
-            latency: None,
-            fail_after: None,
-            error_message: None,
-        }
-    }
 }
 
 impl FakeTrackerConfig {

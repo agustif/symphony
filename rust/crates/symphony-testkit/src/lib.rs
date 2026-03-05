@@ -12,13 +12,14 @@ mod trace;
 
 pub use clock::{Clock, ClockHandle, DeterministicClock, RealClock, ThreadSafeClock};
 pub use fakes::{
-    FakeAppServerStream, FakeTracker, FakeTrackerConfig, FakeTrackerResponse,
-    FakeWorkspaceHooks, tracker_issue,
+    FakeAppServerStream, FakeTracker, FakeTrackerConfig, FakeTrackerResponse, FakeWorkspaceHooks,
+    tracker_issue,
 };
 pub use fixtures::{
-    compare_snapshots, issue_id, issue_ids, load_fixture, load_fixture_with_vars,
-    load_json_fixture, load_json_fixture_with_vars, orchestrator_state_from_labels, resolve_fixture_path,
     FixtureBuilder, FixtureError, SnapshotComparison, SnapshotDifference, StateSnapshot,
+    compare_snapshots, issue_id, issue_ids, load_fixture, load_fixture_with_vars,
+    load_json_fixture, load_json_fixture_with_vars, orchestrator_state_from_labels,
+    resolve_fixture_path,
 };
 pub use observability_builders::{issue_snapshot, runtime_snapshot, state_snapshot};
 pub use path_builders::test_cwd;
@@ -26,8 +27,8 @@ pub use protocol_builders::{protocol_stderr_line, protocol_stdout_line};
 pub use schedules::{deterministic_event_stream, interleave_preserving_order, release_events};
 pub use timer_queue::{DeterministicTimer, DeterministicTimerQueue};
 pub use trace::{
-    TraceResult, TraceStep, command_count, max_active_counts, run_trace,
-    run_trace_from_state, snapshot_state, snapshot_trace, validate_trace,
+    TraceResult, TraceStep, command_count, max_active_counts, run_trace, run_trace_from_state,
+    snapshot_state, snapshot_trace, validate_trace,
 };
 
 #[cfg(test)]

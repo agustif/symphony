@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+mod property_tests;
+
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
@@ -7,6 +10,33 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct IssueId(pub String);
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningEntry {
+    pub identifier: Option<String>,
+    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub codex_app_server_pid: Option<u32>,
+    pub last_codex_event: Option<String>,
+    pub last_codex_timestamp: Option<u64>,
+    pub last_codex_message: Option<String>,
+    pub usage: Usage,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryEntry {
@@ -16,15 +46,30 @@ pub struct RetryEntry {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrchestratorState {
     pub claimed: HashSet<IssueId>,
-    pub running: HashSet<IssueId>,
+    pub running: HashMap<IssueId, RunningEntry>,
     pub retry_attempts: HashMap<IssueId, RetryEntry>,
+    pub codex_totals: CodexTotals,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Claim(IssueId),
     MarkRunning(IssueId),
-    QueueRetry { issue_id: IssueId, attempt: u32 },
+    UpdateAgent {
+        issue_id: IssueId,
+        session_id: Option<String>,
+        thread_id: Option<String>,
+        turn_id: Option<String>,
+        pid: Option<u32>,
+        event: Option<String>,
+        timestamp: Option<u64>,
+        message: Option<String>,
+        usage: Option<Usage>,
+    },
+    QueueRetry {
+        issue_id: IssueId,
+        attempt: u32,
+    },
     Release(IssueId),
 }
 
@@ -42,12 +87,17 @@ pub enum Command {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum TransitionRejection {
+    #[error("issue is already claimed")]
     AlreadyClaimed,
+    #[error("issue is not claimed")]
     MissingClaim,
+    #[error("issue is already running")]
     AlreadyRunning,
+    #[error("invalid retry attempt")]
     InvalidRetryAttempt,
+    #[error("retry attempt regression")]
     RetryAttemptRegression,
 }
 
@@ -61,6 +111,14 @@ pub enum InvariantError {
     RunningAndRetrying,
     #[error("retry attempts must always be positive")]
     RetryAttemptMustBePositive,
+    #[error("transition rejected: {0}")]
+    TransitionRejected(TransitionRejection),
+}
+
+impl From<TransitionRejection> for InvariantError {
+    fn from(rejection: TransitionRejection) -> Self {
+        InvariantError::TransitionRejected(rejection)
+    }
 }
 
 pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState, Vec<Command>) {
@@ -75,13 +133,58 @@ pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState,
             if !state.claimed.contains(&issue_id) {
                 return reject_transition(state, issue_id, TransitionRejection::MissingClaim);
             }
-            if state.running.contains(&issue_id) {
+            if state.running.contains_key(&issue_id) {
                 return reject_transition(state, issue_id, TransitionRejection::AlreadyRunning);
             }
             let dispatch_issue_id = issue_id.clone();
             state.retry_attempts.remove(&issue_id);
-            state.running.insert(issue_id);
+            state.running.insert(issue_id, RunningEntry::default());
             return (state, vec![Command::Dispatch(dispatch_issue_id)]);
+        }
+        Event::UpdateAgent {
+            issue_id,
+            session_id,
+            thread_id,
+            turn_id,
+            pid,
+            event,
+            timestamp,
+            message,
+            usage,
+        } => {
+            if !state.running.contains_key(&issue_id) {
+                return reject_transition(state, issue_id, TransitionRejection::MissingClaim);
+            }
+            if let Some(entry) = state.running.get_mut(&issue_id) {
+                if let Some(sid) = session_id {
+                    entry.session_id = Some(sid);
+                }
+                if let Some(tid) = thread_id {
+                    entry.thread_id = Some(tid);
+                }
+                if let Some(tuid) = turn_id {
+                    entry.turn_id = Some(tuid);
+                }
+                if let Some(p) = pid {
+                    entry.codex_app_server_pid = Some(p);
+                }
+                if let Some(e) = event {
+                    entry.last_codex_event = Some(e);
+                }
+                if let Some(ts) = timestamp {
+                    entry.last_codex_timestamp = Some(ts);
+                }
+                if let Some(msg) = message {
+                    entry.last_codex_message = Some(msg);
+                }
+                if let Some(u) = &usage {
+                    entry.usage = u.clone();
+                    state.codex_totals.input_tokens += u.input_tokens;
+                    state.codex_totals.output_tokens += u.output_tokens;
+                    state.codex_totals.total_tokens += u.total_tokens;
+                }
+            }
+            return (state, Vec::new());
         }
         Event::QueueRetry { issue_id, attempt } => {
             if !state.claimed.contains(&issue_id) {
@@ -125,7 +228,7 @@ pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState,
 }
 
 pub fn validate_invariants(state: &OrchestratorState) -> Result<(), InvariantError> {
-    if state.running.iter().any(|id| !state.claimed.contains(id)) {
+    if state.running.keys().any(|id| !state.claimed.contains(id)) {
         return Err(InvariantError::RunningWithoutClaim);
     }
     if state
@@ -137,7 +240,7 @@ pub fn validate_invariants(state: &OrchestratorState) -> Result<(), InvariantErr
     }
     if state
         .running
-        .iter()
+        .keys()
         .any(|issue_id| state.retry_attempts.contains_key(issue_id))
     {
         return Err(InvariantError::RunningAndRetrying);
@@ -206,7 +309,7 @@ mod tests {
         assert!(claim_commands.is_empty());
         assert_eq!(run_commands, vec![Command::Dispatch(issue_id.clone())]);
         assert!(state.claimed.contains(&issue_id));
-        assert!(state.running.contains(&issue_id));
+        assert!(state.running.contains_key(&issue_id));
         assert_eq!(validate_invariants(&state), Ok(()));
     }
 
@@ -243,7 +346,7 @@ mod tests {
             },
         );
 
-        assert!(!state.running.contains(&issue_id));
+        assert!(!state.running.contains_key(&issue_id));
         assert!(state.claimed.contains(&issue_id));
         assert_eq!(
             state.retry_attempts.get(&issue_id),
@@ -328,7 +431,7 @@ mod tests {
     fn validate_invariants_rejects_running_without_claim() {
         let issue_id = issue_id("SYM-42");
         let mut state = OrchestratorState::default();
-        state.running.insert(issue_id);
+        state.running.insert(issue_id, RunningEntry::default());
         assert_eq!(
             validate_invariants(&state),
             Err(InvariantError::RunningWithoutClaim),

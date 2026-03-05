@@ -1,10 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
-use symphony_domain::{Command, IssueId};
-use symphony_runtime::{Runtime, RetryPolicy, WorkerExit, RetryKind, RetrySchedule};
-use symphony_tracker::{TrackerClient, TrackerIssue, TrackerState};
 use symphony_config::RuntimeConfig;
-use symphony_testkit::{FakeTracker, tracker_issue};
+use symphony_domain::{Command, IssueId, RunningEntry};
+use symphony_runtime::{RetryPolicy, Runtime, WorkerExit};
+use symphony_testkit::FakeTracker;
+use symphony_tracker::{TrackerIssue, TrackerState};
 
 #[tokio::test]
 async fn dispatch_sorting_priority_and_recency() {
@@ -18,7 +18,7 @@ async fn dispatch_sorting_priority_and_recency() {
         .with_priority(3)
         .with_created_at(500); // Older than issue 1
 
-    let tracker = Arc::new(FakeTracker::new(vec![
+    let tracker = Arc::new(FakeTracker::with_default_issues(vec![
         issue_1.clone(),
         issue_2.clone(),
         issue_3.clone(),
@@ -28,7 +28,10 @@ async fn dispatch_sorting_priority_and_recency() {
     let mut config = RuntimeConfig::default();
     config.agent.max_concurrent_agents = 3;
 
-    let tick = runtime.run_tick(&config).await.expect("tick should succeed");
+    let tick = runtime
+        .run_tick(&config)
+        .await
+        .expect("tick should succeed");
 
     // Expected order: SYM-2 (prio 1), SYM-3 (prio 3, older), SYM-1 (prio 3, newer)
     assert_eq!(
@@ -44,9 +47,11 @@ async fn dispatch_sorting_priority_and_recency() {
 #[tokio::test]
 async fn exponential_backoff_conformance() {
     let issue_id = IssueId("SYM-1".into());
-    let tracker = Arc::new(FakeTracker::new(vec![
-        TrackerIssue::new(issue_id.clone(), "SYM-1", TrackerState::new("Todo"))
-    ]));
+    let tracker = Arc::new(FakeTracker::with_default_issues(vec![TrackerIssue::new(
+        issue_id.clone(),
+        "SYM-1",
+        TrackerState::new("Todo"),
+    )]));
     let runtime = Runtime::new(tracker);
     let policy = RetryPolicy {
         continuation_delay: Duration::from_secs(1),
@@ -54,18 +59,49 @@ async fn exponential_backoff_conformance() {
         max_failure_backoff: Duration::from_secs(100),
     };
 
+    // Set up issue as claimed and running before handling worker exit
+    runtime
+        .setup_running(issue_id.clone(), RunningEntry::default())
+        .await;
+
     // First failure: 10s
-    let res1 = runtime.handle_worker_exit(issue_id.clone(), WorkerExit::RetryableFailure, &policy).await.unwrap();
+    let res1 = runtime
+        .handle_worker_exit(issue_id.clone(), WorkerExit::RetryableFailure, &policy)
+        .await
+        .unwrap();
     assert_eq!(res1.retry_schedule.unwrap().delay, Duration::from_secs(10));
 
+    // Set up for second failure
+    runtime
+        .setup_running(issue_id.clone(), RunningEntry::default())
+        .await;
+
     // Second failure: 20s
-    let res2 = runtime.handle_worker_exit(issue_id.clone(), WorkerExit::RetryableFailure, &policy).await.unwrap();
+    let res2 = runtime
+        .handle_worker_exit(issue_id.clone(), WorkerExit::RetryableFailure, &policy)
+        .await
+        .unwrap();
     assert_eq!(res2.retry_schedule.unwrap().delay, Duration::from_secs(20));
 
     // Capped: 100s
     for _ in 0..5 {
-        let _ = runtime.handle_worker_exit(issue_id.clone(), WorkerExit::RetryableFailure, &policy).await.unwrap();
+        runtime
+            .setup_running(issue_id.clone(), RunningEntry::default())
+            .await;
+        let _ = runtime
+            .handle_worker_exit(issue_id.clone(), WorkerExit::RetryableFailure, &policy)
+            .await
+            .unwrap();
     }
-    let res_capped = runtime.handle_worker_exit(issue_id.clone(), WorkerExit::RetryableFailure, &policy).await.unwrap();
-    assert_eq!(res_capped.retry_schedule.unwrap().delay, Duration::from_secs(100));
+    runtime
+        .setup_running(issue_id.clone(), RunningEntry::default())
+        .await;
+    let res_capped = runtime
+        .handle_worker_exit(issue_id.clone(), WorkerExit::RetryableFailure, &policy)
+        .await
+        .unwrap();
+    assert_eq!(
+        res_capped.retry_schedule.unwrap().delay,
+        Duration::from_secs(100)
+    );
 }
