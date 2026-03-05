@@ -1,0 +1,5 @@
+- [x] Expand architecture docs with explicit runtime data-flow, invariants, and failure model.
+- [x] Add ADR for runtime execution model.
+- [x] Add ADR for adapter boundary contract.
+- [x] Add ADR for retry semantics.
+- [x] Add ADR for observability contract.
