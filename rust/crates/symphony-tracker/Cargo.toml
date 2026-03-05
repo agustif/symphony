@@ -8,3 +8,6 @@ license.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 symphony-domain = { path = "../symphony-domain" }
+
+[dev-dependencies]
+tokio.workspace = true
