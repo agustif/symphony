@@ -1,0 +1,10 @@
+[package]
+name = "symphony-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+symphony-domain = { path = "../symphony-domain" }
+symphony-observability = { path = "../symphony-observability" }

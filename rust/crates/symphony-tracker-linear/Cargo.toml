@@ -1,0 +1,17 @@
+[package]
+name = "symphony-tracker-linear"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+symphony-tracker = { path = "../symphony-tracker" }
+symphony-domain = { path = "../symphony-domain" }
+
+[dev-dependencies]
+tokio.workspace = true
+wiremock = "0.6"

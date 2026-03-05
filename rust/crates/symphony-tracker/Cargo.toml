@@ -1,0 +1,13 @@
+[package]
+name = "symphony-tracker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true
+symphony-domain = { path = "../symphony-domain" }
+
+[dev-dependencies]
+tokio.workspace = true
