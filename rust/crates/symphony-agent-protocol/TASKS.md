@@ -1,9 +1,9 @@
 # symphony-agent-protocol Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 65%
-- Done: task map defined and initial implementation batch merged.
-- In Progress: hardening, edge-case conformance, and proof depth.
+- Completion: 75%
+- Done: startup/turn sequencing validator and typed protocol method categorization are implemented with coverage for malformed envelopes.
+- In Progress: optional tool advertisement support and approval/input-required policy outcome mapping.
 - Remaining: full SPEC parity and production rollout gates.
 
 ## Scope
@@ -15,7 +15,7 @@ Own coding-agent app-server protocol transport, framing, and event translation.
 
 ## Epic P1: Protocol Framing and IO
 ### Task P1.1: Startup handshake support
-- [ ] Subtask P1.1.1: initialize/session/new/turn/start message sequence support.
+- [x] Subtask P1.1.1: initialize/session/new/turn/start message sequence support.
 - [ ] Subtask P1.1.2: Optional tool advertisement support.
 
 ### Task P1.2: Stream parsing contract
@@ -24,7 +24,7 @@ Own coding-agent app-server protocol transport, framing, and event translation.
 
 ## Epic P2: Event Translation
 ### Task P2.1: Runtime event mapping
-- [ ] Subtask P2.1.1: Map protocol updates to typed events.
+- [x] Subtask P2.1.1: Map protocol updates to typed events.
 - [ ] Subtask P2.1.2: Map approval and input-required paths to policy outcomes.
 
 ### Task P2.2: Dynamic tool support
@@ -43,9 +43,9 @@ Own coding-agent app-server protocol transport, framing, and event translation.
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 10.2 session startup handshake | Partial framing support exists | Implement complete initialize/session/new/turn/start ordering and validation | `P1.1` |
+| Sec. 10.2 session startup handshake | Sequence validator enforces initialize -> initialized -> thread/start or session/new -> turn/start with continuation turn ordering | Add optional tool advertisement wiring in startup payload helpers | `P1.1` |
 | Sec. 10.3 stdout streaming contract | Implemented and tested | Add high-volume stream backpressure and reassembly stress tests | `P1.2`, `P3.1` |
-| Sec. 10.5 approval and user-input policy mapping | Partial | Map approvals and input-required messages to explicit runtime policy outcomes | `P2.1` |
+| Sec. 10.5 approval and user-input policy mapping | Typed method categories now classify approval and input-required methods | Map approvals/input-required to explicit runtime policy outcomes | `P2.1` |
 | Sec. 10.6 timeout and error mapping | Partial | Add typed timeout/retryable/non-retryable mapping and tests | `P2.1`, `P3.1` |
-| Sec. 17.5 app-server client validation | Partial | Build matrix cases for malformed protocol and interrupted streams | `P3.1` |
+| Sec. 17.5 app-server client validation | Improved malformed envelope and sequence coverage | Build expanded matrix for interrupted streams and timeout-driven approval/input paths | `P3.1` |
 <!-- SPEC_GAP_MAP_END -->

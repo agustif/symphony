@@ -1,38 +1,86 @@
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::collections::HashMap;
 
-use symphony_cli::build_startup_config_from_args;
-use symphony_testkit::test_cwd;
+use symphony_config::{CliOverrides, EnvProvider, apply_cli_overrides, from_front_matter_with_env};
+use symphony_workflow::parse as parse_workflow;
 
-#[test]
-fn cli_uses_default_runtime_config_path_relative_to_cwd() {
-    let cwd = test_cwd("/srv/symphony");
-    let startup =
-        build_startup_config_from_args(["symphony"], &cwd).expect("default args should parse");
+#[derive(Debug, Default)]
+struct TestEnv {
+    values: HashMap<String, String>,
+}
 
-    assert_eq!(startup.config_path, cwd.join("symphony.runtime.json"));
+impl TestEnv {
+    fn from_entries(entries: &[(&str, &str)]) -> Self {
+        let values = entries
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        Self { values }
+    }
+}
+
+impl EnvProvider for TestEnv {
+    fn get(&self, key: &str) -> Option<String> {
+        self.values.get(key).cloned()
+    }
+}
+
+fn config_from_workflow(workflow: &str, env: &dyn EnvProvider) -> symphony_config::RuntimeConfig {
+    let parsed = parse_workflow(workflow).expect("workflow should parse");
+    from_front_matter_with_env(&parsed.front_matter, env).expect("front matter should build config")
 }
 
 #[test]
-fn cli_resolves_relative_config_path_against_runtime_cwd() {
-    let cwd = test_cwd("/srv/symphony");
-    let startup =
-        build_startup_config_from_args(["symphony", "--config", "config/runtime.json"], &cwd)
-            .expect("cli args should parse");
+fn cli_overrides_take_precedence_over_env_and_workflow_values() {
+    let env = TestEnv::from_entries(&[("LINEAR_API_KEY", "env-token")]);
+    let config = config_from_workflow(
+        r#"---
+tracker:
+  api_key: ${LINEAR_API_KEY}
+  project_slug: file-project
+polling:
+  interval_ms: 15000
+agent:
+  max_turns: 8
+---
+Run tests.
+"#,
+        &env,
+    );
+    let overrides = CliOverrides {
+        polling_interval_ms: Some(45_000),
+        max_turns: Some(12),
+        tracker_api_key: Some("cli-token".to_owned()),
+        tracker_project_slug: Some("cli-project".to_owned()),
+        ..Default::default()
+    };
 
-    assert_eq!(startup.config_path, cwd.join("config/runtime.json"));
+    let applied = apply_cli_overrides(config, &overrides).expect("overrides should apply");
+    assert_eq!(applied.polling.interval_ms, 45_000);
+    assert_eq!(applied.agent.max_turns, 12);
+    assert_eq!(applied.tracker.api_key.as_deref(), Some("cli-token"));
+    assert_eq!(applied.tracker.project_slug.as_deref(), Some("cli-project"));
 }
 
 #[test]
-fn cli_keeps_absolute_config_path_unchanged() {
-    let cwd = test_cwd("/srv/symphony");
-    let absolute = PathBuf::from("/etc/symphony/runtime.json");
-    let startup = build_startup_config_from_args(
-        ["symphony", "--config", "/etc/symphony/runtime.json"],
-        &cwd,
-    )
-    .expect("cli args should parse");
+fn workflow_env_values_apply_when_cli_override_is_missing() {
+    let env = TestEnv::from_entries(&[("LINEAR_API_KEY", "env-token")]);
+    let config = config_from_workflow(
+        r#"---
+tracker:
+  api_key: ${LINEAR_API_KEY}
+  project_slug: env-project
+polling:
+  interval_ms: 22000
+---
+Run tests.
+"#,
+        &env,
+    );
+    let applied =
+        apply_cli_overrides(config, &CliOverrides::default()).expect("empty overrides should pass");
 
-    assert_eq!(startup.config_path, absolute);
+    assert_eq!(applied.polling.interval_ms, 22_000);
+    assert_eq!(applied.tracker.api_key.as_deref(), Some("env-token"));
 }

@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
+use symphony_config::CliOverrides;
 
 use crate::{CliArgs, CliStartupError, StartupConfigError};
 
@@ -12,6 +13,7 @@ pub struct RuntimeStartupConfig {
     pub config_path: PathBuf,
     pub workflow_path: PathBuf,
     pub workflow_path_explicit: bool,
+    pub cli_overrides: CliOverrides,
 }
 
 pub fn resolve_config_path(config_path: &Path, cwd: &Path) -> PathBuf {
@@ -31,10 +33,12 @@ pub fn resolve_workflow_path(workflow_path: Option<&Path>, cwd: &Path) -> PathBu
 }
 
 pub fn startup_config_from_cli(cli: CliArgs, cwd: &Path) -> RuntimeStartupConfig {
+    let cli_overrides = cli.to_cli_overrides();
     RuntimeStartupConfig {
         config_path: resolve_config_path(&cli.config, cwd),
         workflow_path: resolve_workflow_path(cli.workflow.as_deref(), cwd),
         workflow_path_explicit: cli.workflow.is_some(),
+        cli_overrides,
     }
 }
 
@@ -131,6 +135,52 @@ mod tests {
         let startup = startup_config_from_cli(args, &cwd);
         assert_eq!(startup.workflow_path, cwd.join("WORKFLOW.md"));
         assert!(!startup.workflow_path_explicit);
+        assert!(startup.cli_overrides.is_empty());
+    }
+
+    #[test]
+    fn startup_config_preserves_cli_overrides() {
+        let cwd = PathBuf::from("/srv/symphony");
+        let args = CliArgs {
+            workflow: Some(PathBuf::from("WORKFLOW.md")),
+            config: PathBuf::from("symphony.runtime.json"),
+            polling_interval_ms: Some(55_000),
+            max_concurrent_agents: Some(11),
+            max_turns: Some(31),
+            max_retry_backoff_ms: Some(333_000),
+            workspace_root: Some(PathBuf::from("/tmp/workspaces")),
+            log_level: Some("debug".to_owned()),
+            tracker_endpoint: Some("https://linear.example/graphql".to_owned()),
+            tracker_api_key: Some("cli-token".to_owned()),
+            tracker_project_slug: Some("cli-project".to_owned()),
+        };
+
+        let startup = startup_config_from_cli(args, &cwd);
+
+        assert_eq!(startup.config_path, cwd.join("symphony.runtime.json"));
+        assert_eq!(startup.workflow_path, cwd.join("WORKFLOW.md"));
+        assert!(startup.workflow_path_explicit);
+        assert_eq!(startup.cli_overrides.polling_interval_ms, Some(55_000));
+        assert_eq!(startup.cli_overrides.max_concurrent_agents, Some(11));
+        assert_eq!(startup.cli_overrides.max_turns, Some(31));
+        assert_eq!(startup.cli_overrides.max_retry_backoff_ms, Some(333_000));
+        assert_eq!(
+            startup.cli_overrides.workspace_root,
+            Some(PathBuf::from("/tmp/workspaces"))
+        );
+        assert_eq!(startup.cli_overrides.log_level.as_deref(), Some("debug"));
+        assert_eq!(
+            startup.cli_overrides.tracker_endpoint.as_deref(),
+            Some("https://linear.example/graphql")
+        );
+        assert_eq!(
+            startup.cli_overrides.tracker_api_key.as_deref(),
+            Some("cli-token")
+        );
+        assert_eq!(
+            startup.cli_overrides.tracker_project_slug.as_deref(),
+            Some("cli-project")
+        );
     }
 
     #[test]

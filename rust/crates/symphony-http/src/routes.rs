@@ -1,3 +1,4 @@
+pub const DASHBOARD_ROUTE: &str = "/";
 pub const API_V1_PREFIX: &str = "/api/v1";
 pub const STATE_ROUTE: &str = "/api/v1/state";
 pub const REFRESH_ROUTE: &str = "/api/v1/refresh";

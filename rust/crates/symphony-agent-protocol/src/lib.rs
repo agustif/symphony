@@ -5,6 +5,8 @@ mod line_origin;
 mod parsed_line;
 mod parser;
 mod protocol_error;
+mod protocol_method;
+mod sequence_validator;
 mod stderr_line;
 mod stream_line_parser;
 
@@ -13,6 +15,10 @@ pub use line_origin::LineOrigin;
 pub use parsed_line::{ParsedLine, stderr_message, stdout_event};
 pub use parser::{decode_line, decode_stderr_line, decode_stdout_line};
 pub use protocol_error::ProtocolError;
+pub use protocol_method::{ProtocolMethodCategory, ProtocolMethodKind, canonical_method_name};
+pub use sequence_validator::{
+    ProtocolSequenceError, ProtocolSequenceValidator, StartupPhase, validate_startup_turn_sequence,
+};
 pub use stderr_line::StderrLine;
 pub use stream_line_parser::StreamLineParser;
 
@@ -42,6 +48,14 @@ mod tests {
     }
 
     #[test]
+    fn categorizes_event_method_types() {
+        let line = r#"{"method":"turn/start","params":{"issue_id":"SYM-7"}}"#;
+        let event = decode_stdout_line(line).expect("valid protocol line");
+        assert_eq!(event.method_kind(), ProtocolMethodKind::TurnStart);
+        assert_eq!(event.method_category(), ProtocolMethodCategory::Turn);
+    }
+
+    #[test]
     fn decodes_stderr_line_without_json_parsing() {
         let parsed = decode_line(LineOrigin::Stderr, "panic: file missing\n")
             .expect("stderr line should decode");
@@ -52,6 +66,20 @@ mod tests {
     #[test]
     fn rejects_invalid_stdout_json() {
         let error = decode_stdout_line("not-json").expect_err("invalid json should fail");
+        assert!(matches!(error, ProtocolError::InvalidStdoutLine(_)));
+    }
+
+    #[test]
+    fn rejects_malformed_event_envelope_with_missing_method() {
+        let error = decode_stdout_line(r#"{"params":{"issue_id":"SYM-7"}}"#)
+            .expect_err("missing method should fail");
+        assert!(matches!(error, ProtocolError::InvalidStdoutLine(_)));
+    }
+
+    #[test]
+    fn rejects_malformed_event_envelope_with_non_string_method() {
+        let error = decode_stdout_line(r#"{"method":123,"params":{"issue_id":"SYM-7"}}"#)
+            .expect_err("non-string method should fail");
         assert!(matches!(error, ProtocolError::InvalidStdoutLine(_)));
     }
 

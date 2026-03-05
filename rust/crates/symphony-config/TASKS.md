@@ -26,7 +26,7 @@ Own typed runtime configuration, defaults, env resolution, and validation.
 ## Epic C2: Resolution and Validation
 ### Task C2.1: Resolution
 - [x] Subtask C2.1.1: `$VAR` env indirection for secrets/paths.
-- [ ] Subtask C2.1.2: CLI override integration points.
+- [x] Subtask C2.1.2: CLI override integration points.
 
 ### Task C2.2: Validation
 - [x] Subtask C2.2.1: Required field validation by tracker kind.

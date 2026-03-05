@@ -21,6 +21,7 @@ Own executable entrypoint, startup wiring, flags, and host lifecycle behavior.
 ### Task C1.2: Startup flow
 - [x] Subtask C1.2.1: Validate workflow path and config before run.
 - [x] Subtask C1.2.2: Structured startup diagnostics.
+- [x] Subtask C1.2.3: Apply CLI override precedence in startup and workflow reload paths.
 
 ## Epic C2: Runtime Wiring
 ### Task C2.1: Dependency wiring

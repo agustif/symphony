@@ -9,17 +9,36 @@ mod state_handlers;
 pub use api_response::ApiResponse;
 pub use http_method::HttpMethod;
 pub use routes::{
-    API_V1_PREFIX, ISSUE_ROUTE_PREFIX, REFRESH_ROUTE, STATE_ROUTE, issue_route, legacy_issue_route,
+    API_V1_PREFIX, DASHBOARD_ROUTE, ISSUE_ROUTE_PREFIX, REFRESH_ROUTE, STATE_ROUTE, issue_route,
+    legacy_issue_route,
 };
 pub use state_handlers::{
-    handle_get, handle_post, handle_request, issue_detail_to_json, issue_to_json, refresh_to_json,
-    snapshot_to_json, state_to_json,
+    dashboard_to_html, handle_get, handle_post, handle_request, issue_detail_to_json,
+    issue_to_json, refresh_to_json, snapshot_to_json, state_to_json,
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use symphony_testkit::{issue_snapshot, runtime_snapshot, state_snapshot};
+
+    #[test]
+    fn serves_dashboard_route_with_html_document() {
+        let snapshot = state_snapshot(
+            runtime_snapshot(1, 1),
+            vec![
+                issue_snapshot("SYM-1", "SYM-1", "Running", 0),
+                issue_snapshot("SYM-2", "SYM-2<script>", "Retrying", 2),
+            ],
+        );
+
+        let response = handle_get(DASHBOARD_ROUTE, &snapshot);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "text/html; charset=utf-8");
+        assert!(response.rendered_body.contains("<!doctype html>"));
+        assert!(response.rendered_body.contains("Symphony Dashboard"));
+        assert!(response.rendered_body.contains("SYM-2&lt;script&gt;"));
+    }
 
     #[test]
     fn serves_state_endpoint_with_legacy_and_spec_fields() {
@@ -87,6 +106,26 @@ mod tests {
             response.body["error_envelope"]["code"],
             "method_not_allowed"
         );
+        assert_eq!(response.body["error_envelope"]["status"], 405);
+        assert_eq!(response.body["error_envelope"]["retryable"], false);
+    }
+
+    #[test]
+    fn returns_method_not_allowed_for_dashboard_post() {
+        let response = handle_request(
+            HttpMethod::Post,
+            DASHBOARD_ROUTE,
+            &state_snapshot(runtime_snapshot(0, 0), Vec::new()),
+        );
+        assert_eq!(response.status, 405);
+        assert_eq!(
+            response.body["error_envelope"]["code"],
+            "method_not_allowed"
+        );
+        assert_eq!(
+            response.body["error_envelope"]["message"],
+            "method not allowed for `/`"
+        );
     }
 
     #[test]
@@ -97,5 +136,29 @@ mod tests {
         );
         assert_eq!(response.status, 404);
         assert_eq!(response.body["error"], "route not found");
+        assert_eq!(response.body["error_envelope"]["status"], 404);
+        assert_eq!(response.body["error_envelope"]["code"], "route_not_found");
+        assert_eq!(
+            response.body["error_envelope"]["message"],
+            "route not found"
+        );
+        assert_eq!(response.body["error_envelope"]["retryable"], false);
+    }
+
+    #[test]
+    fn returns_consistent_error_envelope_for_missing_issue() {
+        let response = handle_get(
+            &issue_route("SYM-404"),
+            &state_snapshot(runtime_snapshot(0, 0), Vec::new()),
+        );
+        assert_eq!(response.status, 404);
+        assert_eq!(response.body["error"], "issue `SYM-404` not found");
+        assert_eq!(response.body["error_envelope"]["status"], 404);
+        assert_eq!(response.body["error_envelope"]["code"], "issue_not_found");
+        assert_eq!(
+            response.body["error_envelope"]["message"],
+            "issue `SYM-404` not found"
+        );
+        assert_eq!(response.body["error_envelope"]["retryable"], false);
     }
 }

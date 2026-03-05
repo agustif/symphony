@@ -1,9 +1,9 @@
 # symphony-observability Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 60%
-- Done: task map defined and initial implementation batch merged.
-- In Progress: hardening, edge-case conformance, and proof depth.
+- Completion: 70%
+- Done: task map defined, snapshot placeholder structs added, and control-byte sanitization helpers landed with tests.
+- In Progress: issue-view parity, redaction helpers, and aggregation depth.
 - Remaining: full SPEC parity and production rollout gates.
 
 ## Scope
@@ -16,11 +16,11 @@ Own runtime snapshot model, metrics aggregation, and display-ready view shaping.
 
 ## Epic O1: Snapshot Model
 ### Task O1.1: Snapshot schema
-- [ ] Subtask O1.1.1: Running/retry/totals/rate-limit structures.
+- [x] Subtask O1.1.1: Running/retry/totals/rate-limit structures.
 - [ ] Subtask O1.1.2: Per-issue status view structures.
 
 ### Task O1.2: Sanitization
-- [ ] Subtask O1.2.1: Strip control bytes/ansi from event text.
+- [x] Subtask O1.2.1: Strip control bytes/ansi from event text.
 - [ ] Subtask O1.2.2: Secret-safe redaction helpers.
 
 ## Epic O2: Aggregation
@@ -35,7 +35,7 @@ Own runtime snapshot model, metrics aggregation, and display-ready view shaping.
 ## Epic O3: Tests
 ### Task O3.1: View-model correctness tests
 - [ ] Subtask O3.1.1: Aggregation math tests.
-- [ ] Subtask O3.1.2: Sanitization/redaction tests.
+- [x] Subtask O3.1.2: Sanitization/redaction tests.
 
 ## Exit Criteria
 - [ ] Snapshot model supports both JSON API and dashboard rendering.

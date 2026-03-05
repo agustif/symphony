@@ -2,11 +2,15 @@
 
 mod issue_snapshot;
 mod runtime_snapshot;
+mod sanitization;
 mod state_snapshot;
 
 pub use issue_snapshot::IssueSnapshot;
-pub use runtime_snapshot::RuntimeSnapshot;
-pub use state_snapshot::StateSnapshot;
+pub use runtime_snapshot::{
+    CodexTotalsSnapshot, RateLimitSnapshot, RuntimeCounts, RuntimeSnapshot, RuntimeSpecView,
+};
+pub use sanitization::{sanitize_event_text, sanitize_message_text, strip_control_bytes};
+pub use state_snapshot::{IssueStatusTotalsSnapshot, StateSnapshot, StateSpecView};
 
 #[cfg(test)]
 mod tests {
@@ -20,6 +24,7 @@ mod tests {
             retrying: 0,
         };
         assert_eq!(snapshot.running + snapshot.retrying, 0);
+        assert_eq!(snapshot.spec_view().counts.running, 0);
     }
 
     #[test]
@@ -43,5 +48,13 @@ mod tests {
             .issue_by_id_or_identifier("SYM-42")
             .expect("issue identifier should resolve");
         assert_eq!(by_identifier.identifier, "SYM-42");
+        assert_eq!(snapshot.spec_view().issue_totals.total, 1);
+    }
+
+    #[test]
+    fn sanitization_helpers_strip_controls() {
+        let raw = "msg\u{0000}\u{001b}[31m text";
+        assert_eq!(sanitize_event_text(raw), "msg text");
+        assert_eq!(sanitize_message_text(raw), "msg text");
     }
 }
