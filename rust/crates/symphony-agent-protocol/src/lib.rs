@@ -1,16 +1,24 @@
 #![forbid(unsafe_code)]
 
 mod app_server_event;
+mod event_extract;
+mod event_policy;
 mod line_origin;
 mod parsed_line;
 mod parser;
 mod protocol_error;
 mod protocol_method;
 mod sequence_validator;
+mod startup_payload;
 mod stderr_line;
 mod stream_line_parser;
 
 pub use app_server_event::AppServerEvent;
+pub use event_extract::{
+    ProtocolUsage, build_session_id, extract_thread_id, extract_tool_call_id, extract_tool_name,
+    extract_turn_id, extract_usage,
+};
+pub use event_policy::{ProtocolFailureReason, ProtocolPolicyOutcome, classify_policy_outcome};
 pub use line_origin::LineOrigin;
 pub use parsed_line::{ParsedLine, stderr_message, stdout_event};
 pub use parser::{decode_line, decode_stderr_line, decode_stdout_line};
@@ -18,6 +26,10 @@ pub use protocol_error::ProtocolError;
 pub use protocol_method::{ProtocolMethodCategory, ProtocolMethodKind, canonical_method_name};
 pub use sequence_validator::{
     ProtocolSequenceError, ProtocolSequenceValidator, StartupPhase, validate_startup_turn_sequence,
+};
+pub use startup_payload::{
+    SupportedToolSpec, build_initialize_request, build_initialized_notification,
+    build_thread_start_request, build_turn_start_request,
 };
 pub use stderr_line::StderrLine;
 pub use stream_line_parser::StreamLineParser;

@@ -1,0 +1,20 @@
+[coast]
+name = "symphony"
+runtime = "dind"
+worktree_dir = ".worktrees"
+autostart = false
+
+[coast.setup]
+packages = [
+  "bash",
+  "git",
+  "curl",
+  "make",
+  "nodejs",
+  "npm",
+  "python3",
+  "ca-certificates",
+]
+
+[assign]
+default = "none"

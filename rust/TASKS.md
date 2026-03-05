@@ -1,9 +1,9 @@
 # Rust Reimplementation Master Plan
 
 ## Status Snapshot (2026-03-05)
-- Completion: 65%
-- Done: parallel implementation batch merged across domain/runtime, config/workflow/workspace, tracker/linear, protocol/http/cli, docs, CI/proofs, test scaffolds, concrete Verus proof module rewrites, proof CI installation/guard wiring, explicit suite-gate CI jobs, and completed conformance matrix coverage.
-- In Progress: spec-parity hardening, deeper orchestration behaviors, and formal proofs.
+- Completion: 82%
+- Done: parallel implementation batch merged across domain/runtime, config/workflow/workspace, tracker/linear, protocol/http/cli, docs, CI/proofs, test scaffolds, concrete Verus proof module rewrites, proof CI installation/guard wiring, explicit suite-gate CI jobs, completed conformance matrix coverage, runtime startup terminal cleanup, graceful shutdown hardening, CLI `--port`/`--logs-root` wiring, typed protocol policy mapping for approval/input-required/timeout plus normalized startup/runtime error categories, protocol startup payload builders with optional tool advertisement support, nested protocol payload extractors for session IDs/usage/tool-call metadata, live runtime handshake integration, buffered handshake stream preservation, unsupported dynamic tool-call fallback responses that keep sessions alive, concrete `linear_graphql` tool execution path, and serialization-safe domain rejection/violation diagnostic payloads.
+- In Progress: tracker normalization parity, live-integration hardening, and formal proofs.
 - Remaining: full production-grade completion gates from conformance through rollout.
 
 ## Scope
@@ -86,9 +86,9 @@ Deliver a production-grade Rust runtime for Symphony from first principles, with
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Program |
 | --- | --- | --- | --- |
 | Sec. 4, Sec. 7, Sec. 8, Sec. 16 core orchestration model | Implemented across domain/runtime | Complete edge-case parity for every transition trigger and recovery branch | `C.1`, `D.1`, `D.2` |
-| Sec. 5 and Sec. 6 workflow and config contract | Implemented in workflow/config crates | Close CLI override + runtime-reload integration drift under live runs | `C.2`, `F.2` |
+| Sec. 5 and Sec. 6 workflow and config contract | Implemented in workflow/config crates with port override precedence coverage | Close live-run reload drift and exhaustive override matrix coverage under fault scenarios | `C.2`, `D.1`, `F.2` |
 | Sec. 9 and Sec. 15 workspace and safety constraints | Implemented with path containment and hooks | Add real-integration fault drills for hook failures and filesystem anomalies | `C.4`, `D.3` |
-| Sec. 10, Sec. 11, Sec. 12 adapter and prompt pipeline | Partially implemented across protocol/tracker/runtime | Complete handshake/approval contract and full tracker normalization parity | `C.3`, `D.1` |
-| Sec. 13, Sec. 14 observability and recovery | Partially implemented | Finish dashboard parity, failure playbooks, and restart recovery contract docs/tests | `C.4`, `F.2` |
-| Sec. 17 and Sec. 18 validation and DoD gates | Mostly green on unit/integration | Finish conformance matrix and make all required suites mandatory in CI | `D.1`, `D.2`, `D.3`, `F.1` |
+| Sec. 10, Sec. 11, Sec. 12 adapter and prompt pipeline | Mostly implemented across protocol/tracker/runtime with typed policy mapping, startup payload builders, handshake wiring, nested extractor compatibility, unsupported tool-call fallback responses, and concrete `linear_graphql` handler support | Complete full tracker normalization parity and expand live compatibility coverage for tool/session variants | `C.3`, `D.1` |
+| Sec. 13, Sec. 14 observability and recovery | Partially implemented with optional HTTP host wiring | Finish dashboard parity, failure playbooks, and restart recovery contract docs/tests | `C.4`, `F.2` |
+| Sec. 17 and Sec. 18 validation and DoD gates | Conformance matrix is green; full workspace tests are green | Expand interleaving/soak depth to target profiles and make branch-protection requirements explicit | `D.2`, `D.3`, `F.1` |
 <!-- SPEC_GAP_MAP_END -->

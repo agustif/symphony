@@ -23,6 +23,7 @@ pub enum ProtocolMethodKind {
     TurnDelta,
     ApprovalRequested,
     InputRequired,
+    ToolCall,
     UnsupportedToolCall,
     Notification,
     Other,
@@ -41,8 +42,15 @@ impl ProtocolMethodKind {
             "turn/cancelled" => Self::TurnCancelled,
             "turn/end" => Self::TurnEnded,
             "turn/delta" | "turn/stream" | "turn/update" => Self::TurnDelta,
-            "approval/requested" | "approval/required" => Self::ApprovalRequested,
-            "turn/input_required" | "turn/input-required" | "input/required" => Self::InputRequired,
+            "approval/requested"
+            | "approval/required"
+            | "turn/approval_required"
+            | "turn/approval-required" => Self::ApprovalRequested,
+            "turn/input_required"
+            | "turn/input-required"
+            | "input/required"
+            | "item/tool/requestuserinput" => Self::InputRequired,
+            "item/tool/call" => Self::ToolCall,
             "unsupported_tool_call" | "unsupported/tool_call" => Self::UnsupportedToolCall,
             "notification" => Self::Notification,
             _ => Self::Other,
@@ -62,7 +70,7 @@ impl ProtocolMethodKind {
             | Self::TurnDelta => ProtocolMethodCategory::Turn,
             Self::ApprovalRequested => ProtocolMethodCategory::Approval,
             Self::InputRequired => ProtocolMethodCategory::Input,
-            Self::UnsupportedToolCall => ProtocolMethodCategory::Tooling,
+            Self::ToolCall | Self::UnsupportedToolCall => ProtocolMethodCategory::Tooling,
             Self::Notification => ProtocolMethodCategory::Notification,
             Self::Other => ProtocolMethodCategory::Other,
         }
@@ -82,6 +90,7 @@ impl ProtocolMethodKind {
             Self::TurnDelta => "turn/delta",
             Self::ApprovalRequested => "approval/requested",
             Self::InputRequired => "turn/input_required",
+            Self::ToolCall => "item/tool/call",
             Self::UnsupportedToolCall => "unsupported/tool_call",
             Self::Notification => "notification",
             Self::Other => "other",
@@ -124,6 +133,18 @@ mod tests {
         assert_eq!(
             ProtocolMethodKind::from_method("session.new"),
             ProtocolMethodKind::SessionNew
+        );
+        assert_eq!(
+            ProtocolMethodKind::from_method("turn/approval_required"),
+            ProtocolMethodKind::ApprovalRequested
+        );
+        assert_eq!(
+            ProtocolMethodKind::from_method("item/tool/requestUserInput"),
+            ProtocolMethodKind::InputRequired
+        );
+        assert_eq!(
+            ProtocolMethodKind::from_method("item/tool/call"),
+            ProtocolMethodKind::ToolCall
         );
     }
 

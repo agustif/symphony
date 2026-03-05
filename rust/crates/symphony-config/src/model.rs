@@ -148,6 +148,11 @@ impl Default for LogLevelConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ServerConfig {
+    pub port: Option<u16>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RuntimeConfig {
     pub tracker: TrackerConfig,
     pub polling: PollingConfig,
@@ -156,6 +161,7 @@ pub struct RuntimeConfig {
     pub agent: AgentConfig,
     pub codex: CodexConfig,
     pub log_level: LogLevelConfig,
+    pub server: ServerConfig,
     /// Monotonically increasing version to detect config changes for hot-reload
     #[serde(default)]
     pub version: u64,
@@ -219,6 +225,8 @@ pub struct CliOverrides {
     pub tracker_api_key: Option<String>,
     /// Override tracker project slug
     pub tracker_project_slug: Option<String>,
+    /// Override optional HTTP server port (`0` allows ephemeral local bind)
+    pub server_port: Option<u16>,
 }
 
 impl CliOverrides {
@@ -238,5 +246,6 @@ impl CliOverrides {
             && self.tracker_endpoint.is_none()
             && self.tracker_api_key.is_none()
             && self.tracker_project_slug.is_none()
+            && self.server_port.is_none()
     }
 }

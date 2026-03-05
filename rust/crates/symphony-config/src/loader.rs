@@ -10,7 +10,7 @@ use crate::{
     env::{expand_workspace_root, resolve_env_reference},
     model::{
         AgentConfig, CliOverrides, CodexConfig, DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT,
-        HooksConfig, LogLevelConfig, PollingConfig, TrackerConfig, WorkspaceConfig,
+        HooksConfig, LogLevelConfig, PollingConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
     },
     normalize::{normalize_state_list, normalize_state_name},
     validate,
@@ -48,6 +48,10 @@ pub fn from_front_matter_with_env(
 
     if let Some(section) = section(front_matter, "codex")? {
         config.codex = parse_codex_config(section, config.codex)?;
+    }
+
+    if let Some(section) = section(front_matter, "server")? {
+        config.server = parse_server_config(section, config.server)?;
     }
 
     apply_tracker_defaults(&mut config.tracker, env);
@@ -214,6 +218,16 @@ fn parse_codex_config(
     }
 
     Ok(codex)
+}
+
+fn parse_server_config(
+    section: &Mapping,
+    mut server: ServerConfig,
+) -> Result<ServerConfig, ConfigError> {
+    if let Some(port) = optional_u16(section, "port", "server.port")? {
+        server.port = Some(port);
+    }
+    Ok(server)
 }
 
 fn apply_tracker_defaults(tracker: &mut TrackerConfig, env: &dyn EnvProvider) {
@@ -462,6 +476,30 @@ fn optional_i64(
     Ok(Some(parse_i64(value, field)?))
 }
 
+fn optional_u16(
+    map: &Mapping,
+    key: &'static str,
+    field: &'static str,
+) -> Result<Option<u16>, ConfigError> {
+    let Some(value) = map.get(yaml_key(key)) else {
+        return Ok(None);
+    };
+
+    let parsed = parse_i64(value, field)?;
+    if parsed < 0 {
+        return Err(ConfigError::InvalidInteger {
+            field,
+            value: parsed.to_string(),
+        });
+    }
+
+    let converted = u16::try_from(parsed).map_err(|_| ConfigError::InvalidInteger {
+        field,
+        value: parsed.to_string(),
+    })?;
+    Ok(Some(converted))
+}
+
 fn parse_i64(value: &Value, field: &'static str) -> Result<i64, ConfigError> {
     match value {
         Value::Number(number) => {
@@ -627,6 +665,24 @@ tracker:
             config.tracker.terminal_states,
             vec!["closed".to_owned(), "in progress".to_owned()]
         );
+    }
+
+    #[test]
+    fn parses_optional_server_port_extension() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+server:
+  port: 0
+"#,
+        );
+
+        let config = from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[]))
+            .expect("config should parse");
+        assert_eq!(config.server.port, Some(0));
     }
 
     #[test]
@@ -919,6 +975,10 @@ pub fn apply_cli_overrides(
         config.tracker.project_slug = Some(project_slug.clone());
     }
 
+    if let Some(port) = overrides.server_port {
+        config.server.port = Some(port);
+    }
+
     validate(&config)?;
     Ok(config)
 }
@@ -1089,6 +1149,7 @@ mod cli_override_tests {
             max_concurrent_agents: Some(15),
             log_level: Some("warn".to_string()),
             tracker_endpoint: Some("https://custom.endpoint.com".to_string()),
+            server_port: Some(8080),
             ..Default::default()
         };
 
@@ -1100,6 +1161,7 @@ mod cli_override_tests {
             result.tracker.endpoint,
             "https://custom.endpoint.com".to_string()
         );
+        assert_eq!(result.server.port, Some(8080));
     }
 
     #[test]
@@ -1165,7 +1227,7 @@ agent:
     #[test]
     fn is_empty_returns_false_with_any_override() {
         let overrides = CliOverrides {
-            polling_interval_ms: Some(1000),
+            server_port: Some(3000),
             ..Default::default()
         };
         assert!(!overrides.is_empty());

@@ -1,9 +1,9 @@
 # symphony-config Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 95%
-- Done: typed schema/defaults, state/path normalization, env indirection hardening, and validation range checks with expanded tests.
-- In Progress: CLI override integration points.
+- Completion: 98%
+- Done: typed schema/defaults, state/path normalization, env indirection hardening, validation range checks with expanded tests, and `server.port` front-matter plus CLI override support.
+- In Progress: exhaustive precedence matrix generation across all overrideable fields.
 - Remaining: final SPEC parity and rollout gates.
 
 ## Scope
@@ -44,7 +44,7 @@ Own typed runtime configuration, defaults, env resolution, and validation.
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 6.1 resolution precedence and env indirection | Implemented | Finish exhaustive CLI override precedence coverage across every field | `C2.1` |
+| Sec. 6.1 resolution precedence and env indirection | Implemented, including `server.port` front-matter parsing and CLI override support | Add generated exhaustive precedence matrix coverage for every overrideable field | `C2.1`, `C3.1` |
 | Sec. 6.2 dynamic reload semantics | Partial via typed model | Verify runtime application semantics with config stamp/version transitions | `C2.1`, `C3.1` |
 | Sec. 6.3 dispatch preflight validation | Mostly implemented | Add explicit preflight error taxonomy mapping for operator diagnostics | `C2.2` |
 | Sec. 6.4 field cheat-sheet parity | Implemented in schema | Add generated spec-drift check between schema fields and SPEC examples | `C3.1` |

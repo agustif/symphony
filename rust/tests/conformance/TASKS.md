@@ -2,7 +2,7 @@
 
 ## Status Snapshot (2026-03-05)
 - Completion: 100%
-- Done: workflow/config, orchestrator, tracker, and app-server conformance matrix cases are implemented and green in suite-gate CI commands.
+- Done: workflow/config, orchestrator, tracker, and app-server conformance matrix cases are implemented and green in suite-gate CI commands, including explicit CLI `--port` precedence, protocol policy-outcome coverage (input-required, timeout, response-timeout, non-hard-fail unsupported tool-call marker events), startup tool-advertisement payload coverage, and nested ID/usage/tool-call extractor compatibility checks.
 - In Progress: regression maintenance only.
 - Remaining: expand matrix only when SPEC adds new obligations.
 

@@ -6,8 +6,10 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
+tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 clap = { version = "4.5", features = ["derive"] }
 symphony-config = { path = "../symphony-config" }
@@ -16,6 +18,8 @@ symphony-tracker = { path = "../symphony-tracker" }
 symphony-tracker-linear = { path = "../symphony-tracker-linear" }
 symphony-workflow = { path = "../symphony-workflow" }
 symphony-domain = { path = "../symphony-domain" }
+symphony-http = { path = "../symphony-http" }
+symphony-observability = { path = "../symphony-observability" }
 
 [dev-dependencies]
 symphony-testkit = { path = "../symphony-testkit" }

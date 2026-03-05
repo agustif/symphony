@@ -1,8 +1,11 @@
 #![forbid(unsafe_code)]
 
 use symphony_agent_protocol::{
-    LineOrigin, ProtocolError, ProtocolSequenceError, StreamLineParser, decode_line,
-    decode_stdout_line, stderr_message, stdout_event, validate_startup_turn_sequence,
+    LineOrigin, ProtocolError, ProtocolFailureReason, ProtocolPolicyOutcome, ProtocolSequenceError,
+    StreamLineParser, SupportedToolSpec, build_initialize_request, build_session_id,
+    classify_policy_outcome, decode_line, decode_stdout_line, extract_thread_id,
+    extract_tool_call_id, extract_tool_name, extract_turn_id, extract_usage, stderr_message,
+    stdout_event, validate_startup_turn_sequence,
 };
 use symphony_testkit::{protocol_stderr_line, protocol_stdout_line};
 
@@ -112,4 +115,108 @@ fn protocol_handshake_sequence_rejects_turn_before_session_start() {
             observed: "turn/start".to_owned(),
         }
     );
+}
+
+#[test]
+fn protocol_policy_maps_input_required_to_permanent_failure() {
+    let event = decode_stdout_line(r#"{"method":"item/tool/requestUserInput","params":{}}"#)
+        .expect("input-required event should decode");
+    assert_eq!(
+        classify_policy_outcome(&event),
+        Some(ProtocolPolicyOutcome::PermanentFailure(
+            ProtocolFailureReason::TurnInputRequired
+        ))
+    );
+}
+
+#[test]
+fn protocol_policy_maps_turn_timeout_to_retryable_failure() {
+    let event = decode_stdout_line(
+        r#"{"method":"turn/failed","error":{"code":"turn_timeout","message":"timed out"}}"#,
+    )
+    .expect("turn-failed timeout event should decode");
+    assert_eq!(
+        classify_policy_outcome(&event),
+        Some(ProtocolPolicyOutcome::RetryableFailure(
+            ProtocolFailureReason::TurnTimeout
+        ))
+    );
+}
+
+#[test]
+fn protocol_policy_does_not_hard_fail_unsupported_tool_call_marker_event() {
+    let event = decode_stdout_line(r#"{"method":"unsupported_tool_call","params":{}}"#)
+        .expect("unsupported-tool event should decode");
+    assert_eq!(classify_policy_outcome(&event), None);
+}
+
+#[test]
+fn protocol_policy_maps_response_timeout_to_retryable_failure() {
+    let event =
+        decode_stdout_line(r#"{"method":"startup/failed","error":{"code":"response_timeout"}}"#)
+            .expect("response-timeout event should decode");
+    assert_eq!(
+        classify_policy_outcome(&event),
+        Some(ProtocolPolicyOutcome::RetryableFailure(
+            ProtocolFailureReason::ResponseTimeout
+        ))
+    );
+}
+
+#[test]
+fn protocol_initialize_payload_advertises_supported_tools() {
+    let initialize = build_initialize_request(
+        serde_json::json!(1),
+        "symphony-rust",
+        "0.1.0",
+        &[SupportedToolSpec::new("linear_graphql")],
+    );
+    assert_eq!(initialize["method"], "initialize");
+    let supported = initialize["params"]["capabilities"]["tools"]["supported"]
+        .as_array()
+        .expect("supported tools should be advertised");
+    assert_eq!(supported.len(), 1);
+    assert_eq!(supported[0]["name"], "linear_graphql");
+}
+
+#[test]
+fn protocol_extractors_read_nested_thread_turn_ids_and_build_session_id() {
+    let event = decode_stdout_line(
+        r#"{"method":"thread/start","result":{"thread":{"id":"thread-42"},"turn":{"id":"turn-99"}}}"#,
+    )
+    .expect("thread-start result should decode");
+    let thread_id = extract_thread_id(&event);
+    let turn_id = extract_turn_id(&event);
+
+    assert_eq!(thread_id.as_deref(), Some("thread-42"));
+    assert_eq!(turn_id.as_deref(), Some("turn-99"));
+    assert_eq!(
+        build_session_id(thread_id.as_deref(), turn_id.as_deref()),
+        Some("thread-42-turn-99".to_owned())
+    );
+}
+
+#[test]
+fn protocol_usage_extractor_accepts_usage_shape_variants() {
+    let event = decode_stdout_line(
+        r#"{"method":"turn/completed","result":{"turn":{"usage":{"inputTokens":120,"completionTokens":30}}}}"#,
+    )
+    .expect("usage payload should decode");
+    let usage = extract_usage(&event).expect("usage should be extracted");
+    assert_eq!(usage.input_tokens, 120);
+    assert_eq!(usage.output_tokens, 30);
+    assert_eq!(usage.total_tokens, 150);
+}
+
+#[test]
+fn protocol_extractors_read_tool_call_id_and_name_variants() {
+    let event = decode_stdout_line(
+        r#"{"id":"call-9","method":"item/tool/call","params":{"tool":{"name":"linear_graphql"}}}"#,
+    )
+    .expect("tool-call payload should decode");
+    assert_eq!(
+        extract_tool_call_id(&event),
+        Some(serde_json::json!("call-9"))
+    );
+    assert_eq!(extract_tool_name(&event), Some("linear_graphql".to_owned()));
 }

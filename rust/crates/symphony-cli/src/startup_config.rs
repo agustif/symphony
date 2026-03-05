@@ -13,6 +13,7 @@ pub struct RuntimeStartupConfig {
     pub config_path: PathBuf,
     pub workflow_path: PathBuf,
     pub workflow_path_explicit: bool,
+    pub logs_root: Option<PathBuf>,
     pub cli_overrides: CliOverrides,
 }
 
@@ -32,12 +33,23 @@ pub fn resolve_workflow_path(workflow_path: Option<&Path>, cwd: &Path) -> PathBu
     }
 }
 
+pub fn resolve_logs_root(logs_root: Option<&Path>, cwd: &Path) -> Option<PathBuf> {
+    logs_root.map(|path| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        }
+    })
+}
+
 pub fn startup_config_from_cli(cli: CliArgs, cwd: &Path) -> RuntimeStartupConfig {
     let cli_overrides = cli.to_cli_overrides();
     RuntimeStartupConfig {
         config_path: resolve_config_path(&cli.config, cwd),
         workflow_path: resolve_workflow_path(cli.workflow.as_deref(), cwd),
         workflow_path_explicit: cli.workflow.is_some(),
+        logs_root: resolve_logs_root(cli.logs_root.as_deref(), cwd),
         cli_overrides,
     }
 }
@@ -130,11 +142,14 @@ mod tests {
             tracker_endpoint: None,
             tracker_api_key: None,
             tracker_project_slug: None,
+            port: None,
+            logs_root: None,
         };
 
         let startup = startup_config_from_cli(args, &cwd);
         assert_eq!(startup.workflow_path, cwd.join("WORKFLOW.md"));
         assert!(!startup.workflow_path_explicit);
+        assert!(startup.logs_root.is_none());
         assert!(startup.cli_overrides.is_empty());
     }
 
@@ -153,6 +168,8 @@ mod tests {
             tracker_endpoint: Some("https://linear.example/graphql".to_owned()),
             tracker_api_key: Some("cli-token".to_owned()),
             tracker_project_slug: Some("cli-project".to_owned()),
+            port: Some(4040),
+            logs_root: Some(PathBuf::from("var/log/symphony")),
         };
 
         let startup = startup_config_from_cli(args, &cwd);
@@ -160,6 +177,7 @@ mod tests {
         assert_eq!(startup.config_path, cwd.join("symphony.runtime.json"));
         assert_eq!(startup.workflow_path, cwd.join("WORKFLOW.md"));
         assert!(startup.workflow_path_explicit);
+        assert_eq!(startup.logs_root, Some(cwd.join("var/log/symphony")));
         assert_eq!(startup.cli_overrides.polling_interval_ms, Some(55_000));
         assert_eq!(startup.cli_overrides.max_concurrent_agents, Some(11));
         assert_eq!(startup.cli_overrides.max_turns, Some(31));
@@ -181,6 +199,7 @@ mod tests {
             startup.cli_overrides.tracker_project_slug.as_deref(),
             Some("cli-project")
         );
+        assert_eq!(startup.cli_overrides.server_port, Some(4040));
     }
 
     #[test]

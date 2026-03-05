@@ -2,8 +2,8 @@
 
 pub mod worker;
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use symphony_config::RuntimeConfig;
@@ -11,9 +11,15 @@ use symphony_domain::{
     Command, Event, InvariantError, IssueId, OrchestratorState, reduce, validate_invariants,
 };
 use symphony_observability::RuntimeSnapshot;
-use symphony_tracker::{TrackerClient, TrackerError};
+use symphony_tracker::{TrackerClient, TrackerError, TrackerIssue, TrackerState};
+use symphony_workspace::{WorkspaceHooks, remove_workspace, remove_workspace_with_hooks};
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
+use worker::{ShellHookExecutor, WorkerContext, WorkerLauncher, WorkerOutcome};
+
+const DEFAULT_PROMPT_TEMPLATE: &str =
+    "Issue {{issue_identifier}}: {{issue_title}}\n{{issue_description}}";
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -108,23 +114,42 @@ pub struct WorkerExitResult {
 
 pub struct Runtime<T: TrackerClient> {
     tracker: Arc<T>,
+    worker_launcher: Arc<dyn WorkerLauncher>,
     state: Mutex<OrchestratorState>,
-    last_seen: Mutex<std::collections::HashMap<IssueId, std::time::Instant>>,
+    last_seen: Mutex<HashMap<IssueId, std::time::Instant>>,
+    active_workers: StdMutex<HashMap<IssueId, JoinHandle<()>>>,
+    scheduled_retries: StdMutex<HashMap<IssueId, JoinHandle<()>>>,
+    pending_terminal_cleanup: StdMutex<HashMap<IssueId, String>>,
+    prompt_template: RwLock<String>,
     snapshot_tx: tokio::sync::watch::Sender<RuntimeSnapshot>,
 }
 
-impl<T: TrackerClient> Runtime<T> {
+impl<T: TrackerClient + 'static> Runtime<T> {
     pub fn new(tracker: Arc<T>) -> Self {
+        Self::with_worker_launcher(tracker, Arc::new(worker::ShellWorkerLauncher))
+    }
+
+    pub fn with_worker_launcher(tracker: Arc<T>, worker_launcher: Arc<dyn WorkerLauncher>) -> Self {
         let (snapshot_tx, _) = tokio::sync::watch::channel(RuntimeSnapshot {
             running: 0,
             retrying: 0,
         });
         Self {
             tracker,
+            worker_launcher,
             state: Mutex::new(OrchestratorState::default()),
-            last_seen: Mutex::new(std::collections::HashMap::new()),
+            last_seen: Mutex::new(HashMap::new()),
+            active_workers: StdMutex::new(HashMap::new()),
+            scheduled_retries: StdMutex::new(HashMap::new()),
+            pending_terminal_cleanup: StdMutex::new(HashMap::new()),
+            prompt_template: RwLock::new(DEFAULT_PROMPT_TEMPLATE.to_owned()),
             snapshot_tx,
         }
+    }
+
+    pub async fn set_prompt_template(&self, template: String) {
+        let mut guard = self.prompt_template.write().await;
+        *guard = template;
     }
 
     pub fn subscribe_snapshots(&self) -> tokio::sync::watch::Receiver<RuntimeSnapshot> {
@@ -197,6 +222,60 @@ impl<T: TrackerClient> Runtime<T> {
             tracing::warn!("Worker stalled for issue {:?}", issue_id);
         }
 
+        let active_states = tracker_states_from_names(&config.tracker.active_states);
+        let terminal_states = tracker_states_from_names(&config.tracker.terminal_states);
+        let running_ids: Vec<IssueId> = state.running.keys().cloned().collect();
+        if !running_ids.is_empty() {
+            match self.tracker.fetch_states_by_ids(&running_ids).await {
+                Ok(states_by_id) => {
+                    let mut terminal_running_ids = Vec::new();
+                    let mut non_active_running_ids = Vec::new();
+
+                    for issue_id in running_ids {
+                        let Some(tracker_state) = states_by_id.get(&issue_id) else {
+                            non_active_running_ids.push(issue_id);
+                            continue;
+                        };
+
+                        if tracker_state.is_terminal(&terminal_states) {
+                            terminal_running_ids.push(issue_id);
+                            continue;
+                        }
+
+                        if !tracker_state_matches_any(tracker_state, &active_states) {
+                            non_active_running_ids.push(issue_id);
+                        }
+                    }
+
+                    sort_issue_ids(&mut terminal_running_ids);
+                    sort_issue_ids(&mut non_active_running_ids);
+
+                    for issue_id in terminal_running_ids {
+                        if let Some(identifier) = state
+                            .running
+                            .get(&issue_id)
+                            .and_then(|entry| entry.identifier.clone())
+                        {
+                            self.queue_terminal_cleanup(issue_id.clone(), identifier);
+                        } else {
+                            tracing::warn!(
+                                issue_id = %issue_id.0,
+                                "missing running issue identifier for terminal workspace cleanup"
+                            );
+                        }
+                        state = apply_event(state, Event::Release(issue_id), &mut commands)?;
+                    }
+
+                    for issue_id in non_active_running_ids {
+                        state = apply_event(state, Event::Release(issue_id), &mut commands)?;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("running state refresh failed: {error}");
+                }
+            }
+        }
+
         for issue_id in non_active_reconciliation_ids(&state, &candidate_set) {
             state = apply_event(state, Event::Release(issue_id), &mut commands)?;
         }
@@ -237,8 +316,20 @@ impl<T: TrackerClient> Runtime<T> {
                 *running_by_state.entry(state_key).or_insert(0) += 1;
             }
 
-            state = apply_event(state, Event::Claim(issue_id.clone()), &mut commands)?;
-            state = apply_event(state, Event::MarkRunning(issue_id), &mut commands)?;
+            let dispatch_issue_id = issue_id.clone();
+            state = apply_event(
+                state,
+                Event::Claim(dispatch_issue_id.clone()),
+                &mut commands,
+            )?;
+            state = apply_event(
+                state,
+                Event::MarkRunning(dispatch_issue_id.clone()),
+                &mut commands,
+            )?;
+            if let Some(entry) = state.running.get_mut(&dispatch_issue_id) {
+                entry.identifier = Some(issue.identifier.clone());
+            }
             global_available = global_available.saturating_sub(1);
         }
 
@@ -375,7 +466,7 @@ impl<T: TrackerClient> Runtime<T> {
     }
 
     pub async fn run_poll_loop(
-        &self,
+        self: Arc<Self>,
         config: std::sync::Arc<tokio::sync::RwLock<RuntimeConfig>>,
         mut refresh_rx: tokio::sync::mpsc::Receiver<()>,
         mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
@@ -392,6 +483,8 @@ impl<T: TrackerClient> Runtime<T> {
             config_version = current_version,
             "Starting poll loop"
         );
+        self.startup_terminal_workspace_cleanup(&initial_config)
+            .await;
 
         loop {
             tokio::select! {
@@ -410,8 +503,9 @@ impl<T: TrackerClient> Runtime<T> {
                         current_version = new_config.version;
                     }
 
-                    if let Err(e) = self.run_tick(&new_config).await {
-                        tracing::error!("Tick failed: {:?}", e);
+                    match self.run_tick(&new_config).await {
+                        Ok(tick) => self.process_tick_commands(tick.commands, new_config.clone()).await,
+                        Err(error) => tracing::error!("Tick failed: {:?}", error),
                     }
                     interval = tokio::time::interval(Duration::from_millis(new_config.polling.interval_ms.max(100)));
                     interval.reset();
@@ -429,18 +523,370 @@ impl<T: TrackerClient> Runtime<T> {
                         current_version = new_config.version;
                     }
 
-                    if let Err(e) = self.run_tick(&new_config).await {
-                        tracing::error!("Refresh tick failed: {:?}", e);
+                    match self.run_tick(&new_config).await {
+                        Ok(tick) => self.process_tick_commands(tick.commands, new_config.clone()).await,
+                        Err(error) => tracing::error!("Refresh tick failed: {:?}", error),
                     }
                     interval = tokio::time::interval(Duration::from_millis(new_config.polling.interval_ms.max(100)));
                     interval.reset();
                 }
                 _ = shutdown_rx.recv() => {
                     tracing::info!("Shutting down poll loop");
+                    self.abort_background_tasks();
                     break;
                 }
             }
         }
+    }
+
+    async fn process_tick_commands(
+        self: &Arc<Self>,
+        commands: Vec<Command>,
+        config: RuntimeConfig,
+    ) {
+        for command in commands {
+            match command {
+                Command::Dispatch(issue_id) => {
+                    self.spawn_worker_task(issue_id, 1, config.clone());
+                }
+                Command::ScheduleRetry { issue_id, attempt } => {
+                    let retry_policy = retry_policy_for_config(&config);
+                    let schedule =
+                        retry_policy.schedule_retry(issue_id, attempt, RetryKind::Failure);
+                    self.schedule_retry_task(schedule, config.clone());
+                }
+                Command::ReleaseClaim(issue_id) => {
+                    self.cancel_retry_task(&issue_id);
+                    self.abort_worker_task(&issue_id);
+                    self.cleanup_terminal_workspace_if_pending(&issue_id, &config);
+                }
+                Command::TransitionRejected { issue_id, reason } => {
+                    tracing::warn!(issue_id = %issue_id.0, reason = %reason, "transition rejected");
+                }
+            }
+        }
+    }
+
+    fn spawn_worker_task(self: &Arc<Self>, issue_id: IssueId, attempt: u32, config: RuntimeConfig) {
+        if self.has_active_worker(&issue_id) {
+            return;
+        }
+
+        let runtime = Arc::clone(self);
+        let issue_for_task = issue_id.clone();
+        let handle = tokio::spawn(async move {
+            runtime
+                .execute_worker(issue_for_task.clone(), attempt, config)
+                .await;
+            let mut workers = lock_unpoisoned(&runtime.active_workers);
+            workers.remove(&issue_for_task);
+        });
+
+        let mut workers = lock_unpoisoned(&self.active_workers);
+        workers.insert(issue_id, handle);
+    }
+
+    fn has_active_worker(&self, issue_id: &IssueId) -> bool {
+        let workers = lock_unpoisoned(&self.active_workers);
+        workers
+            .get(issue_id)
+            .is_some_and(|handle| !handle.is_finished())
+    }
+
+    async fn execute_worker(
+        self: &Arc<Self>,
+        issue_id: IssueId,
+        attempt: u32,
+        config: RuntimeConfig,
+    ) {
+        let issue = match self.fetch_issue(&issue_id).await {
+            Ok(Some(issue)) => issue,
+            Ok(None) => {
+                tracing::warn!(issue_id = %issue_id.0, "dispatch issue not found in tracker candidates");
+                let retry_policy = retry_policy_for_config(&config);
+                let _ = self
+                    .handle_worker_exit(issue_id, WorkerExit::PermanentFailure, &retry_policy)
+                    .await;
+                return;
+            }
+            Err(error) => {
+                tracing::error!(issue_id = %issue_id.0, "failed to fetch issue for worker launch: {error}");
+                let retry_policy = retry_policy_for_config(&config);
+                let _ = self
+                    .handle_worker_exit(issue_id, WorkerExit::RetryableFailure, &retry_policy)
+                    .await;
+                return;
+            }
+        };
+
+        let hooks = workspace_hooks_from_config(&config);
+        self.record_running_identifier(&issue_id, &issue.identifier)
+            .await;
+        let prompt_template = self.prompt_template.read().await.clone();
+        let worker_context = match WorkerContext::new(
+            issue,
+            attempt,
+            config.workspace.root.clone(),
+            hooks,
+            config.tracker.clone(),
+            config.codex.clone(),
+            prompt_template,
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                tracing::error!(issue_id = %issue_id.0, "invalid worker context: {error}");
+                let retry_policy = retry_policy_for_config(&config);
+                let _ = self
+                    .handle_worker_exit(issue_id, WorkerExit::PermanentFailure, &retry_policy)
+                    .await;
+                return;
+            }
+        };
+
+        let worker_outcome = match self.worker_launcher.launch(worker_context).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::error!(issue_id = %issue_id.0, "worker launch failed: {error}");
+                WorkerOutcome::RetryableFailure
+            }
+        };
+
+        let worker_exit = map_worker_outcome(worker_outcome);
+        let retry_policy = retry_policy_for_config(&config);
+        match self
+            .handle_worker_exit(issue_id.clone(), worker_exit, &retry_policy)
+            .await
+        {
+            Ok(result) => {
+                if let Some(schedule) = result.retry_schedule {
+                    self.schedule_retry_task(schedule, config);
+                }
+            }
+            Err(error) => {
+                tracing::error!(issue_id = %issue_id.0, "failed to process worker exit: {error}");
+            }
+        }
+    }
+
+    async fn fetch_issue(&self, issue_id: &IssueId) -> Result<Option<TrackerIssue>, TrackerError> {
+        let candidates = self.tracker.fetch_candidates().await?;
+        Ok(candidates.into_iter().find(|issue| issue.id == *issue_id))
+    }
+
+    async fn record_running_identifier(&self, issue_id: &IssueId, identifier: &str) {
+        let mut state = self.state.lock().await;
+        if let Some(entry) = state.running.get_mut(issue_id) {
+            entry.identifier = Some(identifier.to_owned());
+        }
+    }
+
+    fn queue_terminal_cleanup(&self, issue_id: IssueId, identifier: String) {
+        let mut pending = lock_unpoisoned(&self.pending_terminal_cleanup);
+        pending.insert(issue_id, identifier);
+    }
+
+    fn cleanup_terminal_workspace_if_pending(&self, issue_id: &IssueId, config: &RuntimeConfig) {
+        let identifier = {
+            let mut pending = lock_unpoisoned(&self.pending_terminal_cleanup);
+            pending.remove(issue_id)
+        };
+
+        if let Some(identifier) = identifier {
+            self.cleanup_workspace_for_identifier(config, &identifier);
+        }
+    }
+
+    fn cleanup_workspace_for_identifier(&self, config: &RuntimeConfig, issue_identifier: &str) {
+        let hooks = workspace_hooks_from_config(config);
+        let hook_executor = ShellHookExecutor;
+        match remove_workspace_with_hooks(
+            &config.workspace.root,
+            issue_identifier,
+            &hooks,
+            &hook_executor,
+        ) {
+            Ok(true) => {
+                tracing::info!(
+                    issue_identifier,
+                    "removed terminal workspace with before_remove hook"
+                );
+            }
+            Ok(false) => {
+                tracing::debug!(
+                    issue_identifier,
+                    "terminal workspace already absent during cleanup"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    issue_identifier,
+                    "before_remove cleanup path failed ({error}); falling back to direct removal"
+                );
+                match remove_workspace(&config.workspace.root, issue_identifier) {
+                    Ok(true) => {
+                        tracing::info!(
+                            issue_identifier,
+                            "removed terminal workspace without hooks"
+                        );
+                    }
+                    Ok(false) => {
+                        tracing::debug!(
+                            issue_identifier,
+                            "terminal workspace already absent during cleanup fallback"
+                        );
+                    }
+                    Err(remove_error) => {
+                        tracing::warn!(
+                            issue_identifier,
+                            "terminal workspace cleanup failed: {remove_error}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    async fn startup_terminal_workspace_cleanup(&self, config: &RuntimeConfig) {
+        let terminal_states = tracker_states_from_names(&config.tracker.terminal_states);
+        if terminal_states.is_empty() {
+            return;
+        }
+
+        match self
+            .tracker
+            .fetch_terminal_candidates(&terminal_states)
+            .await
+        {
+            Ok(terminal_issues) => {
+                for issue in terminal_issues {
+                    self.cleanup_workspace_for_identifier(config, &issue.identifier);
+                }
+            }
+            Err(error) => {
+                tracing::warn!("startup terminal cleanup skipped due to tracker error: {error}");
+            }
+        }
+    }
+
+    fn schedule_retry_task(self: &Arc<Self>, schedule: RetrySchedule, config: RuntimeConfig) {
+        self.cancel_retry_task(&schedule.issue_id);
+
+        let runtime = Arc::clone(self);
+        let issue_id = schedule.issue_id.clone();
+        let attempt = schedule.attempt;
+        let delay = schedule.delay;
+        let issue_for_task = issue_id.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            runtime
+                .promote_retry_and_spawn(issue_for_task.clone(), attempt, config)
+                .await;
+            let mut retries = lock_unpoisoned(&runtime.scheduled_retries);
+            retries.remove(&issue_for_task);
+        });
+
+        let mut retries = lock_unpoisoned(&self.scheduled_retries);
+        retries.insert(issue_id, handle);
+    }
+
+    async fn promote_retry_and_spawn(
+        self: &Arc<Self>,
+        issue_id: IssueId,
+        attempt: u32,
+        config: RuntimeConfig,
+    ) {
+        let mut state_guard = self.state.lock().await;
+        let mut state = state_guard.clone();
+        let mut commands = Vec::new();
+
+        let next_state =
+            match apply_event(state, Event::MarkRunning(issue_id.clone()), &mut commands) {
+                Ok(next_state) => next_state,
+                Err(error) => {
+                    tracing::warn!(issue_id = %issue_id.0, "retry promotion rejected: {error}");
+                    return;
+                }
+            };
+
+        state = next_state;
+        *state_guard = state.clone();
+        drop(state_guard);
+
+        let _ = self.snapshot_tx.send(RuntimeSnapshot {
+            running: state.running.len(),
+            retrying: state.retry_attempts.len(),
+        });
+
+        if commands.iter().any(
+            |command| matches!(command, Command::Dispatch(dispatched) if *dispatched == issue_id),
+        ) {
+            self.spawn_worker_task(issue_id, attempt, config);
+        }
+    }
+
+    fn cancel_retry_task(&self, issue_id: &IssueId) {
+        let mut retries = lock_unpoisoned(&self.scheduled_retries);
+        if let Some(handle) = retries.remove(issue_id) {
+            handle.abort();
+        }
+    }
+
+    fn abort_worker_task(&self, issue_id: &IssueId) {
+        let mut workers = lock_unpoisoned(&self.active_workers);
+        if let Some(handle) = workers.remove(issue_id) {
+            handle.abort();
+        }
+    }
+
+    fn abort_background_tasks(&self) {
+        let mut workers = lock_unpoisoned(&self.active_workers);
+        for (_, handle) in workers.drain() {
+            handle.abort();
+        }
+        drop(workers);
+
+        let mut retries = lock_unpoisoned(&self.scheduled_retries);
+        for (_, handle) in retries.drain() {
+            handle.abort();
+        }
+
+        let mut pending_cleanup = lock_unpoisoned(&self.pending_terminal_cleanup);
+        pending_cleanup.clear();
+    }
+}
+
+fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn map_worker_outcome(outcome: WorkerOutcome) -> WorkerExit {
+    match outcome {
+        WorkerOutcome::Completed => WorkerExit::Completed,
+        WorkerOutcome::Continuation => WorkerExit::Continuation,
+        WorkerOutcome::RetryableFailure => WorkerExit::RetryableFailure,
+        WorkerOutcome::PermanentFailure => WorkerExit::PermanentFailure,
+    }
+}
+
+fn retry_policy_for_config(config: &RuntimeConfig) -> RetryPolicy {
+    let poll_ms = config.polling.interval_ms.max(10);
+    RetryPolicy {
+        continuation_delay: Duration::from_millis(poll_ms),
+        failure_base_delay: Duration::from_millis(poll_ms),
+        max_failure_backoff: Duration::from_millis(config.agent.max_retry_backoff_ms.max(poll_ms)),
+    }
+}
+
+fn workspace_hooks_from_config(config: &RuntimeConfig) -> WorkspaceHooks {
+    WorkspaceHooks {
+        after_create: config.hooks.after_create.clone(),
+        before_run: config.hooks.before_run.clone(),
+        after_run: config.hooks.after_run.clone(),
+        before_remove: config.hooks.before_remove.clone(),
+        timeout_ms: config.hooks.timeout_ms,
+        output_limit_bytes: symphony_workspace::DEFAULT_HOOK_OUTPUT_LIMIT_BYTES,
     }
 }
 
@@ -497,6 +943,24 @@ fn sort_issue_ids(issue_ids: &mut Vec<IssueId>) {
     issue_ids.dedup();
 }
 
+fn tracker_states_from_names(states: &[String]) -> Vec<TrackerState> {
+    states
+        .iter()
+        .map(|value| TrackerState::new(value.clone()))
+        .collect()
+}
+
+fn tracker_state_matches_any(state: &TrackerState, allowed: &[TrackerState]) -> bool {
+    let Some(state_key) = state.normalized_key() else {
+        return false;
+    };
+
+    allowed
+        .iter()
+        .filter_map(TrackerState::normalized_key)
+        .any(|candidate| candidate == state_key)
+}
+
 fn next_retry_attempt(state: &OrchestratorState, issue_id: &IssueId) -> u32 {
     state
         .retry_attempts
@@ -529,7 +993,13 @@ fn apply_event(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use async_trait::async_trait;
     use symphony_domain::{Command, IssueId, validate_invariants};
@@ -537,6 +1007,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::*;
+    use crate::worker::{WorkerError, WorkerOutcome};
 
     #[derive(Default)]
     struct MutableTracker {
@@ -554,6 +1025,34 @@ mod tests {
     impl TrackerClient for MutableTracker {
         async fn fetch_candidates(&self) -> Result<Vec<TrackerIssue>, TrackerError> {
             Ok(self.issues.lock().await.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockWorkerLauncher {
+        outcomes: Mutex<VecDeque<WorkerOutcome>>,
+        launch_count: AtomicUsize,
+    }
+
+    impl MockWorkerLauncher {
+        fn with_outcomes(outcomes: Vec<WorkerOutcome>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into()),
+                launch_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn launch_count(&self) -> usize {
+            self.launch_count.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl WorkerLauncher for MockWorkerLauncher {
+        async fn launch(&self, _ctx: WorkerContext) -> Result<WorkerOutcome, WorkerError> {
+            self.launch_count.fetch_add(1, Ordering::Relaxed);
+            let mut outcomes = self.outcomes.lock().await;
+            Ok(outcomes.pop_front().unwrap_or(WorkerOutcome::Completed))
         }
     }
 
@@ -618,10 +1117,12 @@ mod tests {
     #[tokio::test]
     async fn scheduler_releases_stale_claims_in_sorted_order() {
         let tracker = Arc::new(MutableTracker::default());
-        tracker.set_candidates(Vec::new()).await;
+        let running_issue = issue("SYM-200");
+        tracker
+            .set_candidates(vec![tracker_issue(&running_issue.0)])
+            .await;
         let runtime = Runtime::new(Arc::clone(&tracker));
 
-        let running_issue = issue("SYM-200");
         {
             let mut state = runtime.state.lock().await;
             state.claimed.insert(issue("SYM-20"));
@@ -954,6 +1455,72 @@ mod tests {
         let state = runtime.state().await;
         assert!(!state.running.contains_key(&issue_id));
         assert!(state.retry_attempts.contains_key(&issue_id));
+    }
+
+    #[tokio::test]
+    async fn dispatch_command_launches_worker_and_releases_claim_on_completion() {
+        let issue_id = issue("SYM-600");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker.set_candidates(vec![tracker_issue("SYM-600")]).await;
+        let launcher = Arc::new(MockWorkerLauncher::with_outcomes(vec![
+            WorkerOutcome::Completed,
+        ]));
+        let runtime = Arc::new(Runtime::with_worker_launcher(
+            Arc::clone(&tracker),
+            launcher.clone(),
+        ));
+
+        let mut config = RuntimeConfig::default();
+        config.polling.interval_ms = 10;
+        config.codex.command = "true".to_owned();
+
+        let tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("tick should succeed");
+        runtime.process_tick_commands(tick.commands, config).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let state = runtime.state().await;
+        assert!(!state.claimed.contains(&issue_id));
+        assert!(!state.running.contains_key(&issue_id));
+        assert_eq!(launcher.launch_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn retryable_failure_schedules_retry_and_relaunches_worker() {
+        let issue_id = issue("SYM-601");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker.set_candidates(vec![tracker_issue("SYM-601")]).await;
+        let launcher = Arc::new(MockWorkerLauncher::with_outcomes(vec![
+            WorkerOutcome::RetryableFailure,
+            WorkerOutcome::Completed,
+        ]));
+        let runtime = Arc::new(Runtime::with_worker_launcher(
+            Arc::clone(&tracker),
+            launcher.clone(),
+        ));
+
+        let mut config = RuntimeConfig::default();
+        config.polling.interval_ms = 10;
+        config.agent.max_retry_backoff_ms = 20;
+        config.codex.command = "true".to_owned();
+
+        let tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("tick should succeed");
+        runtime
+            .process_tick_commands(tick.commands, config.clone())
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        let state = runtime.state().await;
+        assert!(!state.claimed.contains(&issue_id));
+        assert!(!state.running.contains_key(&issue_id));
+        assert!(!state.retry_attempts.contains_key(&issue_id));
+        assert_eq!(launcher.launch_count(), 2);
     }
 
     #[test]

@@ -51,6 +51,14 @@ pub struct CliArgs {
     /// Override tracker project slug
     #[arg(long, value_name = "SLUG")]
     pub tracker_project_slug: Option<String>,
+
+    /// Enable optional HTTP server on this port (`0` requests an ephemeral local port)
+    #[arg(long, value_name = "PORT")]
+    pub port: Option<u16>,
+
+    /// Optional directory for host log file output
+    #[arg(long, value_name = "PATH")]
+    pub logs_root: Option<PathBuf>,
 }
 
 impl CliArgs {
@@ -66,6 +74,7 @@ impl CliArgs {
             tracker_endpoint: self.tracker_endpoint.clone(),
             tracker_api_key: self.tracker_api_key.clone(),
             tracker_project_slug: self.tracker_project_slug.clone(),
+            server_port: self.port,
         }
     }
 }
@@ -88,6 +97,8 @@ mod tests {
             tracker_endpoint: Some("https://custom.endpoint.com".to_string()),
             tracker_api_key: Some("api-key".to_string()),
             tracker_project_slug: Some("my-project".to_string()),
+            port: Some(8080),
+            logs_root: Some(PathBuf::from("/tmp/logs")),
         };
 
         let overrides = args.to_cli_overrides();
@@ -109,6 +120,7 @@ mod tests {
             overrides.tracker_project_slug,
             Some("my-project".to_string())
         );
+        assert_eq!(overrides.server_port, Some(8080));
     }
 
     #[test]
@@ -125,6 +137,8 @@ mod tests {
             tracker_endpoint: None,
             tracker_api_key: None,
             tracker_project_slug: None,
+            port: None,
+            logs_root: None,
         };
 
         let overrides = args.to_cli_overrides();

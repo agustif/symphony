@@ -101,6 +101,31 @@ pub enum TransitionRejection {
     RetryAttemptRegression,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitionRejectionPayload {
+    pub code: String,
+    pub message: String,
+}
+
+impl TransitionRejection {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::AlreadyClaimed => "already_claimed",
+            Self::MissingClaim => "missing_claim",
+            Self::AlreadyRunning => "already_running",
+            Self::InvalidRetryAttempt => "invalid_retry_attempt",
+            Self::RetryAttemptRegression => "retry_attempt_regression",
+        }
+    }
+
+    pub fn to_payload(&self) -> TransitionRejectionPayload {
+        TransitionRejectionPayload {
+            code: self.code().to_owned(),
+            message: self.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum InvariantError {
     #[error("issue cannot run without claim")]
@@ -113,6 +138,31 @@ pub enum InvariantError {
     RetryAttemptMustBePositive,
     #[error("transition rejected: {0}")]
     TransitionRejected(TransitionRejection),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvariantViolation {
+    pub code: String,
+    pub message: String,
+}
+
+impl InvariantError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::RunningWithoutClaim => "running_without_claim",
+            Self::RetryWithoutClaim => "retry_without_claim",
+            Self::RunningAndRetrying => "running_and_retrying",
+            Self::RetryAttemptMustBePositive => "retry_attempt_must_be_positive",
+            Self::TransitionRejected(rejection) => rejection.code(),
+        }
+    }
+
+    pub fn to_violation(&self) -> InvariantViolation {
+        InvariantViolation {
+            code: self.code().to_owned(),
+            message: self.to_string(),
+        }
+    }
 }
 
 impl From<TransitionRejection> for InvariantError {
@@ -474,5 +524,27 @@ mod tests {
             },
         );
         assert_deterministic(retrying_state, Event::Release(issue_id));
+    }
+
+    #[test]
+    fn transition_rejection_payload_is_serialization_safe() {
+        let payload = TransitionRejection::InvalidRetryAttempt.to_payload();
+        assert_eq!(payload.code, "invalid_retry_attempt");
+        assert!(payload.message.contains("invalid retry attempt"));
+        let encoded = serde_json::to_string(&payload).expect("payload should serialize");
+        let decoded: TransitionRejectionPayload =
+            serde_json::from_str(&encoded).expect("payload should deserialize");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn invariant_error_violation_payload_is_serialization_safe() {
+        let violation = InvariantError::RetryWithoutClaim.to_violation();
+        assert_eq!(violation.code, "retry_without_claim");
+        assert!(violation.message.contains("retry"));
+        let encoded = serde_json::to_string(&violation).expect("violation should serialize");
+        let decoded: InvariantViolation =
+            serde_json::from_str(&encoded).expect("violation should deserialize");
+        assert_eq!(decoded, violation);
     }
 }

@@ -138,3 +138,27 @@ Run tests.
         }
     );
 }
+
+#[test]
+fn cli_port_override_takes_precedence_over_workflow_server_port() {
+    let env = TestEnv::from_entries(&[("LINEAR_API_KEY", "env-token")]);
+    let config = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+server:
+  port: 3000
+---
+Run tests.
+"#,
+        &env,
+    );
+    let overrides = CliOverrides {
+        server_port: Some(9000),
+        ..Default::default()
+    };
+
+    let applied = apply_cli_overrides(config, &overrides).expect("overrides should apply");
+    assert_eq!(applied.server.port, Some(9000));
+}

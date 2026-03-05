@@ -12,6 +12,6 @@ pub use error::ConfigError;
 pub use loader::{apply_cli_overrides, from_front_matter, from_front_matter_with_env};
 pub use model::{
     AgentConfig, CliOverrides, CodexConfig, HooksConfig, LogLevelConfig, PollingConfig,
-    RuntimeConfig, TrackerConfig, WorkspaceConfig,
+    RuntimeConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
 };
 pub use validate::validate;
