@@ -2,9 +2,52 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-UPSTREAM_DIR="${1:-/tmp/verus-upstream}"
-GUIDE_DIR="$UPSTREAM_DIR/source/docs/guide"
+UPSTREAM_DIR="/tmp/verus-upstream"
 OUT_FILE="$ROOT_DIR/rust/proofs/verus/reference/verus-guide-print.md"
+upstream_set=0
+
+usage() {
+  cat <<EOF
+usage: $(basename "$0") [UPSTREAM_DIR] [--output PATH]
+
+Generate a printable Verus guide snapshot from a local checkout.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --output)
+      if [[ $# -lt 2 ]]; then
+        echo "missing value for --output" >&2
+        usage >&2
+        exit 2
+      fi
+      OUT_FILE="$2"
+      shift 2
+      ;;
+    --*)
+      echo "unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [[ $upstream_set -eq 1 ]]; then
+        echo "unexpected extra positional argument: $1" >&2
+        usage >&2
+        exit 2
+      fi
+      UPSTREAM_DIR="$1"
+      upstream_set=1
+      shift
+      ;;
+  esac
+done
+
+GUIDE_DIR="$UPSTREAM_DIR/source/docs/guide"
 
 if [[ ! -f "$GUIDE_DIR/src/SUMMARY.md" ]]; then
   echo "missing Verus guide sources at: $GUIDE_DIR" >&2

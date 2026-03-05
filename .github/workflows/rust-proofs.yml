@@ -58,6 +58,12 @@ jobs:
         with:
           toolchain: nightly
 
+      - name: Install Verus
+        run: bash proofs/verus/scripts/install-verus.sh
+
+      - name: Verify pinned Verus guide snapshot
+        run: bash proofs/verus/scripts/verify-verus-guide-print.sh
+
       - name: Run proof-check skeleton
         env:
           PROOF_PROFILE: ${{ github.event.inputs.proof_profile || 'quick' }}
