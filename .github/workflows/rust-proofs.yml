@@ -1,0 +1,94 @@
+name: rust-proofs
+
+on:
+  workflow_dispatch:
+    inputs:
+      proof_profile:
+        description: "Verus profile to execute"
+        required: true
+        type: choice
+        options:
+          - quick
+          - full
+        default: quick
+      run_interleavings:
+        description: "Run interleavings suite placeholder"
+        required: true
+        type: boolean
+        default: true
+      run_soak:
+        description: "Run soak suite placeholder"
+        required: true
+        type: boolean
+        default: false
+  schedule:
+    - cron: "0 4 * * 1"
+
+concurrency:
+  group: rust-proofs-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  proof-checks:
+    name: verus-proof-checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly
+
+      - name: Run proof-check skeleton
+        env:
+          PROOF_PROFILE: ${{ github.event.inputs.proof_profile || 'quick' }}
+        run: |
+          profile="$PROOF_PROFILE"
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            profile="full"
+          fi
+          bash proofs/verus/scripts/run-proof-checks.sh --profile "$profile"
+
+  long-suites:
+    name: long-suite-${{ matrix.suite }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: rust
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - interleavings
+          - soak
+    if: |
+      github.event_name == 'schedule' ||
+      (matrix.suite == 'interleavings' && github.event.inputs.run_interleavings == 'true') ||
+      (matrix.suite == 'soak' && github.event.inputs.run_soak == 'true')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly
+
+      - name: Run long-suite skeleton
+        run: bash proofs/verus/scripts/run-long-suite.sh "${{ matrix.suite }}"
