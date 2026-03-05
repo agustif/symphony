@@ -1,0 +1,19 @@
+[package]
+name = "symphony-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+serde_json.workspace = true
+symphony-agent-protocol = { path = "../symphony-agent-protocol" }
+symphony-domain = { path = "../symphony-domain" }
+symphony-observability = { path = "../symphony-observability" }
+symphony-tracker = { path = "../symphony-tracker" }
+
+[dev-dependencies]
+symphony-config = { path = "../symphony-config" }
+symphony-runtime = { path = "../symphony-runtime" }
+symphony-workflow = { path = "../symphony-workflow" }
+tokio.workspace = true
