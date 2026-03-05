@@ -1,9 +1,9 @@
 # symphony-tracker-linear Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 65%
-- Done: task map defined and initial implementation batch merged.
-- In Progress: hardening, edge-case conformance, and proof depth.
+- Completion: 84%
+- Done: task map defined, project-scoped candidate/state queries landed, page-size parity is fixed at `50`, and normalized labels/blockers/priority/timestamps now match the current spec.
+- In Progress: transport hardening and adapter fault-drill coverage.
 - Remaining: full SPEC parity and production rollout gates.
 
 ## Scope
@@ -24,16 +24,16 @@ Implement Linear GraphQL adapter against `symphony-tracker` contract.
 
 ## Epic L2: Query Implementations
 ### Task L2.1: Candidate query
-- [ ] Subtask L2.1.1: Project + active state filter.
+- [x] Subtask L2.1.1: Project + active state filter.
 - [x] Subtask L2.1.2: Pagination handling.
 
 ### Task L2.2: Refresh and terminal queries
 - [x] Subtask L2.2.1: Issue IDs refresh query.
-- [ ] Subtask L2.2.2: Terminal states query.
+- [x] Subtask L2.2.2: Terminal states query semantics via state-filtered project query.
 
 ## Epic L3: Normalization and tests
 ### Task L3.1: Payload normalization
-- [ ] Subtask L3.1.1: Normalize blockers, labels, assignee, priority, timestamps.
+- [x] Subtask L3.1.1: Normalize blockers, labels, priority, timestamps, branch metadata, and URLs.
 - [x] Subtask L3.1.2: Verify strict required field handling.
 
 ### Task L3.2: Adapter tests
@@ -47,8 +47,8 @@ Implement Linear GraphQL adapter against `symphony-tracker` contract.
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 11.2 Linear query semantics | Partial | Finish candidate filtering semantics for project and active-state sets | `L2.1` |
-| Sec. 11.3 normalization rules | Partial | Complete blocker/labels/priority/timestamps normalization parity | `L3.1` |
+| Sec. 11.2 Linear query semantics | Mostly implemented | Add transport timeout/backoff policy and any remaining live API compatibility drills | `L1.1`, `L3.2` |
+| Sec. 11.3 normalization rules | Implemented for current normalized contract | Keep coverage current as the tracker contract evolves | `L3.1`, `L3.2` |
 | Sec. 11.4 error handling contract | Mostly implemented | Add timeout/backoff transport policy boundaries and tests | `L1.1`, `L3.2` |
 | Sec. 17.3 tracker validation matrix | Partial | Expand adapter contract tests to include pagination edge and missing-node cases | `L3.2` |
 <!-- SPEC_GAP_MAP_END -->

@@ -305,6 +305,11 @@ impl<T: TrackerClient + 'static> Runtime<T> {
             }
 
             let issue = issues.iter().find(|i| i.id == issue_id).unwrap();
+            if !dispatch_state_allows_issue(issue, &active_states, &terminal_states)
+                || todo_issue_blocked_by_non_terminal(issue, &terminal_states)
+            {
+                continue;
+            }
             if let Some(state_key) = issue.state.normalized_key()
                 && let Some(&max_for_state) =
                     config.agent.max_concurrent_agents_by_state.get(&state_key)
@@ -961,6 +966,33 @@ fn tracker_state_matches_any(state: &TrackerState, allowed: &[TrackerState]) -> 
         .any(|candidate| candidate == state_key)
 }
 
+fn dispatch_state_allows_issue(
+    issue: &TrackerIssue,
+    active_states: &[TrackerState],
+    terminal_states: &[TrackerState],
+) -> bool {
+    tracker_state_matches_any(&issue.state, active_states)
+        && !issue.state.is_terminal(terminal_states)
+        && !issue.id.0.trim().is_empty()
+        && !issue.identifier.trim().is_empty()
+        && !issue.title.trim().is_empty()
+}
+
+fn todo_issue_blocked_by_non_terminal(
+    issue: &TrackerIssue,
+    terminal_states: &[TrackerState],
+) -> bool {
+    if issue.state.normalized_key().as_deref() != Some("todo") {
+        return false;
+    }
+
+    issue.blocked_by.iter().any(|blocker| {
+        blocker.state.as_ref().is_none_or(|state_name| {
+            !TrackerState::new(state_name.clone()).is_terminal(terminal_states)
+        })
+    })
+}
+
 fn next_retry_attempt(state: &OrchestratorState, issue_id: &IssueId) -> u32 {
     state
         .retry_attempts
@@ -1003,7 +1035,9 @@ mod tests {
 
     use async_trait::async_trait;
     use symphony_domain::{Command, IssueId, validate_invariants};
-    use symphony_tracker::{TrackerClient, TrackerError, TrackerIssue, TrackerState};
+    use symphony_tracker::{
+        TrackerBlockerRef, TrackerClient, TrackerError, TrackerIssue, TrackerState,
+    };
     use tokio::sync::Mutex;
 
     use super::*;
@@ -1064,11 +1098,16 @@ mod tests {
         TrackerIssue {
             id: issue(id),
             identifier: id.to_owned(),
-            title: String::new(),
-            state: TrackerState::new("Todo"),
-            priority: None,
+            title: format!("Issue {id}"),
             description: None,
+            priority: None,
+            state: TrackerState::new("Todo"),
+            branch_name: None,
+            url: None,
+            labels: Vec::new(),
+            blocked_by: Vec::new(),
             created_at: None,
+            updated_at: None,
         }
     }
 
@@ -1373,20 +1412,30 @@ mod tests {
                 TrackerIssue {
                     id: issue("SYM-4"),
                     identifier: "SYM-4".to_owned(),
-                    title: String::new(),
-                    state: TrackerState::new("In Progress"),
-                    priority: None,
+                    title: "Issue SYM-4".to_owned(),
                     description: None,
+                    priority: None,
+                    state: TrackerState::new("In Progress"),
+                    branch_name: None,
+                    url: None,
+                    labels: Vec::new(),
+                    blocked_by: Vec::new(),
                     created_at: None,
+                    updated_at: None,
                 },
                 TrackerIssue {
                     id: issue("SYM-5"),
                     identifier: "SYM-5".to_owned(),
-                    title: String::new(),
-                    state: TrackerState::new("In Progress"),
-                    priority: None,
+                    title: "Issue SYM-5".to_owned(),
                     description: None,
+                    priority: None,
+                    state: TrackerState::new("In Progress"),
+                    branch_name: None,
+                    url: None,
+                    labels: Vec::new(),
+                    blocked_by: Vec::new(),
                     created_at: None,
+                    updated_at: None,
                 },
             ])
             .await;
@@ -1455,6 +1504,62 @@ mod tests {
         let state = runtime.state().await;
         assert!(!state.running.contains_key(&issue_id));
         assert!(state.retry_attempts.contains_key(&issue_id));
+    }
+
+    #[tokio::test]
+    async fn run_tick_skips_todo_issues_blocked_by_non_terminal_issues() {
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![
+                TrackerIssue::new(issue("SYM-1"), "SYM-1", TrackerState::new("Todo"))
+                    .with_title("Blocked todo")
+                    .with_blocked_by(vec![TrackerBlockerRef {
+                        id: Some("SYM-9".to_owned()),
+                        identifier: Some("SYM-9".to_owned()),
+                        state: Some("In Progress".to_owned()),
+                    }]),
+                TrackerIssue::new(issue("SYM-2"), "SYM-2", TrackerState::new("Todo"))
+                    .with_title("Ready todo"),
+            ])
+            .await;
+        let runtime = Runtime::new(Arc::clone(&tracker));
+
+        let mut config = RuntimeConfig::default();
+        config.agent.max_concurrent_agents = 2;
+
+        let tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("dispatch tick should succeed");
+
+        assert_eq!(tick.commands, vec![Command::Dispatch(issue("SYM-2"))]);
+    }
+
+    #[tokio::test]
+    async fn run_tick_allows_todo_issues_when_all_blockers_are_terminal() {
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![
+                TrackerIssue::new(issue("SYM-1"), "SYM-1", TrackerState::new("Todo"))
+                    .with_title("Terminally blocked")
+                    .with_blocked_by(vec![TrackerBlockerRef {
+                        id: Some("SYM-9".to_owned()),
+                        identifier: Some("SYM-9".to_owned()),
+                        state: Some("Done".to_owned()),
+                    }]),
+            ])
+            .await;
+        let runtime = Runtime::new(Arc::clone(&tracker));
+
+        let mut config = RuntimeConfig::default();
+        config.agent.max_concurrent_agents = 1;
+
+        let tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("dispatch tick should succeed");
+
+        assert_eq!(tick.commands, vec![Command::Dispatch(issue("SYM-1"))]);
     }
 
     #[tokio::test]

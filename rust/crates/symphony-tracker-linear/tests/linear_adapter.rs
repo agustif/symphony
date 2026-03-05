@@ -10,9 +10,10 @@ use wiremock::{
 };
 
 const API_KEY: &str = "linear-api-key";
+const PROJECT_SLUG: &str = "symphony";
 
 fn build_tracker(server: &MockServer) -> LinearTracker {
-    LinearTracker::new(format!("{}/graphql", server.uri()), API_KEY)
+    LinearTracker::new(format!("{}/graphql", server.uri()), API_KEY, PROJECT_SLUG)
 }
 
 #[tokio::test]
@@ -28,11 +29,47 @@ async fn fetch_candidates_by_states_normalizes_payload() {
                         {
                             "id": " lin_1 ",
                             "identifier": " SYM-101 ",
+                            "title": " Harden tracker parity ",
+                            "description": " normalize linear payload ",
+                            "priority": 2,
                             "state": { "name": " Todo " }
+                            ,
+                            "branchName": " feature/sym-101 ",
+                            "url": " https://linear.app/symphony/issue/SYM-101 ",
+                            "labels": {
+                                "nodes": [
+                                    { "name": "Bug" },
+                                    { "name": "backend" },
+                                    { "name": "BUG" }
+                                ]
+                            },
+                            "inverseRelations": {
+                                "nodes": [
+                                    {
+                                        "type": " blocks ",
+                                        "issue": {
+                                            "id": " lin_999 ",
+                                            "identifier": " SYM-999 ",
+                                            "state": { "name": " In Progress " }
+                                        }
+                                    },
+                                    {
+                                        "type": "relates",
+                                        "issue": {
+                                            "id": "lin_ignored",
+                                            "identifier": "SYM-ignored",
+                                            "state": { "name": "Todo" }
+                                        }
+                                    }
+                                ]
+                            },
+                            "createdAt": "1970-01-01T00:00:10Z",
+                            "updatedAt": "1970-01-01T00:00:20Z"
                         },
                         {
                             "id": "lin_2",
                             "identifier": "SYM-102",
+                            "title": "Second candidate",
                             "state": { "name": "In Progress" }
                         }
                     ],
@@ -55,7 +92,34 @@ async fn fetch_candidates_by_states_normalizes_payload() {
     assert_eq!(issues.len(), 2);
     assert_eq!(issues[0].id, IssueId("lin_1".to_owned()));
     assert_eq!(issues[0].identifier, "SYM-101");
+    assert_eq!(issues[0].title, "Harden tracker parity");
+    assert_eq!(
+        issues[0].description.as_deref(),
+        Some("normalize linear payload")
+    );
+    assert_eq!(issues[0].priority, Some(2));
     assert_eq!(issues[0].state, TrackerState::new("Todo"));
+    assert_eq!(issues[0].branch_name.as_deref(), Some("feature/sym-101"));
+    assert_eq!(
+        issues[0].url.as_deref(),
+        Some("https://linear.app/symphony/issue/SYM-101")
+    );
+    assert_eq!(
+        issues[0].labels,
+        vec!["bug".to_owned(), "backend".to_owned()]
+    );
+    assert_eq!(issues[0].blocked_by.len(), 1);
+    assert_eq!(issues[0].blocked_by[0].id.as_deref(), Some("lin_999"));
+    assert_eq!(
+        issues[0].blocked_by[0].identifier.as_deref(),
+        Some("SYM-999")
+    );
+    assert_eq!(
+        issues[0].blocked_by[0].state.as_deref(),
+        Some("In Progress")
+    );
+    assert_eq!(issues[0].created_at, Some(10));
+    assert_eq!(issues[0].updated_at, Some(20));
 
     let requests = server
         .received_requests()
@@ -69,7 +133,9 @@ async fn fetch_candidates_by_states_normalizes_payload() {
         json!(["Todo", "In Progress"]),
         "graphql request should carry state filter variables"
     );
-    assert_eq!(body["variables"]["first"], json!(100));
+    assert_eq!(body["variables"]["projectSlug"], json!(PROJECT_SLUG));
+    assert_eq!(body["variables"]["first"], json!(50));
+    assert_eq!(body["variables"]["relationFirst"], json!(50));
     assert_eq!(body["variables"]["after"], serde_json::Value::Null);
 }
 
@@ -90,6 +156,7 @@ async fn fetch_candidates_by_states_paginates_until_terminal_page() {
                         {
                             "id": "lin_1",
                             "identifier": "SYM-101",
+                            "title": "First page",
                             "state": { "name": "Todo" }
                         }
                     ],
@@ -117,6 +184,7 @@ async fn fetch_candidates_by_states_paginates_until_terminal_page() {
                         {
                             "id": "lin_2",
                             "identifier": "SYM-102",
+                            "title": "Second page",
                             "state": { "name": "In Progress" }
                         }
                     ],
@@ -221,6 +289,7 @@ async fn fetch_candidates_surfaces_payload_errors() {
                         {
                             "id": "",
                             "identifier": "SYM-101",
+                            "title": "Broken candidate",
                             "state": { "name": "Todo" }
                         }
                     ],
@@ -279,7 +348,7 @@ async fn fetch_candidates_surfaces_payload_errors_for_missing_cursor() {
 
 #[tokio::test]
 async fn fetch_candidates_surfaces_transport_errors() {
-    let tracker = LinearTracker::new("http://127.0.0.1:9/graphql", API_KEY);
+    let tracker = LinearTracker::new("http://127.0.0.1:9/graphql", API_KEY, PROJECT_SLUG);
     let error = tracker
         .fetch_candidates()
         .await
@@ -365,7 +434,7 @@ async fn fetch_states_by_ids_returns_state_map_across_pages() {
     let body: serde_json::Value =
         serde_json::from_slice(&requests[0].body).expect("request should be valid json");
     assert_eq!(body["variables"]["ids"], json!(["lin_8", "lin_7"]));
-    assert_eq!(body["variables"]["first"], json!(100));
+    assert_eq!(body["variables"]["first"], json!(50));
 }
 
 #[tokio::test]

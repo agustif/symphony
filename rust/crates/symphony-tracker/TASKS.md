@@ -1,9 +1,9 @@
 # symphony-tracker Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 70%
-- Done: task map defined and initial implementation batch merged.
-- In Progress: hardening, edge-case conformance, and proof depth.
+- Completion: 82%
+- Done: task map defined, canonical issue DTO/state normalization landed, and blocker-aware normalized issue fields are implemented end-to-end.
+- In Progress: contract hardening and explicit boundary tests.
 - Remaining: full SPEC parity and production rollout gates.
 
 ## Scope
@@ -22,7 +22,8 @@ Own tracker abstraction contracts and normalized issue model.
 
 ### Task T1.2: Domain normalization
 - [x] Subtask T1.2.1: Canonical issue DTO and state normalization.
-- [ ] Subtask T1.2.2: Blocker and assignee semantics representation.
+- [x] Subtask T1.2.2: Blocker semantics representation.
+- [ ] Subtask T1.2.3: Explicitly document any routing-only fields that stay outside the core tracker contract.
 
 ## Epic T2: Error Model
 ### Task T2.1: Typed errors
@@ -42,7 +43,7 @@ Own tracker abstraction contracts and normalized issue model.
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
 | Sec. 11.1 required tracker operations | Implemented | Add strict guarantees around operation ordering and missing issue semantics | `T1.1`, `T3.1` |
-| Sec. 11.3 normalized issue model | Partial | Finish blocker and assignee representation fidelity | `T1.2` |
+| Sec. 11.3 normalized issue model | Mostly implemented | Keep boundary tight around routing-only fields while preserving blocker fidelity | `T1.2` |
 | Sec. 11.4 typed error model | Implemented core variants | Add explicit mapping tests for each transport/graphql/validation category | `T3.1` |
 | Sec. 11.5 tracker write boundary | Partial | Encode hard guardrail that runtime performs no tracker writes from this interface | `T2.1` |
 <!-- SPEC_GAP_MAP_END -->

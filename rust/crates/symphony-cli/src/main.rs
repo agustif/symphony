@@ -119,10 +119,17 @@ async fn run() -> Result<(), ExitError> {
     let config_arc = Arc::new(RwLock::new(initial_config.clone()));
 
     // 2. Initialize Tracker
+    let project_slug = initial_config.tracker.project_slug.clone().ok_or_else(|| {
+        exit_error(
+            EXIT_BOOTSTRAP_ERROR,
+            "validated runtime config missing tracker.project_slug",
+        )
+    })?;
     let tracker = Arc::new(
         LinearTracker::new(
             initial_config.tracker.endpoint.clone(),
             initial_config.tracker.api_key.clone().unwrap_or_default(),
+            project_slug,
         )
         .with_candidate_states(
             initial_config

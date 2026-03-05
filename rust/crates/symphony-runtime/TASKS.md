@@ -1,8 +1,8 @@
 # symphony-runtime Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 90%
-- Done: task map defined, startup terminal workspace cleanup, active-run tracker-state reconciliation with terminal cleanup hooks, worker protocol-stream policy handling for approval/input-required and timeout/cancelled with normalized startup/runtime error categories, live app-server handshake integration using shared startup payload builders, buffered handshake stream preservation into runtime monitoring, unsupported dynamic tool-call fallback responses (`success=false,error=unsupported_tool_call`) without permanent-failure escalation, and concrete `linear_graphql` tool execution with input validation and structured success/failure outputs.
+- Completion: 92%
+- Done: task map defined, startup terminal workspace cleanup, active-run tracker-state reconciliation with terminal cleanup hooks, candidate required-field filtering plus `Todo` blocker gating, worker protocol-stream policy handling for approval/input-required and timeout/cancelled with normalized startup/runtime error categories, live app-server handshake integration using shared startup payload builders, buffered handshake stream preservation into runtime monitoring, unsupported dynamic tool-call fallback responses (`success=false,error=unsupported_tool_call`) without permanent-failure escalation, and concrete `linear_graphql` tool execution with input validation and structured success/failure outputs.
 - In Progress: restart semantics hardening and broader live-integration coverage.
 - Remaining: full SPEC parity and production rollout gates.
 
@@ -23,6 +23,7 @@ Own async orchestration loop, scheduling, dispatch, reconciliation, and retry ex
 ### Task R1.2: Dispatch selection
 - [x] Subtask R1.2.1: Candidate filtering with active/terminal rules.
 - [x] Subtask R1.2.2: Global/per-state slot enforcement.
+- [x] Subtask R1.2.3: `Todo` blocker gating and required-field eligibility checks.
 
 ## Epic R2: Retry and Reconciliation
 ### Task R2.1: Retry queue engine
@@ -59,7 +60,7 @@ Own async orchestration loop, scheduling, dispatch, reconciliation, and retry ex
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 8.1-8.5 poll, dispatch, retry, reconcile loops | Core scheduler implemented | Add exhaustive parity for slot starvation, retry replacement, and reconcile error branches | `R1.2`, `R2.1`, `R2.2` |
+| Sec. 8.1-8.5 poll, dispatch, retry, reconcile loops | Core scheduler implemented with blocker-aware candidate gating | Add exhaustive parity for slot starvation, retry replacement, and reconcile error branches | `R1.2`, `R2.1`, `R2.2` |
 | Sec. 8.6 startup terminal workspace cleanup | Implemented | Add stronger ordering/fault-drill coverage for cleanup under hook failures and tracker partial data | `R2.2`, `R4.1` |
 | Sec. 10 app-server integration and Sec. 12 prompt assembly | Worker stream monitor consumes typed protocol policy outcomes for approval/input-required and timeout paths, preserves buffered post-handshake stream bytes, returns unsupported dynamic tool-call responses, and executes `linear_graphql` with validated input and structured outputs | Expand live-integration coverage (mocked GraphQL success/error branches and startup/version variant compatibility) | `R3.2`, `R4.1` |
 | Sec. 14 recovery behavior and restart semantics | Partial | Complete restart policy docs and resilient behavior for protocol/session crash recovery branches | `R2.2`, `R4.1` |

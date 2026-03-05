@@ -6,7 +6,7 @@ mod state;
 mod tracker_client;
 
 pub use error::TrackerError;
-pub use issue::TrackerIssue;
+pub use issue::{TrackerBlockerRef, TrackerIssue};
 pub use state::TrackerState;
 pub use tracker_client::TrackerClient;
 

@@ -5,22 +5,49 @@ mod graphql;
 use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
+use chrono::DateTime;
 use reqwest::Client;
 use serde::{Serialize, de::DeserializeOwned};
 use symphony_domain::IssueId;
-use symphony_tracker::{TrackerClient, TrackerError, TrackerIssue, TrackerState};
+use symphony_tracker::{
+    TrackerBlockerRef, TrackerClient, TrackerError, TrackerIssue, TrackerState,
+};
 
-const LINEAR_PAGE_SIZE: usize = 100;
+const LINEAR_PAGE_SIZE: usize = 50;
 
 const FETCH_CANDIDATES_QUERY: &str = r#"
-query FetchCandidates($first: Int!, $after: String) {
-  issues(first: $first, after: $after) {
+query FetchCandidates($projectSlug: String!, $first: Int!, $relationFirst: Int!, $after: String) {
+  issues(first: $first, after: $after, filter: { project: { slugId: { eq: $projectSlug } } }) {
     nodes {
       id
       identifier
+      title
+      description
+      priority
       state {
         name
       }
+      branchName
+      url
+      labels {
+        nodes {
+          name
+        }
+      }
+      inverseRelations(first: $relationFirst) {
+        nodes {
+          type
+          issue {
+            id
+            identifier
+            state {
+              name
+            }
+          }
+        }
+      }
+      createdAt
+      updatedAt
     }
     pageInfo {
       hasNextPage
@@ -31,14 +58,38 @@ query FetchCandidates($first: Int!, $after: String) {
 "#;
 
 const FETCH_CANDIDATES_BY_STATES_QUERY: &str = r#"
-query FetchCandidatesByStates($states: [String!]!, $first: Int!, $after: String) {
-  issues(first: $first, after: $after, filter: { state: { name: { in: $states } } }) {
+query FetchCandidatesByStates($projectSlug: String!, $states: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+  issues(first: $first, after: $after, filter: { project: { slugId: { eq: $projectSlug } }, state: { name: { in: $states } } }) {
     nodes {
       id
       identifier
+      title
+      description
+      priority
       state {
         name
       }
+      branchName
+      url
+      labels {
+        nodes {
+          name
+        }
+      }
+      inverseRelations(first: $relationFirst) {
+        nodes {
+          type
+          issue {
+            id
+            identifier
+            state {
+              name
+            }
+          }
+        }
+      }
+      createdAt
+      updatedAt
     }
     pageInfo {
       hasNextPage
@@ -49,7 +100,7 @@ query FetchCandidatesByStates($states: [String!]!, $first: Int!, $after: String)
 "#;
 
 const FETCH_STATES_BY_IDS_QUERY: &str = r#"
-query FetchStatesByIds($ids: [String!]!, $first: Int!, $after: String) {
+query FetchStatesByIds($ids: [ID!]!, $first: Int!, $after: String) {
   issues(first: $first, after: $after, filter: { id: { in: $ids } }) {
     nodes {
       id
@@ -69,23 +120,30 @@ query FetchStatesByIds($ids: [String!]!, $first: Int!, $after: String) {
 pub struct LinearTracker {
     endpoint: String,
     api_key: String,
+    project_slug: String,
     candidate_states: Vec<TrackerState>,
     http_client: Client,
 }
 
 impl LinearTracker {
-    pub fn new(endpoint: impl Into<String>, api_key: impl Into<String>) -> Self {
-        Self::with_client(Client::new(), endpoint, api_key)
+    pub fn new(
+        endpoint: impl Into<String>,
+        api_key: impl Into<String>,
+        project_slug: impl Into<String>,
+    ) -> Self {
+        Self::with_client(Client::new(), endpoint, api_key, project_slug)
     }
 
     pub fn with_client(
         http_client: Client,
         endpoint: impl Into<String>,
         api_key: impl Into<String>,
+        project_slug: impl Into<String>,
     ) -> Self {
         Self {
             endpoint: endpoint.into(),
             api_key: api_key.into(),
+            project_slug: project_slug.into().trim().to_owned(),
             candidate_states: Vec::new(),
             http_client,
         }
@@ -106,33 +164,36 @@ impl LinearTracker {
             let data: graphql::IssuesData = self
                 .post_graphql(
                     FETCH_CANDIDATES_QUERY,
-                    graphql::PaginationVariables {
+                    graphql::FetchIssuesVariables {
+                        project_slug: self.project_slug.clone(),
                         first: LINEAR_PAGE_SIZE,
+                        relation_first: LINEAR_PAGE_SIZE,
                         after: after.clone(),
                     },
                 )
                 .await?;
+
             for node in data.issues.nodes {
                 let issue = normalize_tracker_issue(node)?;
-                if !seen_issue_ids.insert(issue.id.0.clone()) {
-                    return Err(TrackerError::payload(format!(
-                        "graphql payload has duplicate issue id `{}`",
-                        issue.id.0
-                    )));
-                }
+                insert_unique_issue_id(
+                    &mut seen_issue_ids,
+                    &issue.id.0,
+                    "graphql payload has duplicate issue id",
+                )?;
                 issues.push(issue);
             }
-            let next_cursor = next_page_cursor(data.issues.page_info, "issues.pageInfo.endCursor")?;
-            if let Some(cursor) = next_cursor {
-                if !seen_cursors.insert(cursor.clone()) {
-                    return Err(TrackerError::payload(format!(
-                        "graphql pagination cursor repeated: `{cursor}`"
-                    )));
+
+            match next_page_cursor(data.issues.page_info, "issues.pageInfo.endCursor")? {
+                Some(cursor) => {
+                    insert_unique_issue_id(
+                        &mut seen_cursors,
+                        &cursor,
+                        "graphql pagination cursor repeated",
+                    )?;
+                    after = Some(cursor);
                 }
-                after = Some(cursor);
-                continue;
+                None => break,
             }
-            break;
         }
 
         Ok(issues)
@@ -186,6 +247,17 @@ impl LinearTracker {
     }
 }
 
+fn insert_unique_issue_id(
+    seen: &mut HashSet<String>,
+    value: &str,
+    message: &str,
+) -> Result<(), TrackerError> {
+    if !seen.insert(value.to_owned()) {
+        return Err(TrackerError::payload(format!("{message} `{value}`")));
+    }
+    Ok(())
+}
+
 fn normalize_non_empty(value: String, field: &'static str) -> Result<String, TrackerError> {
     let normalized = value.trim().to_owned();
     if normalized.is_empty() {
@@ -196,12 +268,32 @@ fn normalize_non_empty(value: String, field: &'static str) -> Result<String, Tra
     Ok(normalized)
 }
 
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let normalized = value.trim().to_owned();
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        }
+    })
+}
+
 fn normalize_tracker_issue(issue: graphql::IssueNode) -> Result<TrackerIssue, TrackerError> {
-    Ok(TrackerIssue::new(
-        IssueId(normalize_non_empty(issue.id, "id")?),
-        normalize_non_empty(issue.identifier, "identifier")?,
-        TrackerState::new(normalize_non_empty(issue.state.name, "state.name")?),
-    ))
+    Ok(TrackerIssue {
+        id: IssueId(normalize_non_empty(issue.id, "id")?),
+        identifier: normalize_non_empty(issue.identifier, "identifier")?,
+        title: normalize_non_empty(issue.title, "title")?,
+        description: normalize_optional_string(issue.description),
+        priority: parse_priority(issue.priority),
+        state: TrackerState::new(normalize_non_empty(issue.state.name, "state.name")?),
+        branch_name: normalize_optional_string(issue.branch_name),
+        url: normalize_optional_string(issue.url),
+        labels: normalize_labels(issue.labels),
+        blocked_by: normalize_blockers(issue.inverse_relations),
+        created_at: parse_timestamp(issue.created_at),
+        updated_at: parse_timestamp(issue.updated_at),
+    })
 }
 
 fn normalize_tracker_state(
@@ -239,6 +331,58 @@ fn normalize_requested_ids(ids: &[IssueId]) -> Result<Vec<String>, TrackerError>
         }
     }
     Ok(normalized_ids)
+}
+
+fn normalize_labels(labels: graphql::LabelConnection) -> Vec<String> {
+    let mut normalized_labels = Vec::new();
+    let mut seen = HashSet::new();
+    for label in labels.nodes {
+        let Some(label) = label.name else {
+            continue;
+        };
+        let normalized = label.trim().to_ascii_lowercase();
+        if normalized.is_empty() || !seen.insert(normalized.clone()) {
+            continue;
+        }
+        normalized_labels.push(normalized);
+    }
+    normalized_labels
+}
+
+fn normalize_blockers(relations: graphql::InverseRelationConnection) -> Vec<TrackerBlockerRef> {
+    relations
+        .nodes
+        .into_iter()
+        .filter_map(|relation| {
+            let relation_type = normalize_optional_string(relation.relation_type)?;
+            if !relation_type.eq_ignore_ascii_case("blocks") {
+                return None;
+            }
+
+            let blocker_issue = relation.issue?;
+            Some(TrackerBlockerRef {
+                id: normalize_optional_string(blocker_issue.id),
+                identifier: normalize_optional_string(blocker_issue.identifier),
+                state: blocker_issue
+                    .state
+                    .and_then(|state| normalize_optional_string(Some(state.name))),
+            })
+        })
+        .collect()
+}
+
+fn parse_priority(priority: Option<serde_json::Value>) -> Option<i32> {
+    priority
+        .and_then(|priority| priority.as_i64())
+        .and_then(|priority| i32::try_from(priority).ok())
+}
+
+fn parse_timestamp(raw: Option<String>) -> Option<u64> {
+    raw.and_then(|raw| {
+        DateTime::parse_from_rfc3339(raw.trim())
+            .ok()
+            .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok())
+    })
 }
 
 fn next_page_cursor(
@@ -286,33 +430,36 @@ impl TrackerClient for LinearTracker {
                 .post_graphql(
                     FETCH_CANDIDATES_BY_STATES_QUERY,
                     graphql::FetchIssuesByStatesVariables {
+                        project_slug: self.project_slug.clone(),
                         states: state_filters.clone(),
                         first: LINEAR_PAGE_SIZE,
+                        relation_first: LINEAR_PAGE_SIZE,
                         after: after.clone(),
                     },
                 )
                 .await?;
+
             for node in data.issues.nodes {
                 let issue = normalize_tracker_issue(node)?;
-                if !seen_issue_ids.insert(issue.id.0.clone()) {
-                    return Err(TrackerError::payload(format!(
-                        "graphql payload has duplicate issue id `{}`",
-                        issue.id.0
-                    )));
-                }
+                insert_unique_issue_id(
+                    &mut seen_issue_ids,
+                    &issue.id.0,
+                    "graphql payload has duplicate issue id",
+                )?;
                 issues.push(issue);
             }
-            let next_cursor = next_page_cursor(data.issues.page_info, "issues.pageInfo.endCursor")?;
-            if let Some(cursor) = next_cursor {
-                if !seen_cursors.insert(cursor.clone()) {
-                    return Err(TrackerError::payload(format!(
-                        "graphql pagination cursor repeated: `{cursor}`"
-                    )));
+
+            match next_page_cursor(data.issues.page_info, "issues.pageInfo.endCursor")? {
+                Some(cursor) => {
+                    insert_unique_issue_id(
+                        &mut seen_cursors,
+                        &cursor,
+                        "graphql pagination cursor repeated",
+                    )?;
+                    after = Some(cursor);
                 }
-                after = Some(cursor);
-                continue;
+                None => break,
             }
-            break;
         }
 
         Ok(issues)
@@ -343,6 +490,7 @@ impl TrackerClient for LinearTracker {
                     },
                 )
                 .await?;
+
             for issue in data.issues.nodes {
                 let (id, state) = normalize_tracker_state(issue)?;
                 if !requested_id_set.contains(&id.0) {
@@ -356,18 +504,20 @@ impl TrackerClient for LinearTracker {
                 }
                 states.insert(id, state);
             }
-            let next_cursor = next_page_cursor(data.issues.page_info, "issues.pageInfo.endCursor")?;
-            if let Some(cursor) = next_cursor {
-                if !seen_cursors.insert(cursor.clone()) {
-                    return Err(TrackerError::payload(format!(
-                        "graphql pagination cursor repeated: `{cursor}`"
-                    )));
+
+            match next_page_cursor(data.issues.page_info, "issues.pageInfo.endCursor")? {
+                Some(cursor) => {
+                    insert_unique_issue_id(
+                        &mut seen_cursors,
+                        &cursor,
+                        "graphql pagination cursor repeated",
+                    )?;
+                    after = Some(cursor);
                 }
-                after = Some(cursor);
-                continue;
+                None => break,
             }
-            break;
         }
+
         Ok(states)
     }
 }

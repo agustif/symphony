@@ -905,10 +905,15 @@ mod tests {
             id: IssueId("SYM-123".to_owned()),
             identifier: "SYM-123".to_owned(),
             title: "Test Issue".to_owned(),
-            state: TrackerState::new("Todo"),
-            priority: None,
             description: Some("Test description".to_owned()),
+            priority: None,
+            state: TrackerState::new("Todo"),
+            branch_name: None,
+            url: None,
+            labels: Vec::new(),
+            blocked_by: Vec::new(),
             created_at: None,
+            updated_at: None,
         };
         let root = std::env::temp_dir().join("test-workspaces");
         let hooks = WorkspaceHooks::default();
