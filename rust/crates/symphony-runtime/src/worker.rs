@@ -640,6 +640,8 @@ async fn execute_linear_graphql_tool(
     event: &symphony_agent_protocol::AppServerEvent,
     tool_context: &ToolCallExecutionContext,
 ) -> serde_json::Value {
+    const LINEAR_TOOL_TIMEOUT_SECS: u64 = 30;
+
     if !tool_context.tracker_kind.eq_ignore_ascii_case("linear") {
         return serde_json::json!({
             "success": false,
@@ -683,7 +685,19 @@ async fn execute_linear_graphql_tool(
         "variables": variables,
     });
 
-    let client = reqwest::Client::new();
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(LINEAR_TOOL_TIMEOUT_SECS))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return serde_json::json!({
+                "success": false,
+                "error": "client_build_failure",
+                "output": {"message": error.to_string()},
+            });
+        }
+    };
     let response = match client
         .post(&tool_context.tracker_endpoint)
         .bearer_auth(api_key)

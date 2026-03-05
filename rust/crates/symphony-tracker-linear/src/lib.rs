@@ -3,6 +3,7 @@
 mod graphql;
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::DateTime;
@@ -14,6 +15,7 @@ use symphony_tracker::{
 };
 
 const LINEAR_PAGE_SIZE: usize = 50;
+const DEFAULT_LINEAR_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 const FETCH_CANDIDATES_QUERY: &str = r#"
 query FetchCandidates($projectSlug: String!, $first: Int!, $relationFirst: Int!, $after: String) {
@@ -131,7 +133,11 @@ impl LinearTracker {
         api_key: impl Into<String>,
         project_slug: impl Into<String>,
     ) -> Self {
-        Self::with_client(Client::new(), endpoint, api_key, project_slug)
+        let http_client = Client::builder()
+            .timeout(Duration::from_secs(DEFAULT_LINEAR_REQUEST_TIMEOUT_SECS))
+            .build()
+            .unwrap_or_else(|_| Client::new());
+        Self::with_client(http_client, endpoint, api_key, project_slug)
     }
 
     pub fn with_client(
