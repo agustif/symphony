@@ -1,3 +1,7 @@
 # Conformance Suite
 
-This suite will encode the required behavior matrix from `SPEC.md` sections 17 and 18.
+Deterministic conformance coverage for:
+
+- `symphony-domain` lifecycle reduction and invariants.
+- release semantics across claimed/running/retry tracking.
+- command emission cardinality across representative traces.

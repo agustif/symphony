@@ -1,3 +1,7 @@
 # Soak Suite
 
-This suite will run long-duration scheduler workloads and assert stability, bounded retries, and resource limits.
+Bounded CI-friendly soak coverage with deterministic workloads.
+
+- Long-run deterministic event streams over fixed issue pools.
+- Resource bounds on `claimed` and `running` cardinalities at every step.
+- Multi-seed stress traces to detect schedule-sensitive regressions.
