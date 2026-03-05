@@ -48,6 +48,7 @@ pub enum TransitionRejection {
     MissingClaim,
     AlreadyRunning,
     InvalidRetryAttempt,
+    RetryAttemptRegression,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -58,6 +59,8 @@ pub enum InvariantError {
     RetryWithoutClaim,
     #[error("issue cannot be running and retrying at the same time")]
     RunningAndRetrying,
+    #[error("retry attempts must always be positive")]
+    RetryAttemptMustBePositive,
 }
 
 pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState, Vec<Command>) {
@@ -91,6 +94,17 @@ pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState,
                     TransitionRejection::InvalidRetryAttempt,
                 );
             }
+            if state
+                .retry_attempts
+                .get(&issue_id)
+                .is_some_and(|retry_entry| retry_entry.attempt >= attempt)
+            {
+                return reject_transition(
+                    state,
+                    issue_id,
+                    TransitionRejection::RetryAttemptRegression,
+                );
+            }
             state.running.remove(&issue_id);
             state
                 .retry_attempts
@@ -98,12 +112,13 @@ pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState,
             return (state, vec![Command::ScheduleRetry { issue_id, attempt }]);
         }
         Event::Release(issue_id) => {
-            state.running.remove(&issue_id);
-            let had_claim = state.claimed.remove(&issue_id);
-            state.retry_attempts.remove(&issue_id);
-            if had_claim {
-                return (state, vec![Command::ReleaseClaim(issue_id)]);
+            if !state.claimed.contains(&issue_id) {
+                return reject_transition(state, issue_id, TransitionRejection::MissingClaim);
             }
+            state.running.remove(&issue_id);
+            state.claimed.remove(&issue_id);
+            state.retry_attempts.remove(&issue_id);
+            return (state, vec![Command::ReleaseClaim(issue_id)]);
         }
     }
     (state, Vec::new())
@@ -127,6 +142,13 @@ pub fn validate_invariants(state: &OrchestratorState) -> Result<(), InvariantErr
     {
         return Err(InvariantError::RunningAndRetrying);
     }
+    if state
+        .retry_attempts
+        .values()
+        .any(|retry_entry| retry_entry.attempt == 0)
+    {
+        return Err(InvariantError::RetryAttemptMustBePositive);
+    }
     Ok(())
 }
 
@@ -147,6 +169,13 @@ mod tests {
 
     fn issue_id(raw: &str) -> IssueId {
         IssueId(raw.to_owned())
+    }
+
+    fn assert_deterministic(state: OrchestratorState, event: Event) {
+        let (first_state, first_commands) = reduce(state.clone(), event.clone());
+        let (second_state, second_commands) = reduce(state, event);
+        assert_eq!(first_state, second_state);
+        assert_eq!(first_commands, second_commands);
     }
 
     #[test]
@@ -251,6 +280,51 @@ mod tests {
     }
 
     #[test]
+    fn release_requires_existing_claim() {
+        let issue_id = issue_id("SYM-99");
+        let base_state = OrchestratorState::default();
+        let (state, commands) = reduce(base_state.clone(), Event::Release(issue_id.clone()));
+        assert_eq!(state, base_state);
+        assert_eq!(
+            commands,
+            vec![Command::TransitionRejected {
+                issue_id,
+                reason: TransitionRejection::MissingClaim,
+            }],
+        );
+    }
+
+    #[test]
+    fn queue_retry_rejects_non_increasing_attempts() {
+        let issue_id = issue_id("SYM-77");
+        let mut state = OrchestratorState::default();
+        state.claimed.insert(issue_id.clone());
+        state
+            .retry_attempts
+            .insert(issue_id.clone(), RetryEntry { attempt: 2 });
+
+        let (state, commands) = reduce(
+            state.clone(),
+            Event::QueueRetry {
+                issue_id: issue_id.clone(),
+                attempt: 2,
+            },
+        );
+
+        assert_eq!(
+            state.retry_attempts.get(&issue_id),
+            Some(&RetryEntry { attempt: 2 })
+        );
+        assert_eq!(
+            commands,
+            vec![Command::TransitionRejected {
+                issue_id,
+                reason: TransitionRejection::RetryAttemptRegression,
+            }],
+        );
+    }
+
+    #[test]
     fn validate_invariants_rejects_running_without_claim() {
         let issue_id = issue_id("SYM-42");
         let mut state = OrchestratorState::default();
@@ -259,5 +333,43 @@ mod tests {
             validate_invariants(&state),
             Err(InvariantError::RunningWithoutClaim),
         );
+    }
+
+    #[test]
+    fn validate_invariants_rejects_zero_retry_attempts() {
+        let issue_id = issue_id("SYM-314");
+        let mut state = OrchestratorState::default();
+        state.claimed.insert(issue_id.clone());
+        state
+            .retry_attempts
+            .insert(issue_id, RetryEntry { attempt: 0 });
+        assert_eq!(
+            validate_invariants(&state),
+            Err(InvariantError::RetryAttemptMustBePositive),
+        );
+    }
+
+    #[test]
+    fn reduce_is_deterministic_across_lifecycle_events() {
+        let issue_id = issue_id("SYM-615");
+        let mut running_state = OrchestratorState::default();
+        running_state.claimed.insert(issue_id.clone());
+
+        let mut retrying_state = OrchestratorState::default();
+        retrying_state.claimed.insert(issue_id.clone());
+        retrying_state
+            .retry_attempts
+            .insert(issue_id.clone(), RetryEntry { attempt: 1 });
+
+        assert_deterministic(OrchestratorState::default(), Event::Claim(issue_id.clone()));
+        assert_deterministic(running_state.clone(), Event::MarkRunning(issue_id.clone()));
+        assert_deterministic(
+            running_state,
+            Event::QueueRetry {
+                issue_id: issue_id.clone(),
+                attempt: 1,
+            },
+        );
+        assert_deterministic(retrying_state, Event::Release(issue_id));
     }
 }
