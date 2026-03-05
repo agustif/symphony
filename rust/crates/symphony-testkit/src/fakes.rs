@@ -4,6 +4,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -20,6 +21,64 @@ pub fn tracker_issue(identifier: &str, state: &str) -> TrackerIssue {
 pub enum FakeTrackerResponse {
     Issues(Vec<TrackerIssue>),
     Error(String),
+    Delay {
+        duration: Duration,
+        response: Box<FakeTrackerResponse>,
+    },
+}
+
+impl FakeTrackerResponse {
+    pub fn issues(issues: Vec<TrackerIssue>) -> Self {
+        Self::Issues(issues)
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::Error(message.into())
+    }
+
+    pub fn delay(duration: Duration, response: FakeTrackerResponse) -> Self {
+        Self::Delay {
+            duration,
+            response: Box::new(response),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FakeTrackerConfig {
+    /// Whether to simulate network latency
+    pub latency: Option<Duration>,
+    /// Whether to fail after a certain number of calls
+    pub fail_after: Option<usize>,
+    /// Custom error message for failures
+    pub error_message: Option<String>,
+}
+
+impl Default for FakeTrackerConfig {
+    fn default() -> Self {
+        Self {
+            latency: None,
+            fail_after: None,
+            error_message: None,
+        }
+    }
+}
+
+impl FakeTrackerConfig {
+    pub fn with_latency(mut self, duration: Duration) -> Self {
+        self.latency = Some(duration);
+        self
+    }
+
+    pub fn fail_after(mut self, count: usize) -> Self {
+        self.fail_after = Some(count);
+        self
+    }
+
+    pub fn with_error_message(mut self, message: impl Into<String>) -> Self {
+        self.error_message = Some(message.into());
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -27,6 +86,7 @@ pub struct FakeTracker {
     scripted: Mutex<VecDeque<FakeTrackerResponse>>,
     default_issues: Vec<TrackerIssue>,
     fetch_count: AtomicUsize,
+    config: FakeTrackerConfig,
 }
 
 impl Default for FakeTracker {
@@ -35,6 +95,7 @@ impl Default for FakeTracker {
             scripted: Mutex::new(VecDeque::new()),
             default_issues: Vec::new(),
             fetch_count: AtomicUsize::new(0),
+            config: FakeTrackerConfig::default(),
         }
     }
 }
@@ -43,6 +104,13 @@ impl FakeTracker {
     pub fn scripted(scripted: Vec<FakeTrackerResponse>) -> Self {
         Self {
             scripted: Mutex::new(scripted.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_config(config: FakeTrackerConfig) -> Self {
+        Self {
+            config,
             ..Self::default()
         }
     }
@@ -73,11 +141,42 @@ impl FakeTracker {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.len()
     }
+
+    pub fn reset_fetch_count(&self) {
+        self.fetch_count.store(0, Ordering::Relaxed);
+    }
+
+    async fn apply_latency(&self) {
+        if let Some(latency) = self.config.latency {
+            tokio::time::sleep(latency).await;
+        }
+    }
+
+    fn check_fail_condition(&self) -> Option<TrackerError> {
+        if let Some(fail_after) = self.config.fail_after {
+            let count = self.fetch_count.load(Ordering::Relaxed);
+            if count >= fail_after {
+                let message = self
+                    .config
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| format!("Failed after {} calls", fail_after));
+                return Some(TrackerError::transport(message));
+            }
+        }
+        None
+    }
 }
 
 #[async_trait]
 impl TrackerClient for FakeTracker {
     async fn fetch_candidates(&self) -> Result<Vec<TrackerIssue>, TrackerError> {
+        self.apply_latency().await;
+
+        if let Some(err) = self.check_fail_condition() {
+            return Err(err);
+        }
+
         self.fetch_count.fetch_add(1, Ordering::Relaxed);
 
         let response = {
@@ -91,6 +190,16 @@ impl TrackerClient for FakeTracker {
         match response.unwrap_or_else(|| FakeTrackerResponse::Issues(self.default_issues.clone())) {
             FakeTrackerResponse::Issues(issues) => Ok(issues),
             FakeTrackerResponse::Error(message) => Err(TrackerError::transport(message)),
+            FakeTrackerResponse::Delay { duration, response } => {
+                tokio::time::sleep(duration).await;
+                match *response {
+                    FakeTrackerResponse::Issues(issues) => Ok(issues),
+                    FakeTrackerResponse::Error(msg) => Err(TrackerError::transport(msg)),
+                    FakeTrackerResponse::Delay { .. } => {
+                        unreachable!("Nested delays not supported")
+                    }
+                }
+            }
         }
     }
 }

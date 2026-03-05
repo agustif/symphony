@@ -9,9 +9,9 @@ mod validate;
 
 pub use env::{EnvProvider, ProcessEnv};
 pub use error::ConfigError;
-pub use loader::{from_front_matter, from_front_matter_with_env};
+pub use loader::{apply_cli_overrides, from_front_matter, from_front_matter_with_env};
 pub use model::{
-    AgentConfig, CodexConfig, HooksConfig, PollingConfig, RuntimeConfig, TrackerConfig,
-    WorkspaceConfig,
+    AgentConfig, CliOverrides, CodexConfig, HooksConfig, LogLevelConfig, PollingConfig,
+    RuntimeConfig, TrackerConfig, WorkspaceConfig,
 };
 pub use validate::validate;

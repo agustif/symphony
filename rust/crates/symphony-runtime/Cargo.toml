@@ -11,6 +11,10 @@ tracing.workspace = true
 symphony-domain = { path = "../symphony-domain" }
 symphony-tracker = { path = "../symphony-tracker" }
 symphony-observability = { path = "../symphony-observability" }
+symphony-agent-protocol = { path = "../symphony-agent-protocol" }
+symphony-workspace = { path = "../symphony-workspace" }
+symphony-workflow = { path = "../symphony-workflow" }
+symphony-config = { path = "../symphony-config" }
+async-trait = "0.1.80"
 
 [dev-dependencies]
-async-trait.workspace = true

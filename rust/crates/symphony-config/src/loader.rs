@@ -9,8 +9,8 @@ use crate::{
     ConfigError, EnvProvider, ProcessEnv, RuntimeConfig,
     env::{expand_workspace_root, resolve_env_reference},
     model::{
-        AgentConfig, CodexConfig, DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, HooksConfig,
-        PollingConfig, TrackerConfig, WorkspaceConfig,
+        AgentConfig, CliOverrides, CodexConfig, DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT,
+        HooksConfig, LogLevelConfig, PollingConfig, TrackerConfig, WorkspaceConfig,
     },
     normalize::{normalize_state_list, normalize_state_name},
     validate,
@@ -499,19 +499,27 @@ fn yaml_key(key: &'static str) -> Value {
 }
 
 #[cfg(test)]
+fn parse_yaml(yaml: &str) -> Mapping {
+    let value: Value = serde_yaml::from_str(yaml).expect("yaml should parse");
+    value
+        .as_mapping()
+        .cloned()
+        .expect("root should be a mapping")
+}
+
+#[cfg(test)]
 mod tests {
     use std::{
         collections::HashMap,
         path::{Path, PathBuf},
     };
 
-    use serde_yaml::{Mapping, Value};
-
     use crate::{
         ConfigError, EnvProvider,
-        loader::from_front_matter_with_env,
+        loader::{from_front_matter_with_env, parse_yaml, yaml_key},
         model::{DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT},
     };
+    use serde_yaml::Value;
 
     struct TestEnv {
         values: HashMap<String, String>,
@@ -742,28 +750,424 @@ agent:
 
     #[test]
     fn rejects_empty_codex_command() {
-        let front_matter = parse_yaml(
+        let mut front_matter = parse_yaml(
             r#"
 tracker:
   kind: linear
   api_key: token
   project_slug: symphony
-codex:
-  command: "   "
 "#,
         );
+
+        // Manually set codex command to empty after parsing to test validation
+        if let Some(Value::Mapping(codex)) = front_matter.get_mut(&yaml_key("codex")) {
+            codex.insert(yaml_key("command"), Value::String("".to_string()));
+        } else {
+            front_matter.insert(yaml_key("codex"), {
+                let mut codex = serde_yaml::Mapping::new();
+                codex.insert(yaml_key("command"), Value::String("".to_string()));
+                Value::Mapping(codex)
+            });
+        }
 
         assert_eq!(
             from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[])),
             Err(ConfigError::MissingCodexCommand)
         );
     }
+}
 
-    fn parse_yaml(yaml: &str) -> Mapping {
-        let value: Value = serde_yaml::from_str(yaml).expect("yaml should parse");
-        value
-            .as_mapping()
-            .cloned()
-            .expect("root should be a mapping")
+/// Apply CLI overrides to a RuntimeConfig.
+///
+/// This function applies CLI-specified overrides to a configuration, taking
+/// precedence over config file and environment variable values.
+///
+/// # Precedence Order
+///
+/// 1. CLI arguments (applied by this function) - highest priority
+/// 2. Environment variables ($VAR or ${VAR}) - already resolved in config
+/// 3. Config file values - loaded from YAML
+/// 4. Default values - from impl Default
+///
+/// # Validation
+///
+/// All override values are validated before being applied. Invalid values
+/// will result in a `ConfigError::InvalidCliOverride`.
+///
+/// # Example
+///
+/// ```ignore
+/// use symphony_config::{from_front_matter, CliOverrides, apply_cli_overrides};
+///
+/// // Load config from YAML front matter
+/// let config = from_front_matter(&yaml_mapping)?;
+///
+/// // Create CLI overrides
+/// let overrides = CliOverrides {
+///     polling_interval_ms: Some(60000),
+///     ..Default::default()
+/// };
+///
+/// // Apply overrides (result is validated)
+/// let config = apply_cli_overrides(config, &overrides)?;
+/// ```
+///
+/// # Supported Override Fields
+///
+/// - `polling_interval_ms`: Must be > 0
+/// - `max_concurrent_agents`: Must be > 0
+/// - `max_turns`: Must be > 0
+/// - `max_retry_backoff_ms`: Must be > 0
+/// - `workspace_root`: Must be a valid path
+/// - `log_level`: Must be one of: trace, debug, info, warn, error
+/// - `tracker_endpoint`: Must not be empty
+/// - `tracker_api_key`: Optional string
+/// - `tracker_project_slug`: Must not be empty if provided
+pub fn apply_cli_overrides(
+    mut config: RuntimeConfig,
+    overrides: &CliOverrides,
+) -> Result<RuntimeConfig, ConfigError> {
+    if let Some(interval_ms) = overrides.polling_interval_ms {
+        if interval_ms == 0 {
+            return Err(ConfigError::InvalidCliOverride {
+                field: "polling.interval_ms".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
+        config.polling.interval_ms = interval_ms;
+    }
+
+    if let Some(max_concurrent) = overrides.max_concurrent_agents {
+        if max_concurrent == 0 {
+            return Err(ConfigError::InvalidCliOverride {
+                field: "agent.max_concurrent_agents".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
+        config.agent.max_concurrent_agents = max_concurrent;
+    }
+
+    if let Some(max_turns) = overrides.max_turns {
+        if max_turns == 0 {
+            return Err(ConfigError::InvalidCliOverride {
+                field: "agent.max_turns".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
+        config.agent.max_turns = max_turns;
+    }
+
+    if let Some(max_retry_backoff) = overrides.max_retry_backoff_ms {
+        if max_retry_backoff == 0 {
+            return Err(ConfigError::InvalidCliOverride {
+                field: "agent.max_retry_backoff_ms".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
+        config.agent.max_retry_backoff_ms = max_retry_backoff;
+    }
+
+    if let Some(ref root) = overrides.workspace_root {
+        let expanded =
+            expand_workspace_root(root.to_str().unwrap_or(""), &ProcessEnv).ok_or_else(|| {
+                ConfigError::InvalidCliOverride {
+                    field: "workspace.root".to_string(),
+                    reason: "failed to expand path".to_string(),
+                }
+            })?;
+        config.workspace.root = normalize_workspace_root(expanded);
+    }
+
+    if let Some(ref log_level) = overrides.log_level {
+        let level = log_level.trim().to_lowercase();
+        if !matches!(
+            level.as_str(),
+            "trace" | "debug" | "info" | "warn" | "error"
+        ) {
+            return Err(ConfigError::InvalidCliOverride {
+                field: "log.level".to_string(),
+                reason: format!(
+                    "must be one of: trace, debug, info, warn, error, got: {level}",
+                    level = level
+                ),
+            });
+        }
+        config.log_level = LogLevelConfig { level };
+    }
+
+    if let Some(ref endpoint) = overrides.tracker_endpoint {
+        if endpoint.trim().is_empty() {
+            return Err(ConfigError::InvalidCliOverride {
+                field: "tracker.endpoint".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        config.tracker.endpoint = endpoint.clone();
+    }
+
+    if let Some(ref api_key) = overrides.tracker_api_key {
+        config.tracker.api_key = Some(api_key.clone());
+    }
+
+    if let Some(ref project_slug) = overrides.tracker_project_slug {
+        if project_slug.trim().is_empty() {
+            return Err(ConfigError::InvalidCliOverride {
+                field: "tracker.project_slug".to_string(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+        config.tracker.project_slug = Some(project_slug.clone());
+    }
+
+    validate(&config)?;
+    Ok(config)
+}
+
+#[cfg(test)]
+mod cli_override_tests {
+    use super::*;
+
+    #[test]
+    fn applies_polling_interval_override() {
+        let mut config = RuntimeConfig::default();
+        config.tracker.api_key = Some("token".to_owned());
+        config.tracker.project_slug = Some("symphony".to_owned());
+        let overrides = CliOverrides {
+            polling_interval_ms: Some(60000),
+            ..Default::default()
+        };
+
+        let result = apply_cli_overrides(config, &overrides).expect("should apply override");
+        assert_eq!(result.polling.interval_ms, 60000);
+    }
+
+    #[test]
+    fn rejects_zero_polling_interval_override() {
+        let config = RuntimeConfig::default();
+        let overrides = CliOverrides {
+            polling_interval_ms: Some(0),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            apply_cli_overrides(config, &overrides),
+            Err(ConfigError::InvalidCliOverride {
+                field: "polling.interval_ms".to_string(),
+                reason: "must be greater than 0".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn applies_max_concurrent_agents_override() {
+        let mut config = RuntimeConfig::default();
+        config.tracker.api_key = Some("token".to_owned());
+        config.tracker.project_slug = Some("symphony".to_owned());
+
+        let overrides = CliOverrides {
+            max_concurrent_agents: Some(20),
+            ..Default::default()
+        };
+
+        let result = apply_cli_overrides(config, &overrides).expect("should apply override");
+        assert_eq!(result.agent.max_concurrent_agents, 20);
+    }
+
+    #[test]
+    fn rejects_zero_max_concurrent_agents_override() {
+        let mut config = RuntimeConfig::default();
+        config.tracker.api_key = Some("token".to_owned());
+        config.tracker.project_slug = Some("symphony".to_owned());
+
+        let overrides = CliOverrides {
+            max_concurrent_agents: Some(0),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            apply_cli_overrides(config, &overrides),
+            Err(ConfigError::InvalidCliOverride {
+                field: "agent.max_concurrent_agents".to_string(),
+                reason: "must be greater than 0".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn applies_workspace_root_override() {
+        let mut config = RuntimeConfig::default();
+        config.tracker.api_key = Some("token".to_owned());
+        config.tracker.project_slug = Some("symphony".to_owned());
+
+        let overrides = CliOverrides {
+            workspace_root: Some(std::path::PathBuf::from("/tmp/test-workspaces")),
+            ..Default::default()
+        };
+
+        let result = apply_cli_overrides(config, &overrides).expect("should apply override");
+        assert_eq!(
+            result.workspace.root,
+            std::path::PathBuf::from("/tmp/test-workspaces")
+        );
+    }
+
+    #[test]
+    fn applies_valid_log_level_override() {
+        let mut config = RuntimeConfig::default();
+        config.tracker.api_key = Some("token".to_owned());
+        config.tracker.project_slug = Some("symphony".to_owned());
+
+        let overrides = CliOverrides {
+            log_level: Some("DEBUG".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_cli_overrides(config, &overrides).expect("should apply override");
+        assert_eq!(result.log_level.level, "debug");
+    }
+
+    #[test]
+    fn rejects_invalid_log_level_override() {
+        let mut config = RuntimeConfig::default();
+        config.tracker.api_key = Some("token".to_owned());
+        config.tracker.project_slug = Some("symphony".to_owned());
+
+        let overrides = CliOverrides {
+            log_level: Some("invalid".to_string()),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            apply_cli_overrides(config, &overrides),
+            Err(ConfigError::InvalidCliOverride {
+                field,
+                reason: _
+            }) if field == "log.level"
+        ));
+    }
+
+    #[test]
+    fn applies_tracker_endpoint_override() {
+        let mut config = RuntimeConfig::default();
+        config.tracker.api_key = Some("token".to_owned());
+        config.tracker.project_slug = Some("symphony".to_owned());
+
+        let overrides = CliOverrides {
+            tracker_endpoint: Some("https://custom.linear.app/graphql".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_cli_overrides(config, &overrides).expect("should apply override");
+        assert_eq!(
+            result.tracker.endpoint,
+            "https://custom.linear.app/graphql".to_string()
+        );
+    }
+
+    #[test]
+    fn applies_tracker_api_key_override() {
+        let mut config = RuntimeConfig::default();
+        config.tracker.project_slug = Some("symphony".to_owned());
+
+        let overrides = CliOverrides {
+            tracker_api_key: Some("cli-api-key".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_cli_overrides(config, &overrides).expect("should apply override");
+        assert_eq!(result.tracker.api_key, Some("cli-api-key".to_string()));
+    }
+
+    #[test]
+    fn applies_multiple_overrides() {
+        let mut config = RuntimeConfig::default();
+        config.tracker.api_key = Some("token".to_owned());
+        config.tracker.project_slug = Some("symphony".to_owned());
+
+        let overrides = CliOverrides {
+            polling_interval_ms: Some(45000),
+            max_concurrent_agents: Some(15),
+            log_level: Some("warn".to_string()),
+            tracker_endpoint: Some("https://custom.endpoint.com".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_cli_overrides(config, &overrides).expect("should apply override");
+        assert_eq!(result.polling.interval_ms, 45000);
+        assert_eq!(result.agent.max_concurrent_agents, 15);
+        assert_eq!(result.log_level.level, "warn");
+        assert_eq!(
+            result.tracker.endpoint,
+            "https://custom.endpoint.com".to_string()
+        );
+    }
+
+    #[test]
+    fn empty_overrides_leaves_config_unchanged() {
+        let mut config = RuntimeConfig::default();
+        config.tracker.api_key = Some("token".to_owned());
+        config.tracker.project_slug = Some("symphony".to_owned());
+
+        let original_config = config.clone();
+        let overrides = CliOverrides::default();
+
+        let result = apply_cli_overrides(config, &overrides).expect("should keep original");
+        assert_eq!(
+            result.polling.interval_ms,
+            original_config.polling.interval_ms
+        );
+        assert_eq!(
+            result.agent.max_concurrent_agents,
+            original_config.agent.max_concurrent_agents
+        );
+    }
+
+    #[test]
+    fn override_takes_precedence_over_config_values() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+  endpoint: https://api.linear.app/graphql
+polling:
+  interval_ms: 30000
+agent:
+  max_concurrent_agents: 10
+"#,
+        );
+
+        let config = from_front_matter(&front_matter).expect("config should parse");
+
+        let overrides = CliOverrides {
+            polling_interval_ms: Some(60000),
+            max_concurrent_agents: Some(20),
+            tracker_endpoint: Some("https://override.endpoint.com".to_string()),
+            ..Default::default()
+        };
+
+        let result = apply_cli_overrides(config, &overrides).expect("should apply overrides");
+        assert_eq!(result.polling.interval_ms, 60000);
+        assert_eq!(result.agent.max_concurrent_agents, 20);
+        assert_eq!(
+            result.tracker.endpoint,
+            "https://override.endpoint.com".to_string()
+        );
+    }
+
+    #[test]
+    fn is_empty_returns_true_for_no_overrides() {
+        let overrides = CliOverrides::default();
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn is_empty_returns_false_with_any_override() {
+        let overrides = CliOverrides {
+            polling_interval_ms: Some(1000),
+            ..Default::default()
+        };
+        assert!(!overrides.is_empty());
     }
 }

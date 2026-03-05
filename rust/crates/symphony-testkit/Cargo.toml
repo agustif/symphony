@@ -6,7 +6,10 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 symphony-agent-protocol = { path = "../symphony-agent-protocol" }
 symphony-domain = { path = "../symphony-domain" }
 symphony-observability = { path = "../symphony-observability" }
@@ -16,4 +19,3 @@ symphony-tracker = { path = "../symphony-tracker" }
 symphony-config = { path = "../symphony-config" }
 symphony-runtime = { path = "../symphony-runtime" }
 symphony-workflow = { path = "../symphony-workflow" }
-tokio.workspace = true

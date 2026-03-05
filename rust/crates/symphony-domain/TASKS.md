@@ -16,8 +16,8 @@ Own pure domain types, reducer transitions, and invariant validation.
 
 ## Epic D1: Domain Types
 ### Task D1.1: Canonical entities
-- [ ] Subtask D1.1.1: Define issue, state, retry, and session entities.
-- [ ] Subtask D1.1.2: Normalize IDs and state names.
+- [x] Subtask D1.1.1: Define issue, state, retry, and session entities.
+- [x] Subtask D1.1.2: Normalize IDs and state names.
 
 ### Task D1.2: Error taxonomy
 - [x] Subtask D1.2.1: Define invariant and transition errors.
@@ -30,7 +30,7 @@ Own pure domain types, reducer transitions, and invariant validation.
 
 ### Task D2.2: Retry/reconcile transitions
 - [x] Subtask D2.2.1: Retry scheduling and cancellation transitions.
-- [ ] Subtask D2.2.2: Terminal/non-active reconcile transitions.
+- [x] Subtask D2.2.2: Terminal/non-active reconcile transitions.
 
 ## Epic D3: Invariants and Tests
 ### Task D3.1: Invariant API

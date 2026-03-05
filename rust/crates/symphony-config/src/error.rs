@@ -47,4 +47,6 @@ pub enum ConfigError {
     StateLimitExceedsMaxConcurrent { state: String, limit: u32, max: u32 },
     #[error("`codex.command` must be non-empty")]
     MissingCodexCommand,
+    #[error("invalid CLI override for `{field}`: {reason}")]
+    InvalidCliOverride { field: String, reason: String },
 }

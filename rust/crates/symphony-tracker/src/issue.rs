@@ -7,6 +7,8 @@ pub struct TrackerIssue {
     pub id: IssueId,
     pub identifier: String,
     pub state: TrackerState,
+    pub priority: Option<i32>,
+    pub created_at: Option<u64>,
 }
 
 impl TrackerIssue {
@@ -15,6 +17,18 @@ impl TrackerIssue {
             id,
             identifier: identifier.into(),
             state,
+            priority: None,
+            created_at: None,
         }
+    }
+
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = Some(priority);
+        self
+    }
+
+    pub fn with_created_at(mut self, created_at: u64) -> Self {
+        self.created_at = Some(created_at);
+        self
     }
 }

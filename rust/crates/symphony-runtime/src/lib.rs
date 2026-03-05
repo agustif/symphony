@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
+pub mod worker;
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use symphony_config::RuntimeConfig;
 use symphony_domain::{
     Command, Event, InvariantError, IssueId, OrchestratorState, reduce, validate_invariants,
 };
@@ -106,48 +109,144 @@ pub struct WorkerExitResult {
 pub struct Runtime<T: TrackerClient> {
     tracker: Arc<T>,
     state: Mutex<OrchestratorState>,
+    last_seen: Mutex<std::collections::HashMap<IssueId, std::time::Instant>>,
+    snapshot_tx: tokio::sync::watch::Sender<RuntimeSnapshot>,
 }
 
 impl<T: TrackerClient> Runtime<T> {
     pub fn new(tracker: Arc<T>) -> Self {
+        let (snapshot_tx, _) = tokio::sync::watch::channel(RuntimeSnapshot {
+            running: 0,
+            retrying: 0,
+        });
         Self {
             tracker,
             state: Mutex::new(OrchestratorState::default()),
+            last_seen: Mutex::new(std::collections::HashMap::new()),
+            snapshot_tx,
         }
     }
 
-    pub async fn run_tick(&self, max_concurrent_agents: usize) -> Result<TickResult, RuntimeError> {
+    pub fn subscribe_snapshots(&self) -> tokio::sync::watch::Receiver<RuntimeSnapshot> {
+        self.snapshot_tx.subscribe()
+    }
+
+    pub async fn report_activity(&self, issue_id: IssueId) {
+        let mut last_seen = self.last_seen.lock().await;
+        last_seen.insert(issue_id, std::time::Instant::now());
+    }
+
+    pub async fn run_tick(&self, config: &RuntimeConfig) -> Result<TickResult, RuntimeError> {
         let issues = self.tracker.fetch_candidates().await?;
-        let mut candidate_ids: Vec<IssueId> = issues.into_iter().map(|issue| issue.id).collect();
-        candidate_ids.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut candidate_issues = issues.clone();
+        candidate_issues.sort_by(|left, right| {
+            // 1. priority ascending (1..4 preferred, null/unknown sorts last)
+            let left_prio = left.priority.unwrap_or(i32::MAX);
+            let right_prio = right.priority.unwrap_or(i32::MAX);
+            let res = left_prio.cmp(&right_prio);
+            if res != std::cmp::Ordering::Equal {
+                return res;
+            }
+
+            // 2. created_at oldest first (null sorts last)
+            let left_created = left.created_at.unwrap_or(u64::MAX);
+            let right_created = right.created_at.unwrap_or(u64::MAX);
+            let res = left_created.cmp(&right_created);
+            if res != std::cmp::Ordering::Equal {
+                return res;
+            }
+
+            // 3. identifier lexicographic tie-breaker
+            left.identifier.cmp(&right.identifier)
+        });
+
+        let mut candidate_ids: Vec<IssueId> = candidate_issues.iter().map(|issue| issue.id.clone()).collect();
         let candidate_set: HashSet<IssueId> = candidate_ids.iter().cloned().collect();
 
         let mut state_guard = self.state.lock().await;
         let mut state = state_guard.clone();
         let mut commands = Vec::new();
 
+        // 1. Stall Detection
+        let now = std::time::Instant::now();
+        let mut stalled_issues = Vec::new();
+        if config.codex.stall_timeout_ms > 0 {
+            let last_seen_guard = self.last_seen.lock().await;
+            for issue_id in state.running.keys() {
+                let last_active = last_seen_guard.get(issue_id).copied().unwrap_or(now);
+                if now.duration_since(last_active)
+                    > Duration::from_millis(config.codex.stall_timeout_ms as u64)
+                {
+                    stalled_issues.push(issue_id.clone());
+                }
+            }
+        }
+        for issue_id in stalled_issues {
+            let attempt = next_retry_attempt(&state, &issue_id);
+            state = apply_event(
+                state,
+                Event::QueueRetry {
+                    issue_id: issue_id.clone(),
+                    attempt,
+                },
+                &mut commands,
+            )?;
+            tracing::warn!("Worker stalled for issue {:?}", issue_id);
+        }
+
         for issue_id in non_active_reconciliation_ids(&state, &candidate_set) {
             state = apply_event(state, Event::Release(issue_id), &mut commands)?;
         }
 
-        let mut available_slots = max_concurrent_agents.saturating_sub(state.running.len());
+        let mut global_available =
+            (config.agent.max_concurrent_agents as usize).saturating_sub(state.running.len());
+
+        let mut running_by_state: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for issue in &issues {
+            if state.running.contains_key(&issue.id) {
+                if let Some(state_key) = issue.state.normalized_key() {
+                    *running_by_state.entry(state_key).or_insert(0) += 1;
+                }
+            }
+        }
+
         for issue_id in candidate_ids {
-            if available_slots == 0 {
+            if global_available == 0 {
                 break;
             }
             if state.claimed.contains(&issue_id)
-                || state.running.contains(&issue_id)
+                || state.running.contains_key(&issue_id)
                 || state.retry_attempts.contains_key(&issue_id)
             {
                 continue;
             }
+
+            let issue = issues.iter().find(|i| i.id == issue_id).unwrap();
+            if let Some(state_key) = issue.state.normalized_key() {
+                if let Some(&max_for_state) =
+                    config.agent.max_concurrent_agents_by_state.get(&state_key)
+                {
+                    let current_for_state = running_by_state.get(&state_key).copied().unwrap_or(0);
+                    if current_for_state >= max_for_state as usize {
+                        continue;
+                    }
+                    *running_by_state.entry(state_key).or_insert(0) += 1;
+                }
+            }
+
             state = apply_event(state, Event::Claim(issue_id.clone()), &mut commands)?;
             state = apply_event(state, Event::MarkRunning(issue_id), &mut commands)?;
-            available_slots = available_slots.saturating_sub(1);
+            global_available = global_available.saturating_sub(1);
         }
 
         validate_invariants(&state)?;
         *state_guard = state.clone();
+
+        let _ = self.snapshot_tx.send(RuntimeSnapshot {
+            running: state.running.len(),
+            retrying: state.retry_attempts.len(),
+        });
 
         Ok(TickResult { state, commands })
     }
@@ -196,11 +295,64 @@ impl<T: TrackerClient> Runtime<T> {
         validate_invariants(&state)?;
         *state_guard = state.clone();
 
+        let _ = self.snapshot_tx.send(RuntimeSnapshot {
+            running: state.running.len(),
+            retrying: state.retry_attempts.len(),
+        });
+
         Ok(WorkerExitResult {
             state,
             commands,
             retry_schedule,
         })
+    }
+
+    pub async fn update_agent(
+        &self,
+        event: Event,
+    ) -> Result<(), RuntimeError> {
+        let mut state_guard = self.state.lock().await;
+        let mut state = state_guard.clone();
+        let mut commands = Vec::new();
+
+        state = apply_event(state, event, &mut commands)?;
+        *state_guard = state.clone();
+
+        let _ = self.snapshot_tx.send(RuntimeSnapshot {
+            running: state.running.len(),
+            retrying: state.retry_attempts.len(),
+        });
+
+        Ok(())
+    }
+
+    /// Handle agent protocol updates with typed parameters
+    /// Integrates protocol messages into runtime state with thread-safe updates
+    pub async fn handle_protocol_update(
+        &self,
+        issue_id: IssueId,
+        session_id: Option<String>,
+        thread_id: Option<String>,
+        turn_id: Option<String>,
+        pid: Option<u32>,
+        event: Option<String>,
+        timestamp: Option<u64>,
+        message: Option<String>,
+        usage: Option<symphony_domain::Usage>,
+    ) -> Result<(), RuntimeError> {
+        let update_event = Event::UpdateAgent {
+            issue_id,
+            session_id,
+            thread_id,
+            turn_id,
+            pid,
+            event,
+            timestamp,
+            message,
+            usage,
+        };
+
+        self.update_agent(update_event).await
     }
 
     pub async fn snapshot(&self) -> RuntimeSnapshot {
@@ -214,6 +366,73 @@ impl<T: TrackerClient> Runtime<T> {
     pub async fn state(&self) -> OrchestratorState {
         self.state.lock().await.clone()
     }
+
+    pub async fn run_poll_loop(
+        &self,
+        config: std::sync::Arc<tokio::sync::RwLock<RuntimeConfig>>,
+        mut refresh_rx: tokio::sync::mpsc::Receiver<()>,
+        mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
+    ) {
+        let initial_config = config.read().await.clone();
+        let mut current_version = initial_config.version;
+        let mut interval = tokio::time::interval(Duration::from_millis(initial_config.polling.interval_ms.max(100)));
+
+        tracing::info!(
+            poll_interval_ms = initial_config.polling.interval_ms,
+            max_concurrent_agents = initial_config.agent.max_concurrent_agents,
+            config_version = current_version,
+            "Starting poll loop"
+        );
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let new_config = config.read().await.clone();
+
+                    // Detect config reload by version change
+                    if new_config.version != current_version {
+                        tracing::info!(
+                            old_version = current_version,
+                            new_version = new_config.version,
+                            poll_interval_ms = new_config.polling.interval_ms,
+                            max_concurrent_agents = new_config.agent.max_concurrent_agents,
+                            "Config reloaded"
+                        );
+                        current_version = new_config.version;
+                    }
+
+                    if let Err(e) = self.run_tick(&new_config).await {
+                        tracing::error!("Tick failed: {:?}", e);
+                    }
+                    interval = tokio::time::interval(Duration::from_millis(new_config.polling.interval_ms.max(100)));
+                    interval.reset();
+                }
+                Some(_) = refresh_rx.recv() => {
+                    let new_config = config.read().await.clone();
+
+                    // Trigger immediate tick with potential config reload
+                    if new_config.version != current_version {
+                        tracing::info!(
+                            old_version = current_version,
+                            new_version = new_config.version,
+                            "Refresh triggered config reload"
+                        );
+                        current_version = new_config.version;
+                    }
+
+                    if let Err(e) = self.run_tick(&new_config).await {
+                        tracing::error!("Refresh tick failed: {:?}", e);
+                    }
+                    interval = tokio::time::interval(Duration::from_millis(new_config.polling.interval_ms.max(100)));
+                    interval.reset();
+                }
+                _ = shutdown_rx.recv() => {
+                    tracing::info!("Shutting down poll loop");
+                    break;
+                }
+            }
+        }
+    }
 }
 
 pub fn non_active_reconciliation_ids(
@@ -224,7 +443,7 @@ pub fn non_active_reconciliation_ids(
         .claimed
         .iter()
         .filter(|issue_id| {
-            !state.running.contains(*issue_id)
+            !state.running.contains_key(*issue_id)
                 && !state.retry_attempts.contains_key(*issue_id)
                 && !active_ids.contains(*issue_id)
         })
@@ -249,7 +468,7 @@ pub fn terminal_reconciliation_ids(
     releases.extend(
         state
             .running
-            .iter()
+            .keys()
             .filter(|issue_id| terminal_ids.contains(*issue_id))
             .cloned(),
     );
@@ -351,8 +570,11 @@ mod tests {
             .await;
         let runtime = Runtime::new(Arc::clone(&tracker));
 
+        let mut config = RuntimeConfig::default();
+        config.agent.max_concurrent_agents = 1;
+
         let first_tick = runtime
-            .run_tick(1)
+            .run_tick(&config)
             .await
             .expect("dispatch tick should succeed");
         assert_eq!(
@@ -362,11 +584,11 @@ mod tests {
 
         let state = runtime.state().await;
         assert!(state.claimed.contains(&issue_id));
-        assert!(state.running.contains(&issue_id));
+        assert!(state.running.contains_key(&issue_id));
         assert_eq!(validate_invariants(&state), Ok(()));
 
         let second_tick = runtime
-            .run_tick(1)
+            .run_tick(&config)
             .await
             .expect("already running issue should not be re-dispatched");
         assert!(second_tick.commands.is_empty());
@@ -384,11 +606,17 @@ mod tests {
             state.claimed.insert(issue("SYM-20"));
             state.claimed.insert(issue("SYM-10"));
             state.claimed.insert(running_issue.clone());
-            state.running.insert(running_issue.clone());
+            state.running.insert(
+                running_issue.clone(),
+                symphony_domain::RunningEntry::default(),
+            );
         }
 
+        let mut config = RuntimeConfig::default();
+        config.agent.max_concurrent_agents = 3;
+
         let tick = runtime
-            .run_tick(3)
+            .run_tick(&config)
             .await
             .expect("release tick should succeed");
         assert_eq!(
@@ -401,7 +629,7 @@ mod tests {
 
         let state = runtime.state().await;
         assert!(state.claimed.contains(&running_issue));
-        assert!(state.running.contains(&running_issue));
+        assert!(state.running.contains_key(&running_issue));
         assert_eq!(validate_invariants(&state), Ok(()));
     }
 
@@ -448,7 +676,9 @@ mod tests {
         {
             let mut state = runtime.state.lock().await;
             state.claimed.insert(issue_id.clone());
-            state.running.insert(issue_id.clone());
+            state
+                .running
+                .insert(issue_id.clone(), symphony_domain::RunningEntry::default());
         }
 
         let result = runtime
@@ -472,7 +702,7 @@ mod tests {
                 delay: Duration::from_secs(2),
             }),
         );
-        assert!(!result.state.running.contains(&issue_id));
+        assert!(!result.state.running.contains_key(&issue_id));
         assert_eq!(
             result
                 .state
@@ -493,6 +723,9 @@ mod tests {
         {
             let mut state = runtime.state.lock().await;
             state.claimed.insert(issue_id.clone());
+            state
+                .running
+                .insert(issue_id.clone(), symphony_domain::RunningEntry::default());
             state
                 .retry_attempts
                 .insert(issue_id.clone(), symphony_domain::RetryEntry { attempt: 2 });
@@ -531,7 +764,9 @@ mod tests {
         {
             let mut state = runtime.state.lock().await;
             state.claimed.insert(issue_id.clone());
-            state.running.insert(issue_id.clone());
+            state
+                .running
+                .insert(issue_id.clone(), symphony_domain::RunningEntry::default());
         }
 
         let result = runtime
@@ -545,7 +780,7 @@ mod tests {
             vec![Command::ReleaseClaim(issue_id.clone())]
         );
         assert!(!result.state.claimed.contains(&issue_id));
-        assert!(!result.state.running.contains(&issue_id));
+        assert!(!result.state.running.contains_key(&issue_id));
     }
 
     #[test]
@@ -558,7 +793,10 @@ mod tests {
         state.claimed.insert(issue_non_active.clone());
         state.claimed.insert(issue_terminal.clone());
         state.claimed.insert(issue_active.clone());
-        state.running.insert(issue_active.clone());
+        state.running.insert(
+            issue_active.clone(),
+            symphony_domain::RunningEntry::default(),
+        );
 
         let terminal = HashSet::from([issue_terminal.clone(), issue("SYM-999")]);
         let active = HashSet::from([issue_active.clone()]);
@@ -585,8 +823,11 @@ mod tests {
             .await;
         let runtime = Runtime::new(Arc::clone(&tracker));
 
+        let mut config = RuntimeConfig::default();
+        config.agent.max_concurrent_agents = 3;
+
         let tick = runtime
-            .run_tick(3)
+            .run_tick(&config)
             .await
             .expect("dispatch tick should succeed");
         assert_eq!(
@@ -597,5 +838,175 @@ mod tests {
                 Command::Dispatch(issue("SYM-9")),
             ],
         );
+    }
+
+    #[tokio::test]
+    async fn run_tick_enforces_per_state_concurrency() {
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![
+                tracker_issue("SYM-1"), // Todo
+                tracker_issue("SYM-2"), // Todo
+                tracker_issue("SYM-3"), // Todo
+                TrackerIssue {
+                    id: issue("SYM-4"),
+                    identifier: "SYM-4".to_owned(),
+                    state: TrackerState::new("In Progress"),
+                },
+                TrackerIssue {
+                    id: issue("SYM-5"),
+                    identifier: "SYM-5".to_owned(),
+                    state: TrackerState::new("In Progress"),
+                },
+            ])
+            .await;
+        let runtime = Runtime::new(Arc::clone(&tracker));
+
+        let mut config = RuntimeConfig::default();
+        config.agent.max_concurrent_agents = 4;
+        config.agent.max_concurrent_agents_by_state.insert("todo".to_owned(), 2);
+        config.agent.max_concurrent_agents_by_state.insert("in progress".to_owned(), 1);
+
+        let tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("dispatch tick should succeed");
+
+        // Should dispatch 2 Todo and 1 In Progress
+        assert_eq!(tick.commands.len(), 3);
+        assert!(tick.commands.contains(&Command::Dispatch(issue("SYM-1"))));
+        assert!(tick.commands.contains(&Command::Dispatch(issue("SYM-2"))));
+        assert!(tick.commands.contains(&Command::Dispatch(issue("SYM-4"))));
+    }
+
+    #[tokio::test]
+    async fn run_tick_stalls_and_queues_retry() {
+        let issue_id = issue("SYM-99");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![tracker_issue("SYM-99")])
+            .await;
+        let runtime = Runtime::new(Arc::clone(&tracker));
+
+        // Mark it as running and explicitly set its last seen to the past
+        {
+            let mut state = runtime.state.lock().await;
+            state.claimed.insert(issue_id.clone());
+            state.running.insert(issue_id.clone(), symphony_domain::RunningEntry::default());
+            let mut last_seen = runtime.last_seen.lock().await;
+            last_seen.insert(issue_id.clone(), std::time::Instant::now() - Duration::from_secs(400));
+        }
+
+        let mut config = RuntimeConfig::default();
+        config.codex.stall_timeout_ms = 300_000; // 5 minutes
+
+        let tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("dispatch tick should succeed");
+
+        assert_eq!(
+            tick.commands,
+            vec![Command::ScheduleRetry {
+                issue_id: issue_id.clone(),
+                attempt: 1,
+            }]
+        );
+
+        let state = runtime.state().await;
+        assert!(!state.running.contains_key(&issue_id));
+        assert!(state.retry_attempts.contains_key(&issue_id));
+    }
+
+    #[test]
+    fn runtime_config_version_increments() {
+        let config = RuntimeConfig::default();
+        assert_eq!(config.version, 0);
+
+        let incremented = config.increment_version();
+        assert_eq!(incremented.version, 1);
+        assert_eq!(config.version, 0); // Original unchanged
+    }
+
+    #[tokio::test]
+    async fn handle_protocol_update_updates_running_entry() {
+        let issue_id = issue("SYM-500");
+        let tracker = Arc::new(MutableTracker::default());
+        let runtime = Runtime::new(Arc::clone(&tracker));
+
+        // First, mark the issue as running
+        {
+            let mut state = runtime.state.lock().await;
+            state.claimed.insert(issue_id.clone());
+            state
+                .running
+                .insert(issue_id.clone(), symphony_domain::RunningEntry::default());
+        }
+
+        // Then update with protocol information
+        let usage = symphony_domain::Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+        };
+
+        runtime
+            .handle_protocol_update(
+                issue_id.clone(),
+                Some("session-123".to_owned()),
+                Some("thread-456".to_owned()),
+                Some("turn-789".to_owned()),
+                Some(12345),
+                Some("turn.start".to_owned()),
+                Some(1700000000),
+                Some("Processing issue".to_owned()),
+                Some(usage),
+            )
+            .await
+            .expect("protocol update should succeed");
+
+        let state = runtime.state().await;
+        let entry = state
+            .running
+            .get(&issue_id)
+            .expect("issue should be running");
+        assert_eq!(entry.session_id, Some("session-123".to_owned()));
+        assert_eq!(entry.thread_id, Some("thread-456".to_owned()));
+        assert_eq!(entry.turn_id, Some("turn-789".to_owned()));
+        assert_eq!(entry.codex_app_server_pid, Some(12345));
+        assert_eq!(entry.last_codex_event, Some("turn.start".to_owned()));
+        assert_eq!(entry.last_codex_timestamp, Some(1700000000));
+        assert_eq!(entry.last_codex_message, Some("Processing issue".to_owned()));
+        assert_eq!(entry.usage, usage);
+
+        // Check global totals updated
+        assert_eq!(state.codex_totals.input_tokens, 100);
+        assert_eq!(state.codex_totals.output_tokens, 50);
+        assert_eq!(state.codex_totals.total_tokens, 150);
+    }
+
+    #[tokio::test]
+    async fn handle_protocol_update_rejects_non_running_issue() {
+        let issue_id = issue("SYM-501");
+        let tracker = Arc::new(MutableTracker::default());
+        let runtime = Runtime::new(Arc::clone(&tracker));
+
+        // Don't mark as running, just try to update
+        let result = runtime
+            .handle_protocol_update(
+                issue_id.clone(),
+                Some("session-123".to_owned()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+
+        // Should fail with MissingClaim (which is the invariant error for non-running issues)
+        assert!(result.is_err());
     }
 }

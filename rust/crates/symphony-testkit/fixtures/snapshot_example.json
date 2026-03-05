@@ -1,0 +1,7 @@
+{
+  "claimed": ["SYM-1", "SYM-2"],
+  "running": ["SYM-1"],
+  "retry_attempts": [
+    ["SYM-2", 1]
+  ]
+}

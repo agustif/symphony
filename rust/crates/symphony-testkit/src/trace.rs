@@ -1,6 +1,9 @@
 use symphony_domain::{
-    Command, Event, InvariantError, OrchestratorState, reduce, validate_invariants,
+    reduce, validate_invariants, Command, Event, InvariantError, OrchestratorState,
 };
+
+// Use StateSnapshot from fixtures module
+use crate::StateSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraceStep {
@@ -13,13 +16,6 @@ pub struct TraceStep {
 pub struct TraceResult {
     pub steps: Vec<TraceStep>,
     pub final_state: OrchestratorState,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StateSnapshot {
-    pub claimed: Vec<String>,
-    pub running: Vec<String>,
-    pub retry_attempts: Vec<(String, u32)>,
 }
 
 pub fn run_trace(events: impl IntoIterator<Item = Event>) -> TraceResult {
@@ -79,7 +75,7 @@ pub fn snapshot_state(state: &OrchestratorState) -> StateSnapshot {
 
     let mut running = state
         .running
-        .iter()
+        .keys()
         .map(|id| id.0.clone())
         .collect::<Vec<_>>();
     running.sort();

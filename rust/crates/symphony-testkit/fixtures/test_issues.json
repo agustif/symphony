@@ -1,0 +1,9 @@
+{
+  "issues": [
+    {
+      "id": "{{ISSUE_ID}}",
+      "identifier": "SYM-123",
+      "state": "{{ISSUE_STATE}}"
+    }
+  ]
+}

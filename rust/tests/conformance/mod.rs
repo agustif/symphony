@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod orchestrator_cases;
+
 use symphony_domain::{Event, OrchestratorState, RetryEntry};
 use symphony_testkit::{command_count, issue_id, run_trace, run_trace_from_state, validate_trace};
 

@@ -134,6 +134,19 @@ impl Default for CodexConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogLevelConfig {
+    pub level: String,
+}
+
+impl Default for LogLevelConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_owned(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RuntimeConfig {
     pub tracker: TrackerConfig,
@@ -142,4 +155,88 @@ pub struct RuntimeConfig {
     pub hooks: HooksConfig,
     pub agent: AgentConfig,
     pub codex: CodexConfig,
+    pub log_level: LogLevelConfig,
+    /// Monotonically increasing version to detect config changes for hot-reload
+    #[serde(default)]
+    pub version: u64,
+}
+
+impl RuntimeConfig {
+    /// Create a new config with an incremented version for hot-reload detection
+    pub fn increment_version(&self) -> Self {
+        let mut config = self.clone();
+        config.version = config.version.saturating_add(1);
+        config
+    }
+}
+
+/// CLI override values for config fields.
+///
+/// These take precedence over config file values and environment variables
+/// in the following order of priority:
+///
+/// 1. CLI arguments (highest priority)
+/// 2. Environment variables ($VAR or ${VAR})
+/// 3. Config file values
+/// 4. Default values (lowest priority)
+///
+/// # Example
+///
+/// ```ignore
+/// use symphony_config::{RuntimeConfig, CliOverrides, apply_cli_overrides};
+///
+/// // Load config from file
+/// let config = RuntimeConfig::default();
+///
+/// // Create CLI overrides from user input
+/// let overrides = CliOverrides {
+///     polling_interval_ms: Some(60000),
+///     max_concurrent_agents: Some(20),
+///     log_level: Some("debug".to_string()),
+///     ..Default::default()
+/// };
+///
+/// // Apply overrides (validates the result)
+/// let config = apply_cli_overrides(config, &overrides)?;
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CliOverrides {
+    /// Override polling interval in milliseconds
+    pub polling_interval_ms: Option<u64>,
+    /// Override max concurrent agents
+    pub max_concurrent_agents: Option<u32>,
+    /// Override max turns per agent
+    pub max_turns: Option<u32>,
+    /// Override max retry backoff in milliseconds
+    pub max_retry_backoff_ms: Option<u64>,
+    /// Override workspace root path
+    pub workspace_root: Option<std::path::PathBuf>,
+    /// Override log level (trace, debug, info, warn, error)
+    pub log_level: Option<String>,
+    /// Override tracker API endpoint
+    pub tracker_endpoint: Option<String>,
+    /// Override tracker API key
+    pub tracker_api_key: Option<String>,
+    /// Override tracker project slug
+    pub tracker_project_slug: Option<String>,
+}
+
+impl CliOverrides {
+    /// Create empty CliOverrides
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if any overrides are set
+    pub fn is_empty(&self) -> bool {
+        self.polling_interval_ms.is_none()
+            && self.max_concurrent_agents.is_none()
+            && self.max_turns.is_none()
+            && self.max_retry_backoff_ms.is_none()
+            && self.workspace_root.is_none()
+            && self.log_level.is_none()
+            && self.tracker_endpoint.is_none()
+            && self.tracker_api_key.is_none()
+            && self.tracker_project_slug.is_none()
+    }
 }
