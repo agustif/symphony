@@ -1,0 +1,32 @@
+# Lefthook configuration for Symphony Rust workspace
+# Install hooks with: lefthook install
+
+pre-commit:
+  parallel: true
+  commands:
+    fmt-check:
+      glob: "*.rs"
+      run: |
+        cd rust && cargo fmt --all --check
+      fail_text: "Run 'cargo fmt --all' to fix formatting"
+
+    clippy:
+      glob: "*.rs"
+      run: |
+        cd rust && cargo clippy --workspace --all-targets -- -D warnings
+      fail_text: "Fix clippy warnings before committing"
+
+pre-push:
+  commands:
+    tests:
+      run: |
+        cd rust && cargo test --workspace
+      fail_text: "Tests must pass before pushing"
+
+# Run on CI to ensure hooks would pass
+ci:
+  autofix_commit_msg: |
+    [ci] autofix from lefthook
+
+    Generated with Crush
+  autofix_prs: false

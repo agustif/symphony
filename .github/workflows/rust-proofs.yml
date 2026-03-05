@@ -1,6 +1,11 @@
 name: rust-proofs
 
 on:
+  pull_request:
+    paths:
+      - 'rust/**/*.rs'
+      - 'rust/proofs/**'
+      - '.github/workflows/rust-proofs.yml'
   workflow_dispatch:
     inputs:
       proof_profile:
