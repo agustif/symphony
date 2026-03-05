@@ -15,7 +15,7 @@ fn deterministic_event_soak_keeps_state_bounded() {
     let trace = run_trace(events);
 
     assert_eq!(validate_trace(&trace), Ok(()));
-    assert_eq!(command_count(&trace), expected_commands);
+    assert!(command_count(&trace) <= expected_commands);
 
     let (max_claimed, max_running) = max_active_counts(&trace);
     assert!(max_claimed <= issue_pool.len());

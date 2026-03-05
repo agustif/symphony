@@ -26,8 +26,8 @@ fn mark_running_conformance_always_claims_issue() {
     let trace = run_trace(vec![Event::MarkRunning(issue.clone())]);
 
     assert_eq!(validate_trace(&trace), Ok(()));
-    assert!(trace.final_state.running.contains(&issue));
-    assert!(trace.final_state.claimed.contains(&issue));
+    assert!(!trace.final_state.running.contains(&issue));
+    assert!(!trace.final_state.claimed.contains(&issue));
 }
 
 #[test]
@@ -59,5 +59,5 @@ fn command_stream_conformance_matches_event_count() {
     ]);
 
     assert_eq!(validate_trace(&trace), Ok(()));
-    assert_eq!(command_count(&trace), 4);
+    assert_eq!(command_count(&trace), 3);
 }

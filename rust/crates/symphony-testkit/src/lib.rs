@@ -213,7 +213,10 @@ mod tests {
     #[test]
     fn interleaving_helper_respects_limit() {
         let issue = issue_id("SYM-1");
-        let left = vec![Event::Claim(issue.clone()), Event::MarkRunning(issue.clone())];
+        let left = vec![
+            Event::Claim(issue.clone()),
+            Event::MarkRunning(issue.clone()),
+        ];
         let right = vec![Event::Release(issue)];
 
         let schedules = interleave_preserving_order(&left, &right, 2);

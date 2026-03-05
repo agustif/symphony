@@ -118,7 +118,7 @@ mod tests {
 
     use async_trait::async_trait;
     use symphony_domain::{Command, IssueId, validate_invariants};
-    use symphony_tracker::{TrackerClient, TrackerError, TrackerIssue};
+    use symphony_tracker::{TrackerClient, TrackerError, TrackerIssue, TrackerState};
     use tokio::sync::Mutex;
 
     use super::*;
@@ -150,7 +150,7 @@ mod tests {
         TrackerIssue {
             id: issue(id),
             identifier: id.to_owned(),
-            state: "Todo".to_owned(),
+            state: TrackerState::new("Todo"),
         }
     }
 
