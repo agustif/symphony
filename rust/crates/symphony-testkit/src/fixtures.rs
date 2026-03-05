@@ -28,9 +28,12 @@ pub fn orchestrator_state_from_labels(
     }
 
     for (label, attempt) in retry_attempts {
+        let id = issue_id(label);
+        state.running.remove(&id);
+        state.claimed.insert(id.clone());
         state
             .retry_attempts
-            .insert(issue_id(label), RetryEntry { attempt: *attempt });
+            .insert(id, RetryEntry { attempt: *attempt });
     }
 
     state
@@ -43,11 +46,10 @@ mod tests {
 
     #[test]
     fn seeded_state_builder_normalizes_running_into_claimed() {
-        let state =
-            orchestrator_state_from_labels(&["SYM-1"], &["SYM-2"], &[("SYM-2", 3), ("SYM-3", 1)]);
-        assert_eq!(state.claimed.len(), 2);
+        let state = orchestrator_state_from_labels(&["SYM-1"], &["SYM-2"], &[("SYM-3", 1)]);
+        assert_eq!(state.claimed.len(), 3);
         assert_eq!(state.running.len(), 1);
-        assert_eq!(state.retry_attempts.len(), 2);
+        assert_eq!(state.retry_attempts.len(), 1);
         assert_eq!(validate_invariants(&state), Ok(()));
     }
 }

@@ -1231,9 +1231,16 @@ dependencies = [
 name = "symphony-testkit"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "serde_json",
+ "symphony-agent-protocol",
+ "symphony-config",
  "symphony-domain",
  "symphony-observability",
+ "symphony-runtime",
+ "symphony-tracker",
+ "symphony-workflow",
+ "tokio",
 ]
 
 [[package]]

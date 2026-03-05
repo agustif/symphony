@@ -7,17 +7,13 @@ use std::{
 };
 
 use async_trait::async_trait;
-use symphony_agent_protocol::{ProtocolError, ProtocolMessage, decode_stdout_line};
-use symphony_tracker::{TrackerClient, TrackerError, TrackerIssue};
+use symphony_agent_protocol::{AppServerEvent, ProtocolError, decode_stdout_line};
+use symphony_tracker::{TrackerClient, TrackerError, TrackerIssue, TrackerState};
 
 use crate::issue_id;
 
 pub fn tracker_issue(identifier: &str, state: &str) -> TrackerIssue {
-    TrackerIssue {
-        id: issue_id(identifier),
-        identifier: identifier.to_owned(),
-        state: state.to_owned(),
-    }
+    TrackerIssue::new(issue_id(identifier), identifier, TrackerState::new(state))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,7 +90,7 @@ impl TrackerClient for FakeTracker {
 
         match response.unwrap_or_else(|| FakeTrackerResponse::Issues(self.default_issues.clone())) {
             FakeTrackerResponse::Issues(issues) => Ok(issues),
-            FakeTrackerResponse::Error(message) => Err(TrackerError::Request(message)),
+            FakeTrackerResponse::Error(message) => Err(TrackerError::transport(message)),
         }
     }
 }
@@ -126,11 +122,11 @@ impl FakeAppServerStream {
         self.lines.pop_front()
     }
 
-    pub fn decode_next(&mut self) -> Option<Result<ProtocolMessage, ProtocolError>> {
+    pub fn decode_next(&mut self) -> Option<Result<AppServerEvent, ProtocolError>> {
         self.pop_line().map(|line| decode_stdout_line(&line))
     }
 
-    pub fn drain_decoded(&mut self) -> Vec<Result<ProtocolMessage, ProtocolError>> {
+    pub fn drain_decoded(&mut self) -> Vec<Result<AppServerEvent, ProtocolError>> {
         let mut decoded = Vec::new();
         while let Some(line) = self.decode_next() {
             decoded.push(line);
@@ -209,7 +205,10 @@ mod tests {
             decoded[0].as_ref().map(|message| message.method.as_str()),
             Ok("turn.start")
         );
-        assert_eq!(decoded[1], Err(ProtocolError::InvalidLine));
+        assert!(matches!(
+            decoded[1],
+            Err(ProtocolError::InvalidStdoutLine(_))
+        ));
     }
 
     #[test]

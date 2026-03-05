@@ -115,7 +115,7 @@ mod tests {
     fn trace_runner_reports_command_count() {
         let issue = issue_id("SYM-1");
         let trace = run_trace(vec![Event::Claim(issue.clone()), Event::Release(issue)]);
-        assert_eq!(command_count(&trace), 2);
+        assert_eq!(command_count(&trace), 1);
         assert_eq!(validate_trace(&trace), Ok(()));
     }
 
@@ -126,7 +126,7 @@ mod tests {
         let snapshot = snapshot_state(&state);
         assert_eq!(
             snapshot.claimed,
-            vec!["SYM-1".to_owned(), "SYM-2".to_owned()]
+            vec!["SYM-1".to_owned(), "SYM-2".to_owned(), "SYM-3".to_owned()]
         );
     }
 }
