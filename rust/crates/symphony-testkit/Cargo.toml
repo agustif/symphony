@@ -1,0 +1,8 @@
+[package]
+name = "symphony-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+symphony-domain = { path = "../symphony-domain" }
