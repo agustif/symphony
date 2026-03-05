@@ -913,6 +913,10 @@ fn shell_command_sync(command: &str) -> std::process::Command {
 mod tests {
     use super::*;
     use symphony_tracker::TrackerState;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_partial_json, header, method, path},
+    };
 
     fn create_test_context() -> WorkerContext {
         let issue = TrackerIssue {
@@ -1254,6 +1258,200 @@ mod tests {
         let result = tool_call_result(&event, &context).await;
         assert_eq!(result["success"], false);
         assert_eq!(result["error"], "transport_failure");
+    }
+
+    #[tokio::test]
+    async fn tool_call_result_executes_linear_graphql_successfully() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(header("authorization", "Bearer linear-api-key"))
+            .and(body_partial_json(serde_json::json!({
+                "query": "query Viewer { viewer { id } }",
+                "variables": {"limit": 5}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "viewer": {"id": "viewer-1"}
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let event = tool_call_event(serde_json::json!({
+            "name": "linear_graphql",
+            "arguments": {
+                "query": "query Viewer { viewer { id } }",
+                "variables": {"limit": 5}
+            }
+        }));
+        let mut context = linear_tool_context();
+        context.tracker_endpoint = format!("{}/graphql", server.uri());
+
+        let result = tool_call_result(&event, &context).await;
+        assert_eq!(result["success"], true);
+        assert_eq!(result["output"]["data"]["viewer"]["id"], "viewer-1");
+    }
+
+    #[tokio::test]
+    async fn tool_call_result_surfaces_graphql_errors_from_linear() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [{"message": "permission denied"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let event = tool_call_event(serde_json::json!({
+            "name": "linear_graphql",
+            "arguments": {"query": "{ viewer { id } }"}
+        }));
+        let mut context = linear_tool_context();
+        context.tracker_endpoint = format!("{}/graphql", server.uri());
+
+        let result = tool_call_result(&event, &context).await;
+        assert_eq!(result["success"], false);
+        assert_eq!(result["error"], "graphql_error");
+        assert_eq!(
+            result["output"]["errors"][0]["message"],
+            "permission denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_result_surfaces_status_errors_from_linear() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(serde_json::json!({"message": "upstream unavailable"})),
+            )
+            .mount(&server)
+            .await;
+
+        let event = tool_call_event(serde_json::json!({
+            "name": "linear_graphql",
+            "arguments": {"query": "{ viewer { id } }"}
+        }));
+        let mut context = linear_tool_context();
+        context.tracker_endpoint = format!("{}/graphql", server.uri());
+
+        let result = tool_call_result(&event, &context).await;
+        assert_eq!(result["success"], false);
+        assert_eq!(result["error"], "transport_failure");
+        assert_eq!(result["output"]["status"], 503);
+    }
+
+    #[tokio::test]
+    async fn tool_call_result_reports_successful_linear_graphql_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(header("authorization", "Bearer linear-api-key"))
+            .and(body_partial_json(serde_json::json!({
+                "query": "query Viewer { viewer { id } }",
+                "variables": {"limit": 5}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "viewer": {
+                        "id": "usr_123"
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let event = tool_call_event(serde_json::json!({
+            "name": "linear_graphql",
+            "arguments": {
+                "query": "query Viewer { viewer { id } }",
+                "variables": {"limit": 5}
+            }
+        }));
+        let mut context = linear_tool_context();
+        context.tracker_endpoint = format!("{}/graphql", server.uri());
+        let result = tool_call_result(&event, &context).await;
+        assert_eq!(result["success"], true);
+        assert_eq!(result["output"]["data"]["viewer"]["id"], "usr_123");
+    }
+
+    #[tokio::test]
+    async fn tool_call_result_reports_graphql_error_payloads() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": [{"message": "permission denied"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let event = tool_call_event(serde_json::json!({
+            "name": "linear_graphql",
+            "arguments": {"query": "{ viewer { id } }"}
+        }));
+        let mut context = linear_tool_context();
+        context.tracker_endpoint = format!("{}/graphql", server.uri());
+        let result = tool_call_result(&event, &context).await;
+        assert_eq!(result["success"], false);
+        assert_eq!(result["error"], "graphql_error");
+        assert_eq!(
+            result["output"]["errors"][0]["message"],
+            "permission denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_chunk_executes_supported_tool_calls_and_writes_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"viewer": {"id": "usr_456"}}
+            })))
+            .mount(&server)
+            .await;
+
+        let mut parser = StreamLineParser::default();
+        let (mut write_half, mut read_half) = tokio::io::duplex(2_048);
+        let mut context = linear_tool_context();
+        context.tracker_endpoint = format!("{}/graphql", server.uri());
+
+        let signal = protocol_chunk_signal(
+            &mut parser,
+            LineOrigin::Stdout,
+            r#"{"id":"call-9","method":"item/tool/call","params":{"name":"linear_graphql","arguments":{"query":"{ viewer { id } }"}}}
+"#,
+            Some(&mut write_half),
+            &context,
+        )
+        .await;
+        assert_eq!(signal, None);
+
+        drop(write_half);
+        let mut response = Vec::new();
+        read_half
+            .read_to_end(&mut response)
+            .await
+            .expect("response should be readable");
+        let encoded = String::from_utf8(response).expect("response should be utf8");
+        let first_line = encoded
+            .lines()
+            .next()
+            .expect("response should contain one json line");
+        let payload: serde_json::Value =
+            serde_json::from_str(first_line).expect("response line should be valid json");
+        assert_eq!(payload["id"], "call-9");
+        assert_eq!(payload["result"]["success"], true);
+        assert_eq!(
+            payload["result"]["output"]["data"]["viewer"]["id"],
+            "usr_456"
+        );
     }
 
     #[cfg(unix)]

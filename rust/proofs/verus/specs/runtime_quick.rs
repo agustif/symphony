@@ -90,6 +90,22 @@ pub open spec fn apply_event(state: OrchestratorState, event: Event) -> Orchestr
     }
 }
 
+pub open spec fn is_rejection_case(state: OrchestratorState, event: Event) -> bool {
+    match event {
+        Event::Claim(issue_id) => state.claimed.contains(issue_id),
+        Event::MarkRunning(issue_id) => {
+            !state.claimed.contains(issue_id) || state.running.dom().contains(issue_id)
+        },
+        Event::QueueRetry { issue_id, attempt } => {
+            !state.claimed.contains(issue_id)
+                || attempt == 0
+                || (state.retry_attempts.dom().contains(issue_id)
+                    && state.retry_attempts[issue_id].attempt >= attempt)
+        },
+        Event::Release(issue_id) => !state.claimed.contains(issue_id),
+    }
+}
+
 pub proof fn lemma_claim_preserves_invariants(state: OrchestratorState, issue_id: IssueId)
     requires
         orchestrator_invariants(state),
@@ -157,6 +173,27 @@ pub proof fn lemma_mark_running_without_claim_is_noop(state: OrchestratorState, 
 {
 }
 
+pub proof fn lemma_claim_on_claimed_issue_is_noop(state: OrchestratorState, issue_id: IssueId)
+    requires
+        orchestrator_invariants(state),
+        state.claimed.contains(issue_id),
+    ensures
+        apply_event(state, Event::Claim(issue_id)) == state,
+{
+}
+
+pub proof fn lemma_mark_running_on_running_issue_is_noop(
+    state: OrchestratorState,
+    issue_id: IssueId,
+)
+    requires
+        orchestrator_invariants(state),
+        state.running.dom().contains(issue_id),
+    ensures
+        apply_event(state, Event::MarkRunning(issue_id)) == state,
+{
+}
+
 pub proof fn lemma_release_clears_tracking_for_claimed_issue(
     state: OrchestratorState,
     issue_id: IssueId,
@@ -181,6 +218,82 @@ pub proof fn lemma_queue_retry_requires_positive_attempt(
     ensures
         apply_event(state, Event::QueueRetry { issue_id, attempt: 0 }) == state,
 {
+}
+
+pub proof fn lemma_queue_retry_without_claim_is_noop(
+    state: OrchestratorState,
+    issue_id: IssueId,
+    attempt: nat,
+)
+    requires
+        orchestrator_invariants(state),
+        !state.claimed.contains(issue_id),
+    ensures
+        apply_event(state, Event::QueueRetry { issue_id, attempt }) == state,
+{
+}
+
+pub proof fn lemma_queue_retry_regression_is_noop_base(
+    state: OrchestratorState,
+    issue_id: IssueId,
+    attempt: nat,
+)
+    requires
+        orchestrator_invariants(state),
+        state.retry_attempts.dom().contains(issue_id),
+        attempt <= state.retry_attempts[issue_id].attempt,
+    ensures
+        apply_event(state, Event::QueueRetry { issue_id, attempt }) == state,
+{
+}
+
+pub proof fn lemma_release_without_claim_is_noop_base(
+    state: OrchestratorState,
+    issue_id: IssueId,
+)
+    requires
+        orchestrator_invariants(state),
+        !state.claimed.contains(issue_id),
+    ensures
+        apply_event(state, Event::Release(issue_id)) == state,
+{
+}
+
+pub proof fn lemma_invalid_transition_preserves_invariants(
+    state: OrchestratorState,
+    event: Event,
+)
+    requires
+        orchestrator_invariants(state),
+        is_rejection_case(state, event),
+    ensures
+        apply_event(state, event) == state,
+        orchestrator_invariants(apply_event(state, event)),
+{
+    match event {
+        Event::Claim(issue_id) => {
+            lemma_claim_on_claimed_issue_is_noop(state, issue_id);
+        },
+        Event::MarkRunning(issue_id) => {
+            if !state.claimed.contains(issue_id) {
+                lemma_mark_running_without_claim_is_noop(state, issue_id);
+            } else {
+                lemma_mark_running_on_running_issue_is_noop(state, issue_id);
+            }
+        },
+        Event::QueueRetry { issue_id, attempt } => {
+            if !state.claimed.contains(issue_id) {
+                lemma_queue_retry_without_claim_is_noop(state, issue_id, attempt);
+            } else if attempt == 0 {
+                lemma_queue_retry_requires_positive_attempt(state, issue_id);
+            } else {
+                lemma_queue_retry_regression_is_noop_base(state, issue_id, attempt);
+            }
+        },
+        Event::Release(issue_id) => {
+            lemma_release_without_claim_is_noop_base(state, issue_id);
+        },
+    }
 }
 
 fn main() {}

@@ -1,9 +1,9 @@
 # symphony-runtime Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 92%
-- Done: task map defined, startup terminal workspace cleanup, active-run tracker-state reconciliation with terminal cleanup hooks, candidate required-field filtering plus `Todo` blocker gating, worker protocol-stream policy handling for approval/input-required and timeout/cancelled with normalized startup/runtime error categories, live app-server handshake integration using shared startup payload builders, buffered handshake stream preservation into runtime monitoring, unsupported dynamic tool-call fallback responses (`success=false,error=unsupported_tool_call`) without permanent-failure escalation, and concrete `linear_graphql` tool execution with input validation and structured success/failure outputs.
-- In Progress: restart semantics hardening and broader live-integration coverage.
+- Completion: 96%
+- Done: task map defined, startup terminal workspace cleanup, active-run tracker-state reconciliation with terminal cleanup hooks, candidate required-field filtering plus `Todo` blocker gating, worker protocol-stream policy handling for approval/input-required and timeout/cancelled with normalized startup/runtime error categories, live app-server handshake integration using shared startup payload builders, buffered handshake stream preservation into runtime monitoring, unsupported dynamic tool-call fallback responses (`success=false,error=unsupported_tool_call`) without permanent-failure escalation, concrete `linear_graphql` tool execution with input validation and structured success/failure outputs, retry-ready tracker revalidation before relaunch, stale-dispatch release handling for vanished candidates, startup cleanup fault-drill coverage, and mocked GraphQL tool-path integration coverage.
+- In Progress: final restart-policy documentation and algorithm traceability coverage.
 - Remaining: full SPEC parity and production rollout gates.
 
 ## Scope
@@ -60,9 +60,9 @@ Own async orchestration loop, scheduling, dispatch, reconciliation, and retry ex
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 8.1-8.5 poll, dispatch, retry, reconcile loops | Core scheduler implemented with blocker-aware candidate gating | Add exhaustive parity for slot starvation, retry replacement, and reconcile error branches | `R1.2`, `R2.1`, `R2.2` |
-| Sec. 8.6 startup terminal workspace cleanup | Implemented | Add stronger ordering/fault-drill coverage for cleanup under hook failures and tracker partial data | `R2.2`, `R4.1` |
-| Sec. 10 app-server integration and Sec. 12 prompt assembly | Worker stream monitor consumes typed protocol policy outcomes for approval/input-required and timeout paths, preserves buffered post-handshake stream bytes, returns unsupported dynamic tool-call responses, and executes `linear_graphql` with validated input and structured outputs | Expand live-integration coverage (mocked GraphQL success/error branches and startup/version variant compatibility) | `R3.2`, `R4.1` |
-| Sec. 14 recovery behavior and restart semantics | Partial | Complete restart policy docs and resilient behavior for protocol/session crash recovery branches | `R2.2`, `R4.1` |
+| Sec. 8.1-8.5 poll, dispatch, retry, reconcile loops | Core scheduler implemented with blocker-aware candidate gating, retry-ready revalidation, and slot-aware requeue behavior | Add exhaustive parity for tracker partial-data branches and remaining reconcile error drills | `R1.2`, `R2.1`, `R2.2` |
+| Sec. 8.6 startup terminal workspace cleanup | Implemented with tracker-failure and hook-failure coverage | Add stronger ordering/fault-drill coverage for tracker partial-data cleanup cases | `R2.2`, `R4.1` |
+| Sec. 10 app-server integration and Sec. 12 prompt assembly | Worker stream monitor consumes typed protocol policy outcomes for approval/input-required and timeout paths, preserves buffered post-handshake stream bytes, returns unsupported dynamic tool-call responses, executes `linear_graphql` with validated input and structured outputs, and has mocked GraphQL integration coverage | Expand startup/version compatibility coverage | `R3.2`, `R4.1` |
+| Sec. 14 recovery behavior and restart semantics | Mostly implemented | Complete restart policy docs and protocol/session crash recovery drills | `R2.2`, `R4.1` |
 | Sec. 16.2-16.6 reference algorithms | Mostly implemented | Add algorithm-to-code traceability assertions in tests | `R4.1` |
 <!-- SPEC_GAP_MAP_END -->

@@ -9,6 +9,47 @@ use runtime_quick::*;
 
 verus! {
 
+pub open spec fn available_dispatch_slots(max_concurrent: nat, running_count: nat) -> nat {
+    if running_count < max_concurrent {
+        (max_concurrent - running_count) as nat
+    } else {
+        0
+    }
+}
+
+pub proof fn lemma_available_dispatch_slots_are_bounded(
+    max_concurrent: nat,
+    running_count: nat,
+)
+    ensures
+        0 <= available_dispatch_slots(max_concurrent, running_count),
+        available_dispatch_slots(max_concurrent, running_count) <= max_concurrent,
+{
+}
+
+pub proof fn lemma_available_dispatch_slots_zero_when_saturated(
+    max_concurrent: nat,
+    running_count: nat,
+)
+    requires
+        running_count >= max_concurrent,
+    ensures
+        available_dispatch_slots(max_concurrent, running_count) == 0,
+{
+}
+
+pub proof fn lemma_available_dispatch_slots_reconstruct_capacity_when_available(
+    max_concurrent: nat,
+    running_count: nat,
+)
+    requires
+        running_count < max_concurrent,
+    ensures
+        available_dispatch_slots(max_concurrent, running_count) + running_count
+            == max_concurrent,
+{
+}
+
 pub open spec fn claim_then_mark_running(
     state: OrchestratorState,
     issue_id: IssueId,
@@ -56,7 +97,9 @@ pub proof fn lemma_retry_regression_is_noop(
         next_attempt <= state.retry_attempts[issue_id].attempt,
     ensures
         queue_retry_from_state(state, issue_id, next_attempt) == state,
+        orchestrator_invariants(queue_retry_from_state(state, issue_id, next_attempt)),
 {
+    lemma_queue_retry_regression_is_noop_base(state, issue_id, next_attempt);
 }
 
 pub proof fn lemma_retry_with_higher_attempt_replaces_entry(
@@ -124,6 +167,52 @@ pub proof fn lemma_release_on_unclaimed_issue_is_noop(
         !state.claimed.contains(issue_id),
     ensures
         apply_event(state, Event::Release(issue_id)) == state,
+        orchestrator_invariants(apply_event(state, Event::Release(issue_id))),
+{
+    lemma_release_without_claim_is_noop_base(state, issue_id);
+}
+
+pub proof fn lemma_rejection_cases_are_state_preserving(
+    state: OrchestratorState,
+    event: Event,
+)
+    requires
+        orchestrator_invariants(state),
+        is_rejection_case(state, event),
+    ensures
+        apply_event(state, event) == state,
+        orchestrator_invariants(apply_event(state, event)),
+{
+    lemma_invalid_transition_preserves_invariants(state, event);
+}
+
+pub proof fn lemma_valid_claim_then_mark_running_never_hits_rejection_case(
+    state: OrchestratorState,
+    issue_id: IssueId,
+)
+    requires
+        orchestrator_invariants(state),
+        !state.claimed.contains(issue_id),
+        !state.running.dom().contains(issue_id),
+    ensures
+        !is_rejection_case(state, Event::Claim(issue_id)),
+        !is_rejection_case(apply_event(state, Event::Claim(issue_id)), Event::MarkRunning(issue_id)),
+{
+}
+
+pub proof fn lemma_valid_release_after_retry_never_hits_rejection_case(
+    state: OrchestratorState,
+    issue_id: IssueId,
+    attempt: nat,
+)
+    requires
+        orchestrator_invariants(state),
+        state.claimed.contains(issue_id),
+        attempt > 0,
+        state.retry_attempts.dom().contains(issue_id) ==> state.retry_attempts[issue_id].attempt < attempt,
+    ensures
+        !is_rejection_case(state, Event::QueueRetry { issue_id, attempt }),
+        !is_rejection_case(queue_retry_from_state(state, issue_id, attempt), Event::Release(issue_id)),
 {
 }
 

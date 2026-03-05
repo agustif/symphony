@@ -607,10 +607,10 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let issue = match self.fetch_issue(&issue_id).await {
             Ok(Some(issue)) => issue,
             Ok(None) => {
-                tracing::warn!(issue_id = %issue_id.0, "dispatch issue not found in tracker candidates");
+                tracing::info!(issue_id = %issue_id.0, "skipping stale dispatch; issue is no longer an active candidate");
                 let retry_policy = retry_policy_for_config(&config);
                 let _ = self
-                    .handle_worker_exit(issue_id, WorkerExit::PermanentFailure, &retry_policy)
+                    .handle_worker_exit(issue_id, WorkerExit::Completed, &retry_policy)
                     .await;
                 return;
             }
@@ -783,37 +783,101 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let issue_for_task = issue_id.clone();
         let handle = tokio::spawn(async move {
             tokio::time::sleep(delay).await;
+            {
+                let mut retries = lock_unpoisoned(&runtime.scheduled_retries);
+                retries.remove(&issue_for_task);
+            }
             runtime
-                .promote_retry_and_spawn(issue_for_task.clone(), attempt, config)
+                .handle_ready_retry(issue_for_task.clone(), attempt, config)
                 .await;
-            let mut retries = lock_unpoisoned(&runtime.scheduled_retries);
-            retries.remove(&issue_for_task);
         });
 
         let mut retries = lock_unpoisoned(&self.scheduled_retries);
         retries.insert(issue_id, handle);
     }
 
-    async fn promote_retry_and_spawn(
+    async fn handle_ready_retry(
         self: &Arc<Self>,
         issue_id: IssueId,
         attempt: u32,
         config: RuntimeConfig,
     ) {
+        let issues = match self.tracker.fetch_candidates().await {
+            Ok(issues) => issues,
+            Err(error) => {
+                tracing::warn!(issue_id = %issue_id.0, "retry candidate refresh failed: {error}");
+                self.requeue_retry(issue_id, attempt.saturating_add(1), config.clone())
+                    .await;
+                return;
+            }
+        };
+
+        let active_states = tracker_states_from_names(&config.tracker.active_states);
+        let terminal_states = tracker_states_from_names(&config.tracker.terminal_states);
+        let issue = issues
+            .iter()
+            .find(|candidate| candidate.id == issue_id)
+            .cloned();
+
         let mut state_guard = self.state.lock().await;
         let mut state = state_guard.clone();
+        if state
+            .retry_attempts
+            .get(&issue_id)
+            .map(|entry| entry.attempt)
+            != Some(attempt)
+        {
+            return;
+        }
         let mut commands = Vec::new();
 
-        let next_state =
-            match apply_event(state, Event::MarkRunning(issue_id.clone()), &mut commands) {
-                Ok(next_state) => next_state,
-                Err(error) => {
-                    tracing::warn!(issue_id = %issue_id.0, "retry promotion rejected: {error}");
+        match issue {
+            None => {
+                state = match apply_event(state, Event::Release(issue_id.clone()), &mut commands) {
+                    Ok(next_state) => next_state,
+                    Err(error) => {
+                        tracing::warn!(issue_id = %issue_id.0, "retry release rejected: {error}");
+                        return;
+                    }
+                };
+            }
+            Some(issue)
+                if !dispatch_state_allows_issue(&issue, &active_states, &terminal_states)
+                    || todo_issue_blocked_by_non_terminal(&issue, &terminal_states) =>
+            {
+                state = match apply_event(state, Event::Release(issue_id.clone()), &mut commands) {
+                    Ok(next_state) => next_state,
+                    Err(error) => {
+                        tracing::warn!(issue_id = %issue_id.0, "retry stale release rejected: {error}");
+                        return;
+                    }
+                };
+            }
+            Some(issue) => {
+                if !dispatch_slots_available_for_issue(&state, issues.as_slice(), &issue, &config) {
+                    drop(state_guard);
+                    self.requeue_retry(issue_id, attempt.saturating_add(1), config.clone())
+                        .await;
                     return;
                 }
-            };
 
-        state = next_state;
+                state = match apply_event(
+                    state,
+                    Event::MarkRunning(issue_id.clone()),
+                    &mut commands,
+                ) {
+                    Ok(next_state) => next_state,
+                    Err(error) => {
+                        tracing::warn!(issue_id = %issue_id.0, "retry promotion rejected: {error}");
+                        return;
+                    }
+                };
+                if let Some(entry) = state.running.get_mut(&issue_id) {
+                    entry.identifier = Some(issue.identifier);
+                }
+            }
+        }
+
         *state_guard = state.clone();
         drop(state_guard);
 
@@ -822,10 +886,58 @@ impl<T: TrackerClient + 'static> Runtime<T> {
             retrying: state.retry_attempts.len(),
         });
 
-        if commands.iter().any(
-            |command| matches!(command, Command::Dispatch(dispatched) if *dispatched == issue_id),
+        self.process_tick_commands(commands, config).await;
+    }
+
+    async fn requeue_retry(
+        self: &Arc<Self>,
+        issue_id: IssueId,
+        attempt: u32,
+        config: RuntimeConfig,
+    ) {
+        let mut state_guard = self.state.lock().await;
+        let mut state = state_guard.clone();
+        if !state.claimed.contains(&issue_id) {
+            return;
+        }
+        if !state.retry_attempts.contains_key(&issue_id) {
+            return;
+        }
+
+        let mut commands = Vec::new();
+        state = match apply_event(
+            state,
+            Event::QueueRetry {
+                issue_id: issue_id.clone(),
+                attempt,
+            },
+            &mut commands,
         ) {
-            self.spawn_worker_task(issue_id, attempt, config);
+            Ok(next_state) => next_state,
+            Err(error) => {
+                tracing::warn!(issue_id = %issue_id.0, "retry requeue rejected: {error}");
+                return;
+            }
+        };
+        *state_guard = state.clone();
+        drop(state_guard);
+
+        let _ = self.snapshot_tx.send(RuntimeSnapshot {
+            running: state.running.len(),
+            retrying: state.retry_attempts.len(),
+        });
+
+        for command in commands {
+            if let Command::ScheduleRetry {
+                issue_id,
+                attempt: scheduled_attempt,
+            } = command
+            {
+                let retry_policy = retry_policy_for_config(&config);
+                let schedule =
+                    retry_policy.schedule_retry(issue_id, scheduled_attempt, RetryKind::Failure);
+                self.schedule_retry_task(schedule, config.clone());
+            }
         }
     }
 
@@ -966,6 +1078,40 @@ fn tracker_state_matches_any(state: &TrackerState, allowed: &[TrackerState]) -> 
         .any(|candidate| candidate == state_key)
 }
 
+fn dispatch_slots_available_for_issue(
+    state: &OrchestratorState,
+    issues: &[TrackerIssue],
+    issue: &TrackerIssue,
+    config: &RuntimeConfig,
+) -> bool {
+    let global_available =
+        (config.agent.max_concurrent_agents as usize).saturating_sub(state.running.len());
+    if global_available == 0 {
+        return false;
+    }
+
+    let mut running_by_state: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for candidate in issues {
+        if state.running.contains_key(&candidate.id)
+            && let Some(state_key) = candidate.state.normalized_key()
+        {
+            *running_by_state.entry(state_key).or_insert(0) += 1;
+        }
+    }
+
+    let Some(state_key) = issue.state.normalized_key() else {
+        return false;
+    };
+
+    if let Some(&max_for_state) = config.agent.max_concurrent_agents_by_state.get(&state_key) {
+        let current_for_state = running_by_state.get(&state_key).copied().unwrap_or(0);
+        return current_for_state < max_for_state as usize;
+    }
+
+    true
+}
+
 fn dispatch_state_allows_issue(
     issue: &TrackerIssue,
     active_states: &[TrackerState],
@@ -1027,10 +1173,13 @@ fn apply_event(
 mod tests {
     use std::{
         collections::VecDeque,
+        fs,
+        path::PathBuf,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::{SystemTime, UNIX_EPOCH},
     };
 
     use async_trait::async_trait;
@@ -1059,6 +1208,15 @@ mod tests {
     impl TrackerClient for MutableTracker {
         async fn fetch_candidates(&self) -> Result<Vec<TrackerIssue>, TrackerError> {
             Ok(self.issues.lock().await.clone())
+        }
+    }
+
+    struct ErrorTracker;
+
+    #[async_trait]
+    impl TrackerClient for ErrorTracker {
+        async fn fetch_candidates(&self) -> Result<Vec<TrackerIssue>, TrackerError> {
+            Err(TrackerError::transport("tracker unavailable"))
         }
     }
 
@@ -1092,6 +1250,17 @@ mod tests {
 
     fn issue(id: &str) -> IssueId {
         IssueId(id.to_owned())
+    }
+
+    fn unique_temp_root(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "symphony-runtime-{label}-{}-{nonce}",
+            std::process::id()
+        ))
     }
 
     fn tracker_issue(id: &str) -> TrackerIssue {
@@ -1626,6 +1795,199 @@ mod tests {
         assert!(!state.running.contains_key(&issue_id));
         assert!(!state.retry_attempts.contains_key(&issue_id));
         assert_eq!(launcher.launch_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn handle_ready_retry_releases_claim_when_issue_is_no_longer_active() {
+        let issue_id = issue("SYM-700");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker.set_candidates(Vec::new()).await;
+        let runtime = Arc::new(Runtime::new(Arc::clone(&tracker)));
+
+        {
+            let mut state = runtime.state.lock().await;
+            state.claimed.insert(issue_id.clone());
+            state
+                .retry_attempts
+                .insert(issue_id.clone(), symphony_domain::RetryEntry { attempt: 1 });
+        }
+
+        runtime
+            .handle_ready_retry(issue_id.clone(), 1, RuntimeConfig::default())
+            .await;
+
+        let state = runtime.state().await;
+        assert!(!state.claimed.contains(&issue_id));
+        assert!(!state.retry_attempts.contains_key(&issue_id));
+    }
+
+    #[tokio::test]
+    async fn handle_ready_retry_requeues_when_tracker_refresh_fails() {
+        let issue_id = issue("SYM-701");
+        let runtime = Arc::new(Runtime::new(Arc::new(ErrorTracker)));
+
+        {
+            let mut state = runtime.state.lock().await;
+            state.claimed.insert(issue_id.clone());
+            state
+                .retry_attempts
+                .insert(issue_id.clone(), symphony_domain::RetryEntry { attempt: 1 });
+        }
+
+        let mut config = RuntimeConfig::default();
+        config.polling.interval_ms = 60_000;
+
+        runtime
+            .handle_ready_retry(issue_id.clone(), 1, config.clone())
+            .await;
+
+        let state = runtime.state().await;
+        assert!(state.claimed.contains(&issue_id));
+        assert_eq!(
+            state
+                .retry_attempts
+                .get(&issue_id)
+                .map(|entry| entry.attempt),
+            Some(2)
+        );
+
+        runtime.cancel_retry_task(&issue_id);
+    }
+
+    #[tokio::test]
+    async fn handle_ready_retry_requeues_when_no_dispatch_slots_are_available() {
+        let issue_id = issue("SYM-702");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![
+                TrackerIssue::new(issue_id.clone(), "SYM-702", TrackerState::new("Todo"))
+                    .with_title("Retry issue"),
+                TrackerIssue::new(issue("SYM-703"), "SYM-703", TrackerState::new("Todo"))
+                    .with_title("Already running"),
+            ])
+            .await;
+        let runtime = Arc::new(Runtime::new(Arc::clone(&tracker)));
+
+        {
+            let mut state = runtime.state.lock().await;
+            state.claimed.insert(issue_id.clone());
+            state
+                .retry_attempts
+                .insert(issue_id.clone(), symphony_domain::RetryEntry { attempt: 1 });
+            state.claimed.insert(issue("SYM-703"));
+            state
+                .running
+                .insert(issue("SYM-703"), symphony_domain::RunningEntry::default());
+        }
+
+        let mut config = RuntimeConfig::default();
+        config.polling.interval_ms = 60_000;
+        config.agent.max_concurrent_agents = 1;
+
+        runtime
+            .handle_ready_retry(issue_id.clone(), 1, config.clone())
+            .await;
+
+        let state = runtime.state().await;
+        assert!(state.claimed.contains(&issue_id));
+        assert_eq!(
+            state
+                .retry_attempts
+                .get(&issue_id)
+                .map(|entry| entry.attempt),
+            Some(2)
+        );
+        assert!(!state.running.contains_key(&issue_id));
+
+        runtime.cancel_retry_task(&issue_id);
+    }
+
+    #[tokio::test]
+    async fn execute_worker_releases_stale_dispatch_without_retry() {
+        let issue_id = issue("SYM-704");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker.set_candidates(Vec::new()).await;
+        let launcher = Arc::new(MockWorkerLauncher::default());
+        let runtime = Arc::new(Runtime::with_worker_launcher(
+            Arc::clone(&tracker),
+            launcher.clone(),
+        ));
+
+        runtime
+            .setup_running(issue_id.clone(), symphony_domain::RunningEntry::default())
+            .await;
+
+        let config = RuntimeConfig::default();
+        runtime.execute_worker(issue_id.clone(), 1, config).await;
+
+        let state = runtime.state().await;
+        assert!(!state.claimed.contains(&issue_id));
+        assert!(!state.running.contains_key(&issue_id));
+        assert!(!state.retry_attempts.contains_key(&issue_id));
+        assert_eq!(launcher.launch_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn startup_terminal_workspace_cleanup_removes_terminal_workspaces_only() {
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![
+                TrackerIssue::new(issue("lin-term"), "SYM-TERM", TrackerState::new("Done"))
+                    .with_title("Terminal issue"),
+                TrackerIssue::new(issue("lin-active"), "SYM-ACTIVE", TrackerState::new("Todo"))
+                    .with_title("Active issue"),
+            ])
+            .await;
+        let runtime = Runtime::new(Arc::clone(&tracker));
+
+        let root = unique_temp_root("startup-cleanup");
+        fs::create_dir_all(root.join("SYM-TERM")).expect("terminal workspace should be created");
+        fs::create_dir_all(root.join("SYM-ACTIVE")).expect("active workspace should be created");
+
+        let mut config = RuntimeConfig::default();
+        config.workspace.root = root.clone();
+
+        runtime.startup_terminal_workspace_cleanup(&config).await;
+
+        assert!(!root.join("SYM-TERM").exists());
+        assert!(root.join("SYM-ACTIVE").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn startup_terminal_workspace_cleanup_ignores_tracker_failures() {
+        let runtime = Runtime::new(Arc::new(ErrorTracker));
+
+        let root = unique_temp_root("startup-cleanup-error");
+        fs::create_dir_all(root.join("SYM-TERM")).expect("workspace should be created");
+
+        let mut config = RuntimeConfig::default();
+        config.workspace.root = root.clone();
+
+        runtime.startup_terminal_workspace_cleanup(&config).await;
+
+        assert!(root.join("SYM-TERM").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn cleanup_workspace_for_identifier_falls_back_after_before_remove_failure() {
+        let runtime = Runtime::new(Arc::new(MutableTracker::default()));
+
+        let root = unique_temp_root("cleanup-fallback");
+        fs::create_dir_all(root.join("SYM-TERM")).expect("workspace should be created");
+
+        let mut config = RuntimeConfig::default();
+        config.workspace.root = root.clone();
+        config.hooks.before_remove = Some("definitely-not-a-real-command-symphony".to_owned());
+
+        runtime.cleanup_workspace_for_identifier(&config, "SYM-TERM");
+
+        assert!(!root.join("SYM-TERM").exists());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

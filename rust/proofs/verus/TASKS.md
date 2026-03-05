@@ -1,9 +1,9 @@
 # Verus Proof Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 68%
-- Done: task map defined, proof runner wired, printable guide snapshot vendor flow added, stale-snapshot CI guard wired, and concrete reducer/workspace proof modules implemented.
-- In Progress: hardening, edge-case conformance, and proof depth.
+- Completion: 81%
+- Done: task map defined, proof runner wired, printable guide snapshot vendor flow added, stale-snapshot CI guard wired, concrete reducer/workspace proof modules implemented, slot-accounting lemmas added to the full reducer proof suite, rejection-case state-preservation lemmas added for reducer invalid transitions, and local quick/full proof profiles verified on the installed Verus toolchain.
+- In Progress: liveness/fairness depth and workspace proof polish.
 - Remaining: full SPEC parity and production rollout gates.
 
 ## Scope
@@ -24,7 +24,8 @@ Implement Verus proofs for runtime-critical state invariants.
 ## Epic V2: Retry and Dispatch Proofs
 ### Task V2.1: Dispatch soundness
 - [x] Subtask V2.1.1: Prove dispatch preconditions prevent duplicate run creation.
-- [ ] Subtask V2.1.2: Prove slot accounting never goes negative.
+- [x] Subtask V2.1.2: Prove slot accounting never goes negative.
+- [x] Subtask V2.1.3: Prove reducer rejection cases are state-preserving no-ops.
 
 ### Task V2.2: Reconciliation correctness
 - [x] Subtask V2.2.1: Prove terminal/non-active transitions eventually release claim.
@@ -47,8 +48,8 @@ Implement Verus proofs for runtime-critical state invariants.
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 7 state machine invariants | `runtime_quick.rs` and `runtime_full.rs` verified | Add stronger lemmas for slot bounds and full transition rejection taxonomy | `V2.1` |
+| Sec. 7 state machine invariants | `runtime_quick.rs` and `runtime_full.rs` verified, including slot-accounting bounds and rejection-case state preservation | Add stronger lemmas around reducer command taxonomy beyond invalid-transition branches | `V2.1` |
 | Sec. 8 retry/reconciliation progress obligations | `session_liveness.rs` verified | Extend to full scheduler fairness and eventual processing assumptions | `V2.2` |
-| Sec. 9.5 workspace safety invariants | `workspace_safety.rs` verified | Add proof obligations for path normalization edge and policy composition | `V2.2` |
-| Sec. 17/18 verification gate requirements | Proof scripts and stale-reference guard wired in CI | Enforce branch protection and expand required suite matrix | `V3.1`, `V3.2` |
+| Sec. 9.5 workspace safety invariants | `workspace_safety.rs` verified | Add proof obligations for path normalization edge, policy composition, and warning-free quantifier phrasing | `V2.2` |
+| Sec. 17/18 verification gate requirements | Proof scripts and stale-reference guard wired in CI; quick/full profiles pass locally on installed Verus | Enforce branch protection and expand required suite matrix | `V3.1`, `V3.2` |
 <!-- SPEC_GAP_MAP_END -->

@@ -99,7 +99,7 @@ pub proof fn lemma_join_workspace_path_keeps_root_prefix(root: PathText, key: Pa
         root_prefix(root, join_workspace_path(root, key)),
 {
     assert(root.len() <= join_workspace_path(root, key).len());
-    assert forall|i: int| 0 <= i < root.len() ==> root[i] == join_workspace_path(root, key)[i] by {
+    assert forall|i: int| 0 <= i < root.len() implies root[i] == join_workspace_path(root, key)[i] by {
         if root.len() == 0 {
         } else {
         }
