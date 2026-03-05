@@ -1,11 +1,20 @@
 #![forbid(unsafe_code)]
 
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+use reqwest::Client;
 use serde_json::json;
 use symphony_domain::IssueId;
 use symphony_tracker::{TrackerClient, TrackerError, TrackerState};
 use symphony_tracker_linear::LinearTracker;
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
+    Mock, MockServer, Request, Respond, ResponseTemplate,
     matchers::{body_partial_json, header, method, path},
 };
 
@@ -14,6 +23,31 @@ const PROJECT_SLUG: &str = "symphony";
 
 fn build_tracker(server: &MockServer) -> LinearTracker {
     LinearTracker::new(format!("{}/graphql", server.uri()), API_KEY, PROJECT_SLUG)
+}
+
+fn build_tracker_with_client(server: &MockServer, client: Client) -> LinearTracker {
+    LinearTracker::with_client(
+        client,
+        format!("{}/graphql", server.uri()),
+        API_KEY,
+        PROJECT_SLUG,
+    )
+}
+
+struct SequenceResponder {
+    attempts: Arc<AtomicUsize>,
+    responses: Vec<ResponseTemplate>,
+}
+
+impl Respond for SequenceResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let index = self.attempts.fetch_add(1, Ordering::SeqCst);
+        self.responses
+            .get(index)
+            .cloned()
+            .or_else(|| self.responses.last().cloned())
+            .expect("sequence responder requires at least one response")
+    }
 }
 
 #[tokio::test]
@@ -213,9 +247,17 @@ async fn fetch_candidates_by_states_paginates_until_terminal_page() {
 #[tokio::test]
 async fn fetch_candidates_surfaces_status_errors() {
     let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .respond_with(ResponseTemplate::new(503).set_body_string("upstream unavailable"))
+        .respond_with(SequenceResponder {
+            attempts: Arc::clone(&attempts),
+            responses: vec![
+                ResponseTemplate::new(503).set_body_string("upstream unavailable"),
+                ResponseTemplate::new(503).set_body_string("upstream unavailable"),
+                ResponseTemplate::new(503).set_body_string("upstream unavailable"),
+            ],
+        })
         .mount(&server)
         .await;
 
@@ -229,6 +271,7 @@ async fn fetch_candidates_surfaces_status_errors() {
         error,
         TrackerError::status(503, "upstream unavailable".to_owned())
     );
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
@@ -252,6 +295,11 @@ async fn fetch_candidates_surfaces_graphql_errors() {
         error,
         TrackerError::graphql(vec!["permission denied".to_owned()])
     );
+    let requests = server
+        .received_requests()
+        .await
+        .expect("wiremock should capture requests");
+    assert_eq!(requests.len(), 1, "graphql errors should not be retried");
 }
 
 #[tokio::test]
@@ -357,6 +405,118 @@ async fn fetch_candidates_surfaces_transport_errors() {
         matches!(error, TrackerError::Transport { .. }),
         "expected transport taxonomy variant"
     );
+}
+
+#[tokio::test]
+async fn fetch_candidates_retries_transient_status_errors_and_succeeds() {
+    let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(SequenceResponder {
+            attempts: Arc::clone(&attempts),
+            responses: vec![
+                ResponseTemplate::new(503).set_body_string("upstream unavailable"),
+                ResponseTemplate::new(503).set_body_string("upstream unavailable"),
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {
+                        "issues": {
+                            "nodes": [
+                                {
+                                    "id": "lin_retry_1",
+                                    "identifier": "SYM-RETRY-1",
+                                    "title": "Recovered issue",
+                                    "state": { "name": "Todo" }
+                                }
+                            ],
+                            "pageInfo": {
+                                "hasNextPage": false,
+                                "endCursor": null
+                            }
+                        }
+                    }
+                })),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let tracker = build_tracker(&server);
+    let issues = tracker
+        .fetch_candidates()
+        .await
+        .expect("transient status failures should eventually recover");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].id, IssueId("lin_retry_1".to_owned()));
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn fetch_candidates_retries_timeouts_and_succeeds() {
+    let server = MockServer::start().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(SequenceResponder {
+            attempts: Arc::clone(&attempts),
+            responses: vec![
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_json(json!({
+                        "data": {
+                            "issues": {
+                                "nodes": [
+                                    {
+                                        "id": "lin_timeout_1",
+                                        "identifier": "SYM-TIMEOUT-1",
+                                        "title": "Recovered after timeout",
+                                        "state": { "name": "Todo" }
+                                    }
+                                ],
+                                "pageInfo": {
+                                    "hasNextPage": false,
+                                    "endCursor": null
+                                }
+                            }
+                        }
+                    })),
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {
+                        "issues": {
+                            "nodes": [
+                                {
+                                    "id": "lin_timeout_1",
+                                    "identifier": "SYM-TIMEOUT-1",
+                                    "title": "Recovered after timeout",
+                                    "state": { "name": "Todo" }
+                                }
+                            ],
+                            "pageInfo": {
+                                "hasNextPage": false,
+                                "endCursor": null
+                            }
+                        }
+                    }
+                })),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let client = Client::builder()
+        .timeout(Duration::from_millis(50))
+        .build()
+        .expect("client should build");
+    let tracker = build_tracker_with_client(&server, client);
+    let issues = tracker
+        .fetch_candidates()
+        .await
+        .expect("transient timeout should be retried");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].identifier, "SYM-TIMEOUT-1");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

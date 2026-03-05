@@ -16,6 +16,8 @@ use symphony_tracker::{
 
 const LINEAR_PAGE_SIZE: usize = 50;
 const DEFAULT_LINEAR_REQUEST_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_LINEAR_RETRY_MAX_ATTEMPTS: usize = 3;
+const DEFAULT_LINEAR_RETRY_BASE_DELAY_MILLIS: u64 = 100;
 
 const FETCH_CANDIDATES_QUERY: &str = r#"
 query FetchCandidates($projectSlug: String!, $first: Int!, $relationFirst: Int!, $after: String) {
@@ -207,50 +209,90 @@ impl LinearTracker {
 
     async fn post_graphql<V, D>(&self, query: &'static str, variables: V) -> Result<D, TrackerError>
     where
-        V: Serialize,
+        V: Serialize + Clone,
         D: DeserializeOwned,
     {
-        let response = self
-            .http_client
-            .post(self.endpoint.as_str())
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&graphql::GraphQlRequest { query, variables })
-            .send()
-            .await
-            .map_err(|err| TrackerError::transport(err.to_string()))?;
-        let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|err| TrackerError::transport(err.to_string()))?;
-        if !status.is_success() {
-            return Err(TrackerError::status(
-                status.as_u16(),
-                String::from_utf8_lossy(&body).to_string(),
-            ));
+        for attempt in 1..=DEFAULT_LINEAR_RETRY_MAX_ATTEMPTS {
+            let response = match self
+                .http_client
+                .post(self.endpoint.as_str())
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .json(&graphql::GraphQlRequest {
+                    query,
+                    variables: variables.clone(),
+                })
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    if attempt < DEFAULT_LINEAR_RETRY_MAX_ATTEMPTS {
+                        tokio::time::sleep(retry_backoff(attempt)).await;
+                        continue;
+                    }
+                    return Err(TrackerError::transport(err.to_string()));
+                }
+            };
+
+            let status = response.status();
+            let body = match response.bytes().await {
+                Ok(body) => body,
+                Err(err) => {
+                    if attempt < DEFAULT_LINEAR_RETRY_MAX_ATTEMPTS {
+                        tokio::time::sleep(retry_backoff(attempt)).await;
+                        continue;
+                    }
+                    return Err(TrackerError::transport(err.to_string()));
+                }
+            };
+
+            if !status.is_success() {
+                if should_retry_status(status) && attempt < DEFAULT_LINEAR_RETRY_MAX_ATTEMPTS {
+                    tokio::time::sleep(retry_backoff(attempt)).await;
+                    continue;
+                }
+
+                return Err(TrackerError::status(
+                    status.as_u16(),
+                    String::from_utf8_lossy(&body).to_string(),
+                ));
+            }
+
+            let response = serde_json::from_slice::<graphql::GraphQlResponse<D>>(&body)
+                .map_err(|err| TrackerError::payload(format!("invalid graphql payload: {err}")))?;
+            if !response.errors.is_empty() {
+                let messages = response
+                    .errors
+                    .into_iter()
+                    .map(|err| {
+                        let message = err.message.trim().to_owned();
+                        if message.is_empty() {
+                            "unknown graphql error".to_owned()
+                        } else {
+                            message
+                        }
+                    })
+                    .collect();
+                return Err(TrackerError::graphql(messages));
+            }
+            return response
+                .data
+                .ok_or_else(|| TrackerError::payload("graphql payload missing data"));
         }
 
-        let response = serde_json::from_slice::<graphql::GraphQlResponse<D>>(&body)
-            .map_err(|err| TrackerError::payload(format!("invalid graphql payload: {err}")))?;
-        if !response.errors.is_empty() {
-            let messages = response
-                .errors
-                .into_iter()
-                .map(|err| {
-                    let message = err.message.trim().to_owned();
-                    if message.is_empty() {
-                        "unknown graphql error".to_owned()
-                    } else {
-                        message
-                    }
-                })
-                .collect();
-            return Err(TrackerError::graphql(messages));
-        }
-        response
-            .data
-            .ok_or_else(|| TrackerError::payload("graphql payload missing data"))
+        unreachable!("bounded retry loop should always return or continue");
     }
+}
+
+fn retry_backoff(attempt: usize) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(4) as u32;
+    Duration::from_millis(DEFAULT_LINEAR_RETRY_BASE_DELAY_MILLIS.saturating_mul(1_u64 << exponent))
+}
+
+fn should_retry_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
 }
 
 fn insert_unique_issue_id(

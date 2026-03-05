@@ -1,9 +1,9 @@
 # symphony-tracker-linear Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 84%
-- Done: task map defined, project-scoped candidate/state queries landed, page-size parity is fixed at `50`, and normalized labels/blockers/priority/timestamps now match the current spec.
-- In Progress: transport hardening and adapter fault-drill coverage.
+- Completion: 91%
+- Done: task map defined, project-scoped candidate/state queries landed, page-size parity is fixed at `50`, normalized labels/blockers/priority/timestamps now match the current spec, and bounded timeout/retry transport policy with transient status/timeout coverage is implemented.
+- In Progress: remaining live API compatibility drills.
 - Remaining: full SPEC parity and production rollout gates.
 
 ## Scope
@@ -16,7 +16,7 @@ Implement Linear GraphQL adapter against `symphony-tracker` contract.
 ## Epic L1: GraphQL Client and Transport
 ### Task L1.1: Request pipeline
 - [x] Subtask L1.1.1: Endpoint/auth setup.
-- [ ] Subtask L1.1.2: Request timeout/retry policy (non-orchestrator retries only).
+- [x] Subtask L1.1.2: Request timeout/retry policy (non-orchestrator retries only).
 
 ### Task L1.2: Response handling
 - [x] Subtask L1.2.1: HTTP status validation.
@@ -47,8 +47,8 @@ Implement Linear GraphQL adapter against `symphony-tracker` contract.
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 11.2 Linear query semantics | Mostly implemented | Add transport timeout/backoff policy and any remaining live API compatibility drills | `L1.1`, `L3.2` |
+| Sec. 11.2 Linear query semantics | Implemented with bounded transport timeout/backoff behavior | Add any remaining live API compatibility drills | `L3.2` |
 | Sec. 11.3 normalization rules | Implemented for current normalized contract | Keep coverage current as the tracker contract evolves | `L3.1`, `L3.2` |
-| Sec. 11.4 error handling contract | Mostly implemented | Add timeout/backoff transport policy boundaries and tests | `L1.1`, `L3.2` |
+| Sec. 11.4 error handling contract | Implemented for status/graphql/payload/timeout boundaries | Keep transport retry boundaries covered as the adapter evolves | `L1.1`, `L3.2` |
 | Sec. 17.3 tracker validation matrix | Partial | Expand adapter contract tests to include pagination edge and missing-node cases | `L3.2` |
 <!-- SPEC_GAP_MAP_END -->
