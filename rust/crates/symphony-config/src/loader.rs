@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+};
 
 use serde_yaml::{Mapping, Value};
 
@@ -9,6 +12,7 @@ use crate::{
         AgentConfig, CodexConfig, DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, HooksConfig,
         PollingConfig, TrackerConfig, WorkspaceConfig,
     },
+    normalize::{normalize_state_list, normalize_state_name},
     validate,
 };
 
@@ -57,7 +61,7 @@ fn parse_tracker_config(
     env: &dyn EnvProvider,
 ) -> Result<TrackerConfig, ConfigError> {
     if let Some(kind) = optional_trimmed_string(section, "kind", "tracker.kind")? {
-        tracker.kind = kind;
+        tracker.kind = kind.to_ascii_lowercase();
     }
 
     if let Some(endpoint) = optional_trimmed_string(section, "endpoint", "tracker.endpoint")? {
@@ -77,13 +81,13 @@ fn parse_tracker_config(
     if let Some(active_states) =
         optional_string_list(section, "active_states", "tracker.active_states")?
     {
-        tracker.active_states = active_states;
+        tracker.active_states = normalize_state_list(active_states);
     }
 
     if let Some(terminal_states) =
         optional_string_list(section, "terminal_states", "tracker.terminal_states")?
     {
-        tracker.terminal_states = terminal_states;
+        tracker.terminal_states = normalize_state_list(terminal_states);
     }
 
     Ok(tracker)
@@ -109,7 +113,7 @@ fn parse_workspace_config(
     if let Some(root) = optional_string(section, "root", "workspace.root")?
         && let Some(expanded) = expand_workspace_root(&root, env)
     {
-        workspace.root = expanded;
+        workspace.root = normalize_workspace_root(expanded);
     }
 
     Ok(workspace)
@@ -162,7 +166,7 @@ fn parse_agent_config(
     if let Some(Value::Mapping(state_limits)) =
         section.get(yaml_key("max_concurrent_agents_by_state"))
     {
-        agent.max_concurrent_agents_by_state = parse_state_limits(state_limits);
+        agent.max_concurrent_agents_by_state = parse_state_limits(state_limits)?;
     } else if section
         .get(yaml_key("max_concurrent_agents_by_state"))
         .is_some()
@@ -213,6 +217,10 @@ fn parse_codex_config(
 }
 
 fn apply_tracker_defaults(tracker: &mut TrackerConfig, env: &dyn EnvProvider) {
+    tracker.kind = tracker.kind.trim().to_ascii_lowercase();
+    tracker.active_states = normalize_state_list(std::mem::take(&mut tracker.active_states));
+    tracker.terminal_states = normalize_state_list(std::mem::take(&mut tracker.terminal_states));
+
     if tracker.kind.eq_ignore_ascii_case("linear") {
         if tracker.endpoint.trim().is_empty() {
             tracker.endpoint = DEFAULT_LINEAR_ENDPOINT.to_owned();
@@ -224,25 +232,90 @@ fn apply_tracker_defaults(tracker: &mut TrackerConfig, env: &dyn EnvProvider) {
     }
 }
 
-fn parse_state_limits(raw_limits: &Mapping) -> HashMap<String, u32> {
+fn parse_state_limits(raw_limits: &Mapping) -> Result<HashMap<String, u32>, ConfigError> {
     let mut parsed = HashMap::new();
 
     for (state, limit) in raw_limits {
         let Some(state) = state.as_str() else {
-            continue;
+            return Err(ConfigError::InvalidStateLimitKey);
         };
 
-        let normalized_state = state.trim().to_lowercase();
-        if normalized_state.is_empty() {
-            continue;
-        }
+        let Some(normalized_state) = normalize_state_name(state) else {
+            return Err(ConfigError::InvalidStateLimitKey);
+        };
 
-        if let Some(limit) = parse_positive_u32_value(limit) {
-            parsed.insert(normalized_state, limit);
+        let parsed_limit = parse_state_limit_value(&normalized_state, limit)?;
+        parsed.insert(normalized_state, parsed_limit);
+    }
+
+    Ok(parsed)
+}
+
+fn parse_state_limit_value(state: &str, value: &Value) -> Result<u32, ConfigError> {
+    let parsed = match value {
+        Value::Number(number) => {
+            if let Some(value) = number.as_u64() {
+                u32::try_from(value).ok()
+            } else {
+                number.as_i64().and_then(|value| u32::try_from(value).ok())
+            }
+        }
+        Value::String(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .and_then(|value| u32::try_from(value).ok()),
+        _ => None,
+    };
+
+    parsed
+        .filter(|value| *value > 0)
+        .ok_or_else(|| ConfigError::InvalidStateLimitValue {
+            state: state.to_owned(),
+            value: value_to_string(value),
+        })
+}
+
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(raw) => raw.to_owned(),
+        _ => serde_yaml::to_string(value)
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_else(|_| "<non-string-yaml-value>".to_owned()),
+    }
+}
+
+fn normalize_workspace_root(root: PathBuf) -> PathBuf {
+    let absolute = if root.is_absolute() {
+        root
+    } else {
+        std::env::current_dir()
+            .map(|current_dir| current_dir.join(root))
+            .unwrap_or_else(|_| PathBuf::from("."))
+    };
+
+    normalize_path(&absolute)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    let has_root = path.has_root();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !has_root {
+                    normalized.push("..");
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
         }
     }
 
-    parsed
+    normalized
 }
 
 fn section<'a>(root: &'a Mapping, name: &'static str) -> Result<Option<&'a Mapping>, ConfigError> {
@@ -421,29 +494,16 @@ fn parse_i64(value: &Value, field: &'static str) -> Result<i64, ConfigError> {
     }
 }
 
-fn parse_positive_u32_value(value: &Value) -> Option<u32> {
-    match value {
-        Value::Number(number) => {
-            if let Some(value) = number.as_u64() {
-                return u32::try_from(value).ok().filter(|value| *value > 0);
-            }
-            number
-                .as_i64()
-                .and_then(|value| u32::try_from(value).ok())
-                .filter(|value| *value > 0)
-        }
-        Value::String(raw) => raw.trim().parse::<u32>().ok().filter(|value| *value > 0),
-        _ => None,
-    }
-}
-
 fn yaml_key(key: &'static str) -> Value {
     Value::String(key.to_owned())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+    };
 
     use serde_yaml::{Mapping, Value};
 
@@ -474,13 +534,16 @@ mod tests {
     }
 
     #[test]
-    fn resolves_env_indirection_and_numeric_coercions() {
+    fn resolves_env_indirection_numeric_coercions_and_state_normalization() {
         let front_matter = parse_yaml(
             r#"
 tracker:
   kind: linear
-  api_key: $TRACKER_TOKEN
+  api_key: ${TRACKER_TOKEN}
   project_slug: symphony
+  active_states:
+    - " Todo "
+    - "In   Progress"
 polling:
   interval_ms: "45000"
 workspace:
@@ -491,8 +554,7 @@ agent:
   max_concurrent_agents: "12"
   max_concurrent_agents_by_state:
     In Progress: 3
-    Backlog: "2"
-    Broken: "invalid"
+    todo: "2"
 codex:
   command: codex app-server --json
 "#,
@@ -507,10 +569,14 @@ codex:
         assert_eq!(config.tracker.api_key.as_deref(), Some("secret-token"));
         assert_eq!(config.tracker.project_slug.as_deref(), Some("symphony"));
         assert_eq!(config.tracker.endpoint, DEFAULT_LINEAR_ENDPOINT);
+        assert_eq!(
+            config.tracker.active_states,
+            vec!["todo".to_owned(), "in progress".to_owned()]
+        );
         assert_eq!(config.polling.interval_ms, 45_000);
         assert_eq!(
             config.workspace.root,
-            std::path::PathBuf::from("/tmp/custom-workspaces")
+            PathBuf::from("/tmp/custom-workspaces")
         );
         assert_eq!(config.hooks.timeout_ms, DEFAULT_HOOK_TIMEOUT_MS);
         assert_eq!(config.agent.max_concurrent_agents, 12);
@@ -522,29 +588,23 @@ codex:
             Some(&3)
         );
         assert_eq!(
-            config.agent.max_concurrent_agents_by_state.get("backlog"),
+            config.agent.max_concurrent_agents_by_state.get("todo"),
             Some(&2)
-        );
-        assert!(
-            !config
-                .agent
-                .max_concurrent_agents_by_state
-                .contains_key("broken")
         );
     }
 
     #[test]
-    fn supports_csv_and_sequence_states() {
+    fn supports_csv_and_sequence_states_with_normalization() {
         let front_matter = parse_yaml(
             r#"
 tracker:
   kind: linear
   api_key: token
   project_slug: symphony
-  active_states: Todo, In Progress, Blocked
+  active_states: Todo, In Progress,  todo
   terminal_states:
     - Closed
-    - Done
+    - " In   Progress "
 "#,
         );
 
@@ -553,9 +613,32 @@ tracker:
 
         assert_eq!(
             config.tracker.active_states,
-            vec!["Todo", "In Progress", "Blocked"]
+            vec!["todo".to_owned(), "in progress".to_owned()]
         );
-        assert_eq!(config.tracker.terminal_states, vec!["Closed", "Done"]);
+        assert_eq!(
+            config.tracker.terminal_states,
+            vec!["closed".to_owned(), "in progress".to_owned()]
+        );
+    }
+
+    #[test]
+    fn normalizes_relative_workspace_paths() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+workspace:
+  root: ./tmp/workspaces/../issues
+"#,
+        );
+
+        let config = from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[]))
+            .expect("config should parse");
+
+        assert!(config.workspace.root.is_absolute());
+        assert!(config.workspace.root.ends_with(Path::new("tmp/issues")));
     }
 
     #[test]
@@ -609,6 +692,51 @@ polling:
                 field: "polling.interval_ms",
                 value: "nope".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_state_limit_values() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+agent:
+  max_concurrent_agents_by_state:
+    Todo: invalid
+"#,
+        );
+
+        assert_eq!(
+            from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[])),
+            Err(ConfigError::InvalidStateLimitValue {
+                state: "todo".to_owned(),
+                value: "invalid".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_state_limit_key() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+  active_states:
+    - Todo
+agent:
+  max_concurrent_agents_by_state:
+    Blocked: 2
+"#,
+        );
+
+        assert_eq!(
+            from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[])),
+            Err(ConfigError::UnknownStateLimitState("blocked".to_owned()))
         );
     }
 

@@ -1,7 +1,13 @@
+use std::path::PathBuf;
+
 use thiserror::Error;
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkflowError {
+    #[error("workflow file is missing: `{0}`")]
+    MissingWorkflowFile(PathBuf),
+    #[error("failed to read workflow file `{path}`: {reason}")]
+    ReadWorkflow { path: PathBuf, reason: String },
     #[error("workflow body is empty")]
     EmptyBody,
     #[error("workflow front matter is not terminated")]

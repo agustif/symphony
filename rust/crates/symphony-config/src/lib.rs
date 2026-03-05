@@ -4,6 +4,7 @@ mod env;
 mod error;
 mod loader;
 mod model;
+mod normalize;
 mod validate;
 
 pub use env::{EnvProvider, ProcessEnv};
