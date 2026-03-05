@@ -11,6 +11,32 @@ impl TrackerState {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
+
+    pub fn normalized(&self) -> String {
+        self.as_str().trim().to_owned()
+    }
+
+    pub fn normalized_key(&self) -> Option<String> {
+        normalize_state_key(self.as_str())
+    }
+
+    pub fn is_terminal(&self, terminal_states: &[TrackerState]) -> bool {
+        let Some(state_key) = self.normalized_key() else {
+            return false;
+        };
+        terminal_states
+            .iter()
+            .filter_map(TrackerState::normalized_key)
+            .any(|terminal_key| terminal_key == state_key)
+    }
+}
+
+fn normalize_state_key(value: &str) -> Option<String> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized.to_ascii_lowercase())
 }
 
 impl fmt::Display for TrackerState {

@@ -15,20 +15,28 @@ pub(crate) struct GraphQlResponse<D> {
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct GraphQlError {
+    #[serde(default)]
     pub(crate) message: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct EmptyVariables;
+pub(crate) struct PaginationVariables {
+    pub(crate) first: usize,
+    pub(crate) after: Option<String>,
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct FetchIssuesByStatesVariables {
     pub(crate) states: Vec<String>,
+    pub(crate) first: usize,
+    pub(crate) after: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct FetchIssueStatesByIdsVariables {
     pub(crate) ids: Vec<String>,
+    pub(crate) first: usize,
+    pub(crate) after: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -44,6 +52,16 @@ pub(crate) struct IssueStatesData {
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct IssueCollection<T> {
     pub(crate) nodes: Vec<T>,
+    #[serde(rename = "pageInfo")]
+    pub(crate) page_info: PageInfo,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct PageInfo {
+    #[serde(rename = "hasNextPage")]
+    pub(crate) has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    pub(crate) end_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
