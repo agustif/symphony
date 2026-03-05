@@ -3,6 +3,7 @@
 mod cli_cases;
 mod orchestrator_cases;
 mod protocol_cases;
+mod tracker_cases;
 mod workflow_cases;
 
 use symphony_domain::{Event, OrchestratorState, RetryEntry};

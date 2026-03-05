@@ -1,8 +1,8 @@
 # Rust Reimplementation Master Plan
 
 ## Status Snapshot (2026-03-05)
-- Completion: 63%
-- Done: parallel implementation batch merged across domain/runtime, config/workflow/workspace, tracker/linear, protocol/http/cli, docs, CI/proofs, test scaffolds, concrete Verus proof module rewrites, proof CI installation/guard wiring, and explicit suite-gate CI jobs.
+- Completion: 65%
+- Done: parallel implementation batch merged across domain/runtime, config/workflow/workspace, tracker/linear, protocol/http/cli, docs, CI/proofs, test scaffolds, concrete Verus proof module rewrites, proof CI installation/guard wiring, explicit suite-gate CI jobs, and completed conformance matrix coverage.
 - In Progress: spec-parity hardening, deeper orchestration behaviors, and formal proofs.
 - Remaining: full production-grade completion gates from conformance through rollout.
 
@@ -59,7 +59,7 @@ Deliver a production-grade Rust runtime for Symphony from first principles, with
 
 ## Epic D: Verification and Validation Program
 ### Task D.1: Spec conformance
-- [ ] Subtask D.1.1: Build matrix tests from SPEC sections 17/18 in [tests/conformance/TASKS.md](tests/conformance/TASKS.md).
+- [x] Subtask D.1.1: Build matrix tests from SPEC sections 17/18 in [tests/conformance/TASKS.md](tests/conformance/TASKS.md).
 
 ### Task D.2: Concurrency safety
 - [ ] Subtask D.2.1: Implement race/interleaving harness in [tests/interleavings/TASKS.md](tests/interleavings/TASKS.md).

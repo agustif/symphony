@@ -1,8 +1,8 @@
 # Test Program Master Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 55%
-- Done: task map defined, suite thresholds documented, and suite-specific CI gates added.
+- Completion: 60%
+- Done: task map defined, conformance matrix completed, suite thresholds documented, and suite-specific CI gates added.
 - In Progress: hardening, edge-case conformance, and proof depth.
 - Remaining: full SPEC parity and production rollout gates.
 
