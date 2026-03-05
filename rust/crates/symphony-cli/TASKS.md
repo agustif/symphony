@@ -19,8 +19,8 @@ Own executable entrypoint, startup wiring, flags, and host lifecycle behavior.
 - [ ] Subtask C1.1.2: Logs root and HTTP port flags.
 
 ### Task C1.2: Startup flow
-- [ ] Subtask C1.2.1: Validate workflow path and config before run.
-- [ ] Subtask C1.2.2: Structured startup diagnostics.
+- [x] Subtask C1.2.1: Validate workflow path and config before run.
+- [x] Subtask C1.2.2: Structured startup diagnostics.
 
 ## Epic C2: Runtime Wiring
 ### Task C2.1: Dependency wiring
@@ -33,8 +33,8 @@ Own executable entrypoint, startup wiring, flags, and host lifecycle behavior.
 
 ## Epic C3: Tests
 ### Task C3.1: CLI behavior tests
-- [ ] Subtask C3.1.1: Parse and validation tests.
-- [ ] Subtask C3.1.2: Startup failure mapping tests.
+- [x] Subtask C3.1.1: Parse and validation tests.
+- [x] Subtask C3.1.2: Startup failure mapping tests.
 
 ## Exit Criteria
 - [ ] CLI provides production-grade startup and control behavior.

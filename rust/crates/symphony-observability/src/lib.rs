@@ -39,5 +39,9 @@ mod tests {
 
         let issue = snapshot.issue("SYM-42").expect("issue should exist");
         assert_eq!(issue.retry_attempts, 2);
+        let by_identifier = snapshot
+            .issue_by_id_or_identifier("SYM-42")
+            .expect("issue identifier should resolve");
+        assert_eq!(by_identifier.identifier, "SYM-42");
     }
 }

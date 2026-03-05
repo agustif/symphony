@@ -19,23 +19,23 @@ Own HTTP observability/control endpoints and serialization contracts.
 - [ ] Subtask H1.1.2: Offline/error state rendering.
 
 ### Task H1.2: JSON API endpoints
-- [ ] Subtask H1.2.1: `/api/v1/state`.
-- [ ] Subtask H1.2.2: `/api/v1/{issue_identifier}`.
-- [ ] Subtask H1.2.3: `/api/v1/refresh`.
+- [x] Subtask H1.2.1: `/api/v1/state`.
+- [x] Subtask H1.2.2: `/api/v1/{issue_identifier}`.
+- [x] Subtask H1.2.3: `/api/v1/refresh`.
 
 ## Epic H2: API Contracts and Error Handling
 ### Task H2.1: Error schema
 - [ ] Subtask H2.1.1: Method/parse/timeout/unavailable errors.
-- [ ] Subtask H2.1.2: 404 unknown issue behavior.
+- [x] Subtask H2.1.2: 404 unknown issue behavior.
 
 ### Task H2.2: Escaping and safety
 - [ ] Subtask H2.2.1: HTML escaping for dashboard.
-- [ ] Subtask H2.2.2: JSON payload stability tests.
+- [x] Subtask H2.2.2: JSON payload stability tests.
 
 ## Epic H3: Tests
 ### Task H3.1: Endpoint tests
-- [ ] Subtask H3.1.1: End-to-end endpoint behavior tests.
-- [ ] Subtask H3.1.2: Error-path and payload-shape tests.
+- [x] Subtask H3.1.1: End-to-end endpoint behavior tests.
+- [x] Subtask H3.1.2: Error-path and payload-shape tests.
 
 ## Exit Criteria
-- [ ] HTTP contract is stable and covered by integration tests.
+- [x] HTTP contract is stable and covered by integration tests.

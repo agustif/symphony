@@ -6,6 +6,7 @@ mod parsed_line;
 mod parser;
 mod protocol_error;
 mod stderr_line;
+mod stream_line_parser;
 
 pub use app_server_event::AppServerEvent;
 pub use line_origin::LineOrigin;
@@ -13,6 +14,7 @@ pub use parsed_line::{ParsedLine, stderr_message, stdout_event};
 pub use parser::{decode_line, decode_stderr_line, decode_stdout_line};
 pub use protocol_error::ProtocolError;
 pub use stderr_line::StderrLine;
+pub use stream_line_parser::StreamLineParser;
 
 #[cfg(test)]
 mod tests {
@@ -24,6 +26,19 @@ mod tests {
         let event = decode_stdout_line(line).expect("valid protocol line");
         assert_eq!(event.method, "turn.start");
         assert_eq!(event.params["issue_id"], "SYM-7");
+    }
+
+    #[test]
+    fn parses_protocol_metadata_fields() {
+        let line =
+            r#"{"id":3,"method":"turn.completed","result":{"turn":{"id":"turn-1"}},"error":null}"#;
+        let event = decode_stdout_line(line).expect("protocol metadata line should decode");
+        assert_eq!(event.id, Some(serde_json::json!(3)));
+        assert_eq!(
+            event.result,
+            Some(serde_json::json!({"turn": {"id": "turn-1"}}))
+        );
+        assert_eq!(event.error, None);
     }
 
     #[test]
@@ -47,5 +62,65 @@ mod tests {
         let event = stdout_event(&parsed).expect("stdout event should exist");
         assert_eq!(event.method, "turn.end");
         assert_eq!(stderr_message(&parsed), None);
+    }
+
+    #[test]
+    fn stream_parser_buffers_partial_stdout_lines() {
+        let mut parser = StreamLineParser::default();
+        let first = parser.push_chunk(LineOrigin::Stdout, r#"{"method":"turn.st"#);
+        assert!(first.is_empty());
+        assert_eq!(parser.pending_stdout(), r#"{"method":"turn.st"#);
+
+        let second = parser.push_chunk(LineOrigin::Stdout, "art\",\"params\":{\"n\":1}}\n");
+        assert_eq!(second.len(), 1);
+
+        let parsed = second
+            .into_iter()
+            .next()
+            .expect("expected one decoded line")
+            .expect("stdout event should parse");
+        let event = stdout_event(&parsed).expect("stdout event should exist");
+        assert_eq!(event.method, "turn.start");
+        assert_eq!(event.params["n"], 1);
+    }
+
+    #[test]
+    fn stream_parser_keeps_stdout_and_stderr_split() {
+        let mut parser = StreamLineParser::default();
+
+        let stdout = parser.push_chunk(LineOrigin::Stdout, "{\"method\":\"turn.end\"}\n");
+        assert_eq!(stdout.len(), 1);
+        assert!(stdout[0].as_ref().is_ok());
+
+        let stderr_partial = parser.push_chunk(LineOrigin::Stderr, "panic: missing");
+        assert!(stderr_partial.is_empty());
+        assert_eq!(parser.pending_stderr(), "panic: missing");
+
+        let stderr_complete = parser.push_chunk(LineOrigin::Stderr, " token\n");
+        assert_eq!(stderr_complete.len(), 1);
+        let parsed = stderr_complete
+            .into_iter()
+            .next()
+            .expect("expected one stderr line")
+            .expect("stderr line should decode");
+        assert_eq!(stderr_message(&parsed), Some("panic: missing token"));
+    }
+
+    #[test]
+    fn stream_parser_reports_malformed_stdout_line() {
+        let mut parser = StreamLineParser::default();
+        let parsed = parser.push_chunk(LineOrigin::Stdout, "{not-json}\n");
+        assert_eq!(parsed.len(), 1);
+
+        let error = parsed
+            .into_iter()
+            .next()
+            .expect("expected one parsed result")
+            .expect_err("line should be reported as malformed");
+
+        assert!(matches!(
+            error,
+            ProtocolError::InvalidStdoutLine(message) if message.contains("line `{not-json}`")
+        ));
     }
 }

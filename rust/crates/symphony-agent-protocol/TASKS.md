@@ -19,8 +19,8 @@ Own coding-agent app-server protocol transport, framing, and event translation.
 - [ ] Subtask P1.1.2: Optional tool advertisement support.
 
 ### Task P1.2: Stream parsing contract
-- [ ] Subtask P1.2.1: Parse JSON protocol lines from stdout only.
-- [ ] Subtask P1.2.2: Route stderr to diagnostics without protocol parsing.
+- [x] Subtask P1.2.1: Parse JSON protocol lines from stdout only.
+- [x] Subtask P1.2.2: Route stderr to diagnostics without protocol parsing.
 
 ## Epic P2: Event Translation
 ### Task P2.1: Runtime event mapping
@@ -33,8 +33,8 @@ Own coding-agent app-server protocol transport, framing, and event translation.
 
 ## Epic P3: Tests
 ### Task P3.1: Protocol robustness
-- [ ] Subtask P3.1.1: Partial-line and malformed JSON tests.
+- [x] Subtask P3.1.1: Partial-line and malformed JSON tests.
 - [ ] Subtask P3.1.2: Approval/input-required timeout handling tests.
 
 ## Exit Criteria
-- [ ] Protocol crate is robust against malformed or mixed stream inputs.
+- [x] Protocol crate is robust against malformed or mixed stream inputs.

@@ -6,11 +6,14 @@ pub fn decode_stdout_line(line: &str) -> Result<AppServerEvent, ProtocolError> {
         return Err(ProtocolError::EmptyLine);
     }
 
-    let event = serde_json::from_str::<AppServerEvent>(normalized)
-        .map_err(|error| ProtocolError::InvalidStdoutLine(error.to_string()))?;
+    let event = serde_json::from_str::<AppServerEvent>(normalized).map_err(|error| {
+        ProtocolError::InvalidStdoutLine(format!("line `{normalized}`: {error}"))
+    })?;
+
     if event.method.trim().is_empty() {
         return Err(ProtocolError::MissingMethod);
     }
+
     Ok(event)
 }
 
