@@ -7,3 +7,10 @@ license.workspace = true
 [dependencies]
 serde_json.workspace = true
 symphony-observability = { path = "../symphony-observability" }
+
+[dev-dependencies]
+symphony-testkit = { path = "../symphony-testkit" }
+
+[[test]]
+name = "http_conformance"
+path = "../../tests/conformance/http_cases.rs"
