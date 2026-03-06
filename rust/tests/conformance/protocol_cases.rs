@@ -3,9 +3,9 @@
 use symphony_agent_protocol::{
     LineOrigin, ProtocolError, ProtocolFailureReason, ProtocolPolicyOutcome, ProtocolSequenceError,
     StreamLineParser, SupportedToolSpec, build_initialize_request, build_session_id,
-    classify_policy_outcome, decode_line, decode_stdout_line, extract_thread_id,
-    extract_tool_call_id, extract_tool_name, extract_turn_id, extract_usage, stderr_message,
-    stdout_event, validate_startup_turn_sequence,
+    classify_policy_outcome, decode_line, decode_stdout_line, extract_rate_limits,
+    extract_thread_id, extract_tool_call_id, extract_tool_name, extract_turn_id, extract_usage,
+    stderr_message, stdout_event, validate_startup_turn_sequence,
 };
 use symphony_testkit::{protocol_stderr_line, protocol_stdout_line};
 
@@ -93,6 +93,39 @@ fn protocol_stream_keeps_interleaved_stdout_and_stderr_state_isolated() {
 }
 
 #[test]
+fn protocol_stream_finishes_interrupted_stdout_and_stderr_without_newlines() {
+    let mut parser = StreamLineParser::default();
+
+    assert!(
+        parser
+            .push_chunk(
+                LineOrigin::Stdout,
+                r#"{"id":11,"result":{"thread":{"id":"thread-int"}}}"#,
+            )
+            .is_empty()
+    );
+    assert!(
+        parser
+            .push_chunk(LineOrigin::Stderr, "warn: tail chunk")
+            .is_empty()
+    );
+
+    let trailing = parser.finish();
+    assert_eq!(trailing.len(), 2);
+
+    let stdout = trailing[0]
+        .as_ref()
+        .expect("stdout trailing line should decode");
+    let event = stdout_event(stdout).expect("stdout event should exist");
+    assert_eq!(extract_thread_id(event), Some("thread-int".to_owned()));
+
+    let stderr = trailing[1]
+        .as_ref()
+        .expect("stderr trailing line should decode");
+    assert_eq!(stderr_message(stderr), Some("warn: tail chunk"));
+}
+
+#[test]
 fn protocol_handshake_sequence_accepts_startup_then_turn_lifecycle() {
     let methods = [
         "initialize",
@@ -164,6 +197,18 @@ fn protocol_policy_maps_response_timeout_to_retryable_failure() {
 }
 
 #[test]
+fn protocol_policy_maps_methodless_error_timeout_envelope_to_retryable_failure() {
+    let event = decode_stdout_line(r#"{"id":4,"error":{"reason":"handshake_timeout"}}"#)
+        .expect("methodless timeout envelope should decode");
+    assert_eq!(
+        classify_policy_outcome(&event),
+        Some(ProtocolPolicyOutcome::RetryableFailure(
+            ProtocolFailureReason::ResponseTimeout
+        ))
+    );
+}
+
+#[test]
 fn protocol_initialize_payload_advertises_supported_tools() {
     let initialize = build_initialize_request(
         serde_json::json!(1),
@@ -180,6 +225,20 @@ fn protocol_initialize_payload_advertises_supported_tools() {
 }
 
 #[test]
+fn protocol_initialize_payload_preserves_supported_tool_hook_points() {
+    let initialize = build_initialize_request(
+        serde_json::json!(1),
+        "symphony-rust",
+        "0.1.0",
+        &[SupportedToolSpec::new("linear_graphql").with_hook_points(["before_turn"])],
+    );
+    assert_eq!(
+        initialize["params"]["capabilities"]["tools"]["supported"][0]["hookPoints"][0],
+        serde_json::json!("before_turn")
+    );
+}
+
+#[test]
 fn protocol_extractors_read_nested_thread_turn_ids_and_build_session_id() {
     let event = decode_stdout_line(
         r#"{"method":"thread/start","result":{"thread":{"id":"thread-42"},"turn":{"id":"turn-99"}}}"#,
@@ -193,6 +252,23 @@ fn protocol_extractors_read_nested_thread_turn_ids_and_build_session_id() {
     assert_eq!(
         build_session_id(thread_id.as_deref(), turn_id.as_deref()),
         Some("thread-42-turn-99".to_owned())
+    );
+}
+
+#[test]
+fn protocol_extractors_read_nested_session_metadata_variants() {
+    let event = decode_stdout_line(
+        r#"{"id":2,"result":{"session":{"threadId":"thread-7","turn":{"id":"turn-8"}}}}"#,
+    )
+    .expect("session metadata payload should decode");
+    let thread_id = extract_thread_id(&event);
+    let turn_id = extract_turn_id(&event);
+
+    assert_eq!(thread_id.as_deref(), Some("thread-7"));
+    assert_eq!(turn_id.as_deref(), Some("turn-8"));
+    assert_eq!(
+        build_session_id(thread_id.as_deref(), turn_id.as_deref()),
+        Some("thread-7-turn-8".to_owned())
     );
 }
 
@@ -219,4 +295,55 @@ fn protocol_extractors_read_tool_call_id_and_name_variants() {
         Some(serde_json::json!("call-9"))
     );
     assert_eq!(extract_tool_name(&event), Some("linear_graphql".to_owned()));
+}
+
+#[test]
+fn protocol_extracts_rate_limits_from_wrapper_and_bucket_variants() {
+    let event = decode_stdout_line(
+        r#"{"method":"notification","params":{"meta":{"rateLimitStatus":{"requests":{"remaining":3,"limit":9,"resetAt":"2026-03-06T18:00:00Z"}}}}}"#,
+    )
+    .expect("rate-limit payload should decode");
+    assert_eq!(
+        extract_rate_limits(&event),
+        Some(serde_json::json!({
+            "requests": {
+                "remaining": 3,
+                "limit": 9,
+                "resetAt": "2026-03-06T18:00:00Z"
+            }
+        }))
+    );
+}
+
+#[test]
+fn protocol_stream_survives_high_volume_fragmented_stdout_chunks() {
+    let mut parser = StreamLineParser::default();
+    let total_events = 2_000usize;
+    let stream = (0..total_events)
+        .map(|index| format!(r#"{{"method":"turn/delta","params":{{"seq":{index}}}}}"#))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+
+    let mut decoded = Vec::new();
+    let chunk_pattern = [1usize, 2, 3, 5, 8, 13, 21, 34, 55];
+    let mut offset = 0usize;
+    let mut step = 0usize;
+    while offset < stream.len() {
+        let width = chunk_pattern[step % chunk_pattern.len()];
+        let next = (offset + width).min(stream.len());
+        decoded.extend(parser.push_chunk(LineOrigin::Stdout, &stream[offset..next]));
+        offset = next;
+        step += 1;
+    }
+
+    assert!(parser.finish().is_empty());
+    assert_eq!(decoded.len(), total_events);
+
+    for (index, parsed) in decoded.into_iter().enumerate() {
+        let parsed = parsed.expect("fragmented stdout line should decode");
+        let event = stdout_event(&parsed).expect("decoded line should be stdout event");
+        assert_eq!(event.method, "turn/delta");
+        assert_eq!(event.params["seq"], serde_json::json!(index));
+    }
 }

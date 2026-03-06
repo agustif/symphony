@@ -13,11 +13,11 @@ pub struct ProtocolUsage {
 pub type ProtocolRateLimits = Value;
 
 pub fn extract_thread_id(event: &AppServerEvent) -> Option<String> {
-    extract_first_string(event, &[&["thread", "id"], &["thread_id"], &["threadId"]])
+    extract_session_metadata_string(event, &["thread"], &["thread_id", "threadId", "threadID"])
 }
 
 pub fn extract_turn_id(event: &AppServerEvent) -> Option<String> {
-    extract_first_string(event, &[&["turn", "id"], &["turn_id"], &["turnId"]])
+    extract_session_metadata_string(event, &["turn"], &["turn_id", "turnId", "turnID"])
 }
 
 pub fn build_session_id(thread_id: Option<&str>, turn_id: Option<&str>) -> Option<String> {
@@ -153,6 +153,74 @@ fn extract_first_string(event: &AppServerEvent, paths: &[&[&str]]) -> Option<Str
     None
 }
 
+fn extract_session_metadata_string(
+    event: &AppServerEvent,
+    object_keys: &[&str],
+    flat_keys: &[&str],
+) -> Option<String> {
+    let normalized_object_keys = normalize_keys(object_keys);
+    let normalized_flat_keys = normalize_keys(flat_keys);
+    let payloads = [
+        event.result.as_ref(),
+        Some(&event.params),
+        event.error.as_ref(),
+    ];
+
+    for payload in payloads.into_iter().flatten() {
+        if let Some(value) =
+            find_session_metadata_string(payload, &normalized_object_keys, &normalized_flat_keys)
+        {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+fn find_session_metadata_string(
+    value: &Value,
+    object_keys: &[String],
+    flat_keys: &[String],
+) -> Option<String> {
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                let normalized_key = normalize_key(key);
+                if flat_keys.contains(&normalized_key)
+                    && let Some(candidate) = nested.as_str()
+                    && !candidate.is_empty()
+                {
+                    return Some(candidate.to_owned());
+                }
+
+                if object_keys.contains(&normalized_key) {
+                    if let Some(candidate) = value_at_path(nested, &["id"]).and_then(Value::as_str)
+                        && !candidate.is_empty()
+                    {
+                        return Some(candidate.to_owned());
+                    }
+                    if let Some(candidate) =
+                        find_session_metadata_string(nested, object_keys, flat_keys)
+                    {
+                        return Some(candidate);
+                    }
+                }
+
+                if let Some(candidate) =
+                    find_session_metadata_string(nested, object_keys, flat_keys)
+                {
+                    return Some(candidate);
+                }
+            }
+            None
+        }
+        Value::Array(values) => values
+            .iter()
+            .find_map(|nested| find_session_metadata_string(nested, object_keys, flat_keys)),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
+}
+
 fn parse_usage(value: &Value) -> Option<ProtocolUsage> {
     let input_tokens = extract_u64(
         value,
@@ -201,20 +269,22 @@ fn extract_u64(value: &Value, keys: &[&str]) -> Option<u64> {
 }
 
 fn rate_limits_from_payload(value: &Value) -> Option<Value> {
-    if let Some(direct) = value
-        .get("rate_limits")
-        .or_else(|| value.get("rateLimits"))
-        .filter(|candidate| candidate.is_object())
-    {
-        return Some(direct.clone());
-    }
-
-    if rate_limits_map(value) {
-        return Some(value.clone());
-    }
-
     match value {
-        Value::Object(map) => map.values().find_map(rate_limits_from_payload),
+        Value::Object(map) => {
+            for (key, nested) in map {
+                if is_rate_limit_wrapper_key(key)
+                    && let Some(rate_limits) = rate_limits_candidate(nested)
+                {
+                    return Some(rate_limits);
+                }
+            }
+
+            if rate_limits_map(value) {
+                return Some(value.clone());
+            }
+
+            map.values().find_map(rate_limits_from_payload)
+        }
         Value::Array(values) => values.iter().find_map(rate_limits_from_payload),
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
     }
@@ -224,11 +294,81 @@ fn rate_limits_map(value: &Value) -> bool {
     let Some(map) = value.as_object() else {
         return false;
     };
-    map.contains_key("primary")
-        || map.contains_key("secondary")
-        || map.contains_key("credits")
-        || map.contains_key("limit_id")
-        || map.contains_key("limit_name")
+
+    map.keys().any(|key| is_rate_limit_bucket_key(key))
+        || rate_limit_leaf_fields_present(map)
+        || map.values().any(rate_limits_leaf_map)
+}
+
+fn rate_limits_candidate(value: &Value) -> Option<Value> {
+    if rate_limits_map(value) {
+        return Some(value.clone());
+    }
+    rate_limits_from_payload(value)
+}
+
+fn is_rate_limit_wrapper_key(key: &str) -> bool {
+    matches!(
+        normalize_key(key).as_str(),
+        "rate/limits"
+            | "ratelimits"
+            | "rate/limit"
+            | "ratelimit"
+            | "limits"
+            | "rate/limit/status"
+            | "ratelimitstatus"
+            | "rate/limit/snapshot"
+            | "ratelimitsnapshot"
+            | "quota"
+    )
+}
+
+fn is_rate_limit_bucket_key(key: &str) -> bool {
+    matches!(
+        normalize_key(key).as_str(),
+        "primary" | "secondary" | "credits" | "requests" | "tokens" | "quota" | "burst"
+    )
+}
+
+fn rate_limits_leaf_map(value: &Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(rate_limit_leaf_fields_present)
+}
+
+fn rate_limit_leaf_fields_present(map: &serde_json::Map<String, Value>) -> bool {
+    map.keys().any(|key| is_rate_limit_leaf_key(key))
+}
+
+fn is_rate_limit_leaf_key(key: &str) -> bool {
+    matches!(
+        normalize_key(key).as_str(),
+        "remaining"
+            | "limit"
+            | "used"
+            | "available"
+            | "reset/at"
+            | "retry/after"
+            | "retry/after/ms"
+            | "window"
+            | "window/seconds"
+            | "exhausted"
+            | "cost"
+    )
+}
+
+fn normalize_keys(keys: &[&str]) -> Vec<String> {
+    keys.iter().map(|key| normalize_key(key)).collect()
+}
+
+fn normalize_key(key: &str) -> String {
+    key.chars()
+        .map(|character| match character {
+            '.' => '/',
+            '_' | '-' => '/',
+            character => character.to_ascii_lowercase(),
+        })
+        .collect()
 }
 
 fn value_at_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -277,6 +417,21 @@ mod tests {
         );
         assert_eq!(extract_thread_id(&event), Some("thread-camel".to_owned()));
         assert_eq!(extract_turn_id(&event), Some("turn-snake".to_owned()));
+    }
+
+    #[test]
+    fn extracts_thread_and_turn_ids_from_nested_session_metadata_payloads() {
+        let event = event(
+            serde_json::json!({}),
+            Some(serde_json::json!({
+                "session": {
+                    "threadId": "thread-session",
+                    "turn": {"id": "turn-session"}
+                }
+            })),
+        );
+        assert_eq!(extract_thread_id(&event), Some("thread-session".to_owned()));
+        assert_eq!(extract_turn_id(&event), Some("turn-session".to_owned()));
     }
 
     #[test]
@@ -379,6 +534,34 @@ mod tests {
             extract_rate_limits(&event),
             Some(serde_json::json!({
                 "primary": {"remaining": 9}
+            }))
+        );
+    }
+
+    #[test]
+    fn extracts_rate_limits_from_wrapper_and_leaf_variants() {
+        let event = event(
+            serde_json::json!({
+                "meta": {
+                    "rateLimitStatus": {
+                        "requests": {
+                            "remaining": 7,
+                            "limit": 9,
+                            "resetAt": "2026-03-06T18:00:00Z"
+                        }
+                    }
+                }
+            }),
+            None,
+        );
+        assert_eq!(
+            extract_rate_limits(&event),
+            Some(serde_json::json!({
+                "requests": {
+                    "remaining": 7,
+                    "limit": 9,
+                    "resetAt": "2026-03-06T18:00:00Z"
+                }
             }))
         );
     }

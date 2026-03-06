@@ -59,7 +59,7 @@ pub(crate) struct IssueStatesData {
 
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct IssueCollection<T> {
-    pub(crate) nodes: Vec<T>,
+    pub(crate) nodes: Vec<Option<T>>,
     #[serde(rename = "pageInfo")]
     pub(crate) page_info: PageInfo,
 }
@@ -75,7 +75,7 @@ pub(crate) struct PageInfo {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct LabelConnection {
     #[serde(default)]
-    pub(crate) nodes: Vec<LabelNode>,
+    pub(crate) nodes: Vec<Option<LabelNode>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -87,7 +87,7 @@ pub(crate) struct LabelNode {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct InverseRelationConnection {
     #[serde(default)]
-    pub(crate) nodes: Vec<InverseRelationNode>,
+    pub(crate) nodes: Vec<Option<InverseRelationNode>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -135,7 +135,8 @@ pub(crate) struct IssueNode {
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct IssueStateNode {
     pub(crate) id: String,
-    pub(crate) state: IssueState,
+    #[serde(default)]
+    pub(crate) state: Option<IssueState>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

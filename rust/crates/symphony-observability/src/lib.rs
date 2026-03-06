@@ -8,13 +8,16 @@ mod state_snapshot;
 pub use issue_snapshot::IssueSnapshot;
 pub use issue_snapshot::IssueTaskMapKind;
 pub use runtime_snapshot::{
-    CodexTotalsSnapshot, RuntimeActivitySnapshot, RuntimeCounts, RuntimeSnapshot, RuntimeSpecView,
-    ThroughputSnapshot,
+    CodexTotalsSnapshot, RuntimeActivitySnapshot, RuntimeCounts, RuntimeHealthStatus,
+    RuntimeHealthView, RuntimeSnapshot, RuntimeSpecView, RuntimeSummaryView, ThroughputSnapshot,
 };
-pub use sanitization::{sanitize_event_text, sanitize_message_text, strip_control_bytes};
+pub use sanitization::{
+    format_json_compact_sorted, redact_secret_text, sanitize_event_text, sanitize_json_value,
+    sanitize_message_text, strip_control_bytes,
+};
 pub use state_snapshot::{
     IssueStatusTotalsSnapshot, SnapshotErrorCode, SnapshotErrorView, SnapshotStatus, StateSnapshot,
-    StateSnapshotEnvelope, StateSpecView, TaskMapSnapshot,
+    StateSnapshotEnvelope, StateSpecView, StateSummaryView, TaskMapSnapshot,
 };
 
 #[cfg(test)]
@@ -43,6 +46,10 @@ mod tests {
                 .throughput
                 .total_tokens_per_second,
             0.0
+        );
+        assert_eq!(
+            snapshot.spec_view().summary.counts,
+            "running=0 retrying=0 total_active=0"
         );
     }
 
@@ -93,5 +100,22 @@ mod tests {
         let raw = "msg\u{0000}\u{001b}[31m text";
         assert_eq!(sanitize_event_text(raw), "msg text");
         assert_eq!(sanitize_message_text(raw), "msg text");
+    }
+
+    #[test]
+    fn redaction_helpers_are_reexported() {
+        let raw = r#"{"authorization":"Bearer abc","safe":"ok"}"#;
+        assert_eq!(
+            redact_secret_text(raw),
+            r#"{"authorization":"[REDACTED]","safe":"ok"}"#
+        );
+        assert_eq!(
+            format_json_compact_sorted(&sanitize_json_value(&serde_json::json!({
+                "b": 1,
+                "authorization": "Bearer abc",
+                "a": 2
+            }))),
+            r#"{"a":2,"authorization":"[REDACTED]","b":1}"#
+        );
     }
 }

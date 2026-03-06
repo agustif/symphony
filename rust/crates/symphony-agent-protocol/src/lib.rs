@@ -175,4 +175,42 @@ mod tests {
             ProtocolError::InvalidStdoutLine(message) if message.contains("line `{not-json}`")
         ));
     }
+
+    #[test]
+    fn stream_parser_finishes_interrupted_stdout_and_stderr_streams() {
+        let mut parser = StreamLineParser::default();
+        parser.push_chunk(
+            LineOrigin::Stdout,
+            r#"{"id":1,"result":{"turn":{"id":"turn-final"}}}"#,
+        );
+        parser.push_chunk(LineOrigin::Stderr, "partial stderr");
+
+        let trailing = parser.finish();
+        assert_eq!(trailing.len(), 2);
+
+        let stdout = trailing[0].as_ref().expect("stdout line should decode");
+        let event = stdout_event(stdout).expect("stdout event should be present");
+        assert_eq!(
+            event.result,
+            Some(serde_json::json!({"turn": {"id": "turn-final"}}))
+        );
+
+        let stderr = trailing[1].as_ref().expect("stderr line should decode");
+        assert_eq!(stderr_message(stderr), Some("partial stderr"));
+        assert_eq!(parser.pending_stdout(), "");
+        assert_eq!(parser.pending_stderr(), "");
+    }
+
+    #[test]
+    fn stream_parser_reports_invalid_interrupted_stdout_tail() {
+        let mut parser = StreamLineParser::default();
+        parser.push_chunk(LineOrigin::Stdout, r#"{"id":1,"result":{"turn":"oops"}"#);
+
+        let trailing = parser.finish();
+        assert_eq!(trailing.len(), 1);
+        let error = trailing[0]
+            .as_ref()
+            .expect_err("unterminated stdout tail should fail");
+        assert!(matches!(error, ProtocolError::InvalidStdoutLine(_)));
+    }
 }

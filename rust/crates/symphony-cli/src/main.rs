@@ -769,6 +769,7 @@ async fn apply_workflow_reload(
     cli_overrides: &CliOverrides,
     refresh_tx: &mpsc::Sender<()>,
 ) -> WorkflowReloadAction {
+    let previous_reloader = reloader.clone();
     match reloader.reload() {
         WorkflowReloadOutcome::Unchanged { .. } => WorkflowReloadAction::NoChange,
         WorkflowReloadOutcome::Retained { retained, error } => {
@@ -811,6 +812,7 @@ async fn apply_workflow_reload(
                             "{}",
                             message,
                         );
+                        *reloader = previous_reloader;
                         return WorkflowReloadAction::RestartRequired(message);
                     }
                     let applied_config = {
@@ -852,6 +854,7 @@ async fn apply_workflow_reload(
                             &error,
                         ),
                     );
+                    *reloader = previous_reloader;
                     WorkflowReloadAction::NoChange
                 }
             }
@@ -1349,6 +1352,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn await_background_tasks_aborts_watcher_and_http_after_unexpected_runtime_exit() {
+        let poll_handle = tokio::spawn(async {});
+        let watcher_handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let http_handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        });
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            await_background_tasks(
+                poll_handle,
+                watcher_handle,
+                Some(http_handle),
+                Some(BackgroundTaskKind::RuntimePollLoop),
+            ),
+        )
+        .await
+        .expect("sibling abort should prevent hangs")
+        .expect_err("unexpected runtime exit should surface");
+
+        assert_eq!(error.code, EXIT_RUNTIME_TASK);
+        assert!(
+            error
+                .message
+                .contains("runtime poll loop task exited unexpectedly")
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_http_snapshot_returns_timeout_without_cache() {
         let last_snapshot = RwLock::new(None);
 
@@ -1640,6 +1675,8 @@ Prompt body.
             .expect("workflow should load for startup");
         let initial_config = effective_runtime_config(reloader.current(), &CliOverrides::default())
             .expect("initial config should build");
+        let initial_prompt = reloader.current().document.prompt_body.clone();
+        let initial_stamp = reloader.current().change_stamp.clone();
         let config = Arc::new(RwLock::new(initial_config.clone()));
         let runtime = Arc::new(Runtime::new(Arc::new(test_tracker())));
         let (refresh_tx, mut refresh_rx) = mpsc::channel(1);
@@ -1677,6 +1714,8 @@ Prompt body.
             other => panic!("expected restart-required action, got {other:?}"),
         }
         assert_eq!(config.read().await.server.port, initial_config.server.port);
+        assert_eq!(reloader.current().document.prompt_body, initial_prompt);
+        assert_eq!(reloader.current().change_stamp, initial_stamp);
         assert!(refresh_rx.try_recv().is_err());
     }
 
@@ -1703,6 +1742,8 @@ Prompt body.
             .expect("workflow should load for startup");
         let initial_config = effective_runtime_config(reloader.current(), &CliOverrides::default())
             .expect("initial config should build");
+        let initial_prompt = reloader.current().document.prompt_body.clone();
+        let initial_stamp = reloader.current().change_stamp.clone();
         let config = Arc::new(RwLock::new(initial_config.clone()));
         let runtime = Arc::new(Runtime::new(Arc::new(test_tracker())));
         let (refresh_tx, mut refresh_rx) = mpsc::channel(1);
@@ -1746,6 +1787,128 @@ Prompt body.
             config.read().await.tracker.endpoint,
             initial_config.tracker.endpoint
         );
+        assert_eq!(reloader.current().document.prompt_body, initial_prompt);
+        assert_eq!(reloader.current().change_stamp, initial_stamp);
+        assert!(refresh_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_workflow_reload_retains_last_good_workflow_on_parse_failure() {
+        let root = temp_dir("apply_workflow_reload_retains_last_good_workflow_on_parse_failure");
+        let workflow_path = root.join("WORKFLOW.md");
+        write_raw_workflow(
+            &workflow_path,
+            r#"---
+tracker:
+  kind: linear
+  endpoint: https://api.linear.app/graphql
+  api_key: token-one
+  project_slug: SYM
+polling:
+  interval_ms: 5000
+---
+Prompt body.
+"#,
+        );
+
+        let mut reloader = WorkflowReloader::load_from_path(&workflow_path)
+            .expect("workflow should load for startup");
+        let initial_config = effective_runtime_config(reloader.current(), &CliOverrides::default())
+            .expect("initial config should build");
+        let initial_prompt = reloader.current().document.prompt_body.clone();
+        let initial_stamp = reloader.current().change_stamp.clone();
+        let config = Arc::new(RwLock::new(initial_config.clone()));
+        let runtime = Arc::new(Runtime::new(Arc::new(test_tracker())));
+        let (refresh_tx, mut refresh_rx) = mpsc::channel(1);
+
+        write_raw_workflow(
+            &workflow_path,
+            r#"---
+tracker:
+  kind: linear
+  endpoint: https://api.linear.app/graphql
+  api_key: [
+  project_slug: SYM
+---
+Broken prompt body.
+"#,
+        );
+
+        let action = apply_workflow_reload(
+            &mut reloader,
+            &config,
+            &runtime,
+            &CliOverrides::default(),
+            &refresh_tx,
+        )
+        .await;
+
+        assert_eq!(action, WorkflowReloadAction::NoChange);
+        assert_eq!(config.read().await.clone(), initial_config);
+        assert_eq!(reloader.current().document.prompt_body, initial_prompt);
+        assert_eq!(reloader.current().change_stamp, initial_stamp);
+        assert!(refresh_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_workflow_reload_retains_last_good_workflow_on_invalid_effective_config() {
+        let root = temp_dir(
+            "apply_workflow_reload_retains_last_good_workflow_on_invalid_effective_config",
+        );
+        let workflow_path = root.join("WORKFLOW.md");
+        write_raw_workflow(
+            &workflow_path,
+            r#"---
+tracker:
+  kind: linear
+  endpoint: https://api.linear.app/graphql
+  api_key: token-one
+  project_slug: SYM
+polling:
+  interval_ms: 5000
+---
+Prompt body.
+"#,
+        );
+
+        let mut reloader = WorkflowReloader::load_from_path(&workflow_path)
+            .expect("workflow should load for startup");
+        let initial_config = effective_runtime_config(reloader.current(), &CliOverrides::default())
+            .expect("initial config should build");
+        let initial_prompt = reloader.current().document.prompt_body.clone();
+        let initial_stamp = reloader.current().change_stamp.clone();
+        let config = Arc::new(RwLock::new(initial_config.clone()));
+        let runtime = Arc::new(Runtime::new(Arc::new(test_tracker())));
+        let (refresh_tx, mut refresh_rx) = mpsc::channel(1);
+
+        write_raw_workflow(
+            &workflow_path,
+            r#"---
+tracker:
+  kind: linear
+  endpoint: https://api.linear.app/graphql
+  api_key: token-one
+  project_slug: SYM
+polling:
+  interval_ms: {}
+---
+Broken prompt body.
+"#,
+        );
+
+        let action = apply_workflow_reload(
+            &mut reloader,
+            &config,
+            &runtime,
+            &CliOverrides::default(),
+            &refresh_tx,
+        )
+        .await;
+
+        assert_eq!(action, WorkflowReloadAction::NoChange);
+        assert_eq!(config.read().await.clone(), initial_config);
+        assert_eq!(reloader.current().document.prompt_body, initial_prompt);
+        assert_eq!(reloader.current().change_stamp, initial_stamp);
         assert!(refresh_rx.try_recv().is_err());
     }
 
@@ -1809,6 +1972,10 @@ Updated prompt body.
         assert_eq!(applied.polling.interval_ms, 15_000);
         assert_eq!(applied.agent.max_turns, 9);
         assert_eq!(applied.version, 1);
+        assert_eq!(
+            reloader.current().document.prompt_body,
+            "Updated prompt body."
+        );
         assert!(refresh_rx.try_recv().is_ok());
     }
 

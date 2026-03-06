@@ -1,6 +1,20 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::fs;
+#[cfg(unix)]
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
+use std::thread;
+#[cfg(unix)]
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[path = "../../crates/symphony-cli/src/reload_classification.rs"]
 mod reload_classification;
@@ -308,4 +322,327 @@ fn workflow_reload_restart_reasons_report_stable_field_paths() {
             "log_level.level",
         ]
     );
+}
+
+#[cfg(unix)]
+struct HostProcess {
+    child: Child,
+}
+
+#[cfg(unix)]
+impl HostProcess {
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn try_wait(&mut self) -> Option<std::process::ExitStatus> {
+        self.child.try_wait().expect("child wait should succeed")
+    }
+
+    fn wait(&mut self) -> std::process::ExitStatus {
+        self.child.wait().expect("child wait should succeed")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for HostProcess {
+    fn drop(&mut self) {
+        if self.try_wait().is_none() {
+            send_signal(self.id(), "KILL");
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_host_initializes_logs_root_and_shuts_down_cleanly_with_http_enabled() {
+    let Some(binary_path) = cli_binary_path() else {
+        return;
+    };
+    let root =
+        host_temp_dir("cli_host_initializes_logs_root_and_shuts_down_cleanly_with_http_enabled");
+    let workflow_path = root.join("WORKFLOW.md");
+    let logs_root = root.join("logs");
+    let log_path = logs_root.join("symphony.log");
+    let port = reserve_local_port();
+    write_host_workflow(&workflow_path, Some(port), "Prompt body.");
+
+    let mut host = spawn_cli_host(&binary_path, &workflow_path, &logs_root);
+
+    wait_for(
+        Duration::from_secs(5),
+        || log_path.exists() && http_get(port, "/api/v1/state").is_some(),
+        "CLI host should initialize logs root and HTTP server",
+    );
+    send_signal(host.id(), "TERM");
+    let status = wait_for_exit(
+        &mut host,
+        Duration::from_secs(5),
+        "CLI host should terminate after SIGTERM",
+    );
+
+    assert!(status.success(), "expected clean shutdown, got {status}");
+    assert!(
+        log_path.exists(),
+        "expected log file at {}",
+        log_path.display()
+    );
+    let log_contents = fs::read_to_string(&log_path).expect("log file should be readable");
+    assert!(log_contents.contains("HTTP server started"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_host_restart_required_reload_exits_and_releases_http_port() {
+    let Some(binary_path) = cli_binary_path() else {
+        return;
+    };
+    let root = host_temp_dir("cli_host_restart_required_reload_exits_and_releases_http_port");
+    let workflow_path = root.join("WORKFLOW.md");
+    let logs_root = root.join("logs");
+    let log_path = logs_root.join("symphony.log");
+    let port = reserve_local_port();
+    write_host_workflow(&workflow_path, Some(port), "Prompt body.");
+
+    let mut host = spawn_cli_host(&binary_path, &workflow_path, &logs_root);
+
+    wait_for(
+        Duration::from_secs(5),
+        || http_get(port, "/api/v1/state").is_some(),
+        "CLI host should start HTTP server before restart-required reload",
+    );
+
+    write_host_workflow_with_endpoint(
+        &workflow_path,
+        Some(port),
+        "http://127.0.0.1:10/graphql",
+        "Prompt body after host-owned change.",
+    );
+
+    let status = wait_for_exit(
+        &mut host,
+        Duration::from_secs(8),
+        "CLI host should exit when host-owned workflow config changes",
+    );
+
+    assert_eq!(status.code(), Some(14));
+    assert!(
+        TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok(),
+        "expected HTTP port {port} to be released after restart-required exit"
+    );
+    let log_contents = fs::read_to_string(&log_path).expect("log file should be readable");
+    assert!(log_contents.contains("restart required before applying new workflow"));
+    assert!(log_contents.contains("tracker.endpoint"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_host_logs_retained_invalid_reload_and_keeps_serving_previous_http_state() {
+    let Some(binary_path) = cli_binary_path() else {
+        return;
+    };
+    let root = host_temp_dir(
+        "cli_host_logs_retained_invalid_reload_and_keeps_serving_previous_http_state",
+    );
+    let workflow_path = root.join("WORKFLOW.md");
+    let logs_root = root.join("logs");
+    let log_path = logs_root.join("symphony.log");
+    let port = reserve_local_port();
+    write_host_workflow(&workflow_path, Some(port), "Prompt body.");
+
+    let mut host = spawn_cli_host(&binary_path, &workflow_path, &logs_root);
+
+    wait_for(
+        Duration::from_secs(5),
+        || http_get(port, "/api/v1/state").is_some(),
+        "CLI host should start HTTP server before retained-invalid reload",
+    );
+
+    fs::write(
+        &workflow_path,
+        r#"---
+tracker:
+  kind: linear
+  endpoint: http://127.0.0.1:9/graphql
+  api_key: [
+  project_slug: SYM
+server:
+  port: 0
+---
+Broken prompt body.
+"#,
+    )
+    .expect("workflow file should be writable");
+
+    wait_for(
+        Duration::from_secs(8),
+        || log_contains(&log_path, "retaining last applied workflow"),
+        "CLI host should log retained-invalid reload diagnostics",
+    );
+    assert!(
+        http_get(port, "/api/v1/state").is_some(),
+        "expected HTTP server to keep serving the last applied workflow after invalid reload"
+    );
+
+    send_signal(host.id(), "TERM");
+    let status = wait_for_exit(
+        &mut host,
+        Duration::from_secs(5),
+        "CLI host should terminate cleanly after retained-invalid reload",
+    );
+
+    assert!(status.success(), "expected clean shutdown, got {status}");
+}
+
+#[cfg(unix)]
+fn cli_binary_path() -> Option<PathBuf> {
+    std::env::var_os("CARGO_BIN_EXE_symphony-cli").map(PathBuf::from)
+}
+
+#[cfg(unix)]
+fn host_temp_dir(name: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("symphony-cli-conformance-{name}-{nonce}"));
+    fs::create_dir_all(&path).expect("temp directory should be creatable");
+    path
+}
+
+#[cfg(unix)]
+fn reserve_local_port() -> u16 {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .expect("ephemeral port should bind")
+        .local_addr()
+        .expect("local addr should resolve")
+        .port()
+}
+
+#[cfg(unix)]
+fn spawn_cli_host(binary_path: &Path, workflow_path: &Path, logs_root: &Path) -> HostProcess {
+    let child = Command::new(binary_path)
+        .arg(workflow_path)
+        .arg("--logs-root")
+        .arg(logs_root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("CLI host should spawn");
+    HostProcess { child }
+}
+
+#[cfg(unix)]
+fn write_host_workflow(workflow_path: &Path, port: Option<u16>, prompt_body: &str) {
+    write_host_workflow_with_endpoint(
+        workflow_path,
+        port,
+        "http://127.0.0.1:9/graphql",
+        prompt_body,
+    );
+}
+
+#[cfg(unix)]
+fn write_host_workflow_with_endpoint(
+    workflow_path: &Path,
+    port: Option<u16>,
+    endpoint: &str,
+    prompt_body: &str,
+) {
+    let server_section = port
+        .map(|port| format!("server:\n  port: {port}\n"))
+        .unwrap_or_default();
+    fs::write(
+        workflow_path,
+        format!(
+            r#"---
+tracker:
+  kind: linear
+  endpoint: {endpoint}
+  api_key: token
+  project_slug: SYM
+polling:
+  interval_ms: 250
+{server_section}---
+{prompt_body}
+"#
+        ),
+    )
+    .expect("workflow file should be writable");
+}
+
+#[cfg(unix)]
+fn http_get(port: u16, path: &str) -> Option<String> {
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .expect("read timeout should be configurable");
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .expect("write timeout should be configurable");
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    if response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.1 404") {
+        Some(response)
+    } else {
+        None
+    }
+}
+
+#[cfg(unix)]
+fn log_contains(log_path: &Path, needle: &str) -> bool {
+    fs::read_to_string(log_path)
+        .map(|contents| contents.contains(needle))
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn wait_for<F>(timeout: Duration, mut condition: F, description: &str)
+where
+    F: FnMut() -> bool,
+{
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    panic!("{description}");
+}
+
+#[cfg(unix)]
+fn wait_for_exit(
+    host: &mut HostProcess,
+    timeout: Duration,
+    description: &str,
+) -> std::process::ExitStatus {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Some(status) = host.try_wait() {
+            return status;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    send_signal(host.id(), "KILL");
+    let _ = host.wait();
+    panic!("{description}");
+}
+
+#[cfg(unix)]
+fn send_signal(pid: u32, signal: &str) {
+    let status = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .status()
+        .expect("kill command should spawn");
+    assert!(status.success(), "kill -{signal} {pid} failed");
 }

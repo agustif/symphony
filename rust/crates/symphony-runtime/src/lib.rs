@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
-use std::time::Instant;
 
 use symphony_config::RuntimeConfig;
 use symphony_domain::{
@@ -127,7 +126,8 @@ pub struct Runtime<T: TrackerClient> {
     worker_launcher: Arc<dyn WorkerLauncher>,
     state: Mutex<OrchestratorState>,
     retry_metadata: StdMutex<HashMap<IssueId, RetryMetadata>>,
-    last_seen: Mutex<HashMap<IssueId, Instant>>,
+    running_attempts: StdMutex<HashMap<IssueId, u32>>,
+    pending_dispatch_attempts: StdMutex<HashMap<IssueId, u32>>,
     active_workers: StdMutex<HashMap<IssueId, ActiveWorkerHandle>>,
     scheduled_retries: StdMutex<HashMap<IssueId, JoinHandle<()>>>,
     pending_terminal_cleanup: StdMutex<HashMap<IssueId, String>>,
@@ -147,6 +147,15 @@ struct RetryMetadata {
     identifier: Option<String>,
     due_at: Option<u64>,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct StalledIssue {
+    issue_id: IssueId,
+    attempt: u32,
+    identifier: String,
+    error: String,
+    elapsed_ms: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -186,7 +195,8 @@ impl<T: TrackerClient + 'static> Runtime<T> {
             worker_launcher,
             state: Mutex::new(OrchestratorState::default()),
             retry_metadata: StdMutex::new(HashMap::new()),
-            last_seen: Mutex::new(HashMap::new()),
+            running_attempts: StdMutex::new(HashMap::new()),
+            pending_dispatch_attempts: StdMutex::new(HashMap::new()),
             active_workers: StdMutex::new(HashMap::new()),
             scheduled_retries: StdMutex::new(HashMap::new()),
             pending_terminal_cleanup: StdMutex::new(HashMap::new()),
@@ -203,11 +213,6 @@ impl<T: TrackerClient + 'static> Runtime<T> {
 
     pub fn subscribe_snapshots(&self) -> tokio::sync::watch::Receiver<RuntimeSnapshot> {
         self.snapshot_tx.subscribe()
-    }
-
-    pub async fn report_activity(&self, issue_id: IssueId) {
-        let mut last_seen = self.last_seen.lock().await;
-        last_seen.insert(issue_id, std::time::Instant::now());
     }
 
     fn publish_snapshot(&self, state: &OrchestratorState) {
@@ -246,6 +251,31 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         telemetry.next_poll_due_at = Some(timestamp_secs);
     }
 
+    fn remember_running_attempt(&self, issue_id: IssueId, attempt: u32) {
+        let mut running_attempts = lock_unpoisoned(&self.running_attempts);
+        running_attempts.insert(issue_id, attempt.max(1));
+    }
+
+    fn take_running_attempt(&self, issue_id: &IssueId) -> Option<u32> {
+        let mut running_attempts = lock_unpoisoned(&self.running_attempts);
+        running_attempts.remove(issue_id)
+    }
+
+    fn running_attempt(&self, issue_id: &IssueId) -> Option<u32> {
+        let running_attempts = lock_unpoisoned(&self.running_attempts);
+        running_attempts.get(issue_id).copied()
+    }
+
+    fn set_pending_dispatch_attempt(&self, issue_id: IssueId, attempt: u32) {
+        let mut pending_dispatch_attempts = lock_unpoisoned(&self.pending_dispatch_attempts);
+        pending_dispatch_attempts.insert(issue_id, attempt.max(1));
+    }
+
+    fn take_pending_dispatch_attempt(&self, issue_id: &IssueId) -> Option<u32> {
+        let mut pending_dispatch_attempts = lock_unpoisoned(&self.pending_dispatch_attempts);
+        pending_dispatch_attempts.remove(issue_id)
+    }
+
     pub async fn run_tick(&self, config: &RuntimeConfig) -> Result<TickResult, RuntimeError> {
         let issues = self.tracker.fetch_candidates().await?;
         let mut candidate_issues = issues.clone();
@@ -281,30 +311,52 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let mut commands = Vec::new();
 
         // 1. Stall Detection
-        let now = std::time::Instant::now();
-        let mut stalled_issues = Vec::new();
-        if config.codex.stall_timeout_ms > 0 {
-            let last_seen_guard = self.last_seen.lock().await;
-            for issue_id in state.running.keys() {
-                let last_active = last_seen_guard.get(issue_id).copied().unwrap_or(now);
-                if now.duration_since(last_active)
-                    > Duration::from_millis(config.codex.stall_timeout_ms as u64)
-                {
-                    stalled_issues.push(issue_id.clone());
-                }
-            }
-        }
-        for issue_id in stalled_issues {
-            let attempt = next_retry_attempt(&state, &issue_id);
+        let now_secs = current_unix_timestamp_secs();
+        let stall_timeout_ms = config.codex.stall_timeout_ms.max(0) as u64;
+        let stalled_issues = if stall_timeout_ms == 0 {
+            Vec::new()
+        } else {
+            state
+                .running
+                .iter()
+                .filter_map(|(issue_id, entry)| {
+                    let elapsed_ms = stall_elapsed_ms(entry, now_secs)?;
+                    if elapsed_ms <= stall_timeout_ms {
+                        return None;
+                    }
+
+                    Some(StalledIssue {
+                        issue_id: issue_id.clone(),
+                        attempt: next_running_retry_attempt(
+                            &state,
+                            self.running_attempt(issue_id),
+                            issue_id,
+                        ),
+                        identifier: entry
+                            .identifier
+                            .clone()
+                            .unwrap_or_else(|| issue_id.0.clone()),
+                        error: format!("stalled for {elapsed_ms}ms without codex activity"),
+                        elapsed_ms,
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        for stalled in &stalled_issues {
             state = apply_event(
                 state,
                 Event::QueueRetry {
-                    issue_id: issue_id.clone(),
-                    attempt,
+                    issue_id: stalled.issue_id.clone(),
+                    attempt: stalled.attempt,
                 },
                 &mut commands,
             )?;
-            tracing::warn!("Worker stalled for issue {:?}", issue_id);
+            tracing::warn!(
+                issue_id = %stalled.issue_id.0,
+                issue_identifier = %stalled.identifier,
+                elapsed_ms = stalled.elapsed_ms,
+                "worker stalled; scheduling retry"
+            );
         }
 
         let active_states = tracker_states_from_names(&config.tracker.active_states);
@@ -425,6 +477,22 @@ impl<T: TrackerClient + 'static> Runtime<T> {
 
         validate_invariants(&state)?;
         *state_guard = state.clone();
+        drop(state_guard);
+
+        if !stalled_issues.is_empty() {
+            let mut retry_metadata = lock_unpoisoned(&self.retry_metadata);
+            for stalled in &stalled_issues {
+                retry_metadata.insert(
+                    stalled.issue_id.clone(),
+                    RetryMetadata {
+                        identifier: Some(stalled.identifier.clone()),
+                        due_at: None,
+                        error: Some(stalled.error.clone()),
+                    },
+                );
+                let _ = self.take_running_attempt(&stalled.issue_id);
+            }
+        }
 
         self.publish_snapshot(&state);
 
@@ -437,6 +505,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         worker_exit: WorkerExit,
         retry_policy: &RetryPolicy,
     ) -> Result<WorkerExitResult, RuntimeError> {
+        let running_attempt = self.take_running_attempt(&issue_id);
         let mut state_guard = self.state.lock().await;
         let mut state = state_guard.clone();
         let mut commands = Vec::new();
@@ -453,7 +522,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
                 state = apply_event(state, Event::Release(issue_id.clone()), &mut commands)?;
             }
             WorkerExit::Continuation | WorkerExit::RetryableFailure => {
-                let attempt = next_retry_attempt(&state, &issue_id);
+                let attempt = next_running_retry_attempt(&state, running_attempt, &issue_id);
                 let kind = match worker_exit {
                     WorkerExit::Continuation => RetryKind::Continuation,
                     WorkerExit::RetryableFailure => RetryKind::Failure,
@@ -690,7 +759,8 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         for command in commands {
             match command {
                 Command::Dispatch(issue_id) => {
-                    self.spawn_worker_task(issue_id, 1, config.clone());
+                    let attempt = self.take_pending_dispatch_attempt(&issue_id).unwrap_or(1);
+                    self.spawn_worker_task(issue_id, attempt, config.clone());
                 }
                 Command::ScheduleRetry { issue_id, attempt } => {
                     let retry_policy = retry_policy_for_config(&config);
@@ -701,6 +771,8 @@ impl<T: TrackerClient + 'static> Runtime<T> {
                 Command::ReleaseClaim(issue_id) => {
                     self.cancel_retry_task(&issue_id);
                     self.abort_worker_task(&issue_id);
+                    self.take_running_attempt(&issue_id);
+                    self.take_pending_dispatch_attempt(&issue_id);
                     let mut retry_metadata = lock_unpoisoned(&self.retry_metadata);
                     retry_metadata.remove(&issue_id);
                     self.cleanup_terminal_workspace_if_pending(&issue_id, &config);
@@ -718,6 +790,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         }
 
         let worker_id = NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed);
+        self.remember_running_attempt(issue_id.clone(), attempt);
         let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let runtime = Arc::clone(self);
         let issue_for_task = issue_id.clone();
@@ -760,7 +833,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         config: RuntimeConfig,
         stop_rx: tokio::sync::watch::Receiver<bool>,
     ) {
-        let issue = match self.fetch_issue(&issue_id).await {
+        let issue = match self.revalidate_issue_for_dispatch(&issue_id, &config).await {
             Ok(Some(issue)) => issue,
             Ok(None) => {
                 tracing::info!(issue_id = %issue_id.0, "skipping stale dispatch; issue is no longer an active candidate");
@@ -790,9 +863,6 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let update_issue_id = issue_id.clone();
         let protocol_update_task = tokio::spawn(async move {
             while let Some(update) = protocol_update_rx.recv().await {
-                runtime_for_updates
-                    .report_activity(update_issue_id.clone())
-                    .await;
                 let _ = runtime_for_updates
                     .handle_protocol_update(
                         update_issue_id.clone(),
@@ -879,9 +949,19 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         }
     }
 
-    async fn fetch_issue(&self, issue_id: &IssueId) -> Result<Option<TrackerIssue>, TrackerError> {
+    async fn revalidate_issue_for_dispatch(
+        &self,
+        issue_id: &IssueId,
+        config: &RuntimeConfig,
+    ) -> Result<Option<TrackerIssue>, TrackerError> {
         let candidates = self.tracker.fetch_candidates().await?;
-        Ok(candidates.into_iter().find(|issue| issue.id == *issue_id))
+        let active_states = tracker_states_from_names(&config.tracker.active_states);
+        let terminal_states = tracker_states_from_names(&config.tracker.terminal_states);
+        Ok(candidates.into_iter().find(|issue| {
+            issue.id == *issue_id
+                && dispatch_state_allows_issue(issue, &active_states, &terminal_states)
+                && !todo_issue_blocked_by_non_terminal(issue, &terminal_states)
+        }))
     }
 
     async fn record_running_issue_metadata(&self, issue_id: &IssueId, issue: &TrackerIssue) {
@@ -1095,6 +1175,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
                         entry.started_at = Some(current_unix_timestamp_secs());
                     }
                 }
+                self.set_pending_dispatch_attempt(issue_id.clone(), attempt);
             }
         }
 
@@ -1170,6 +1251,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
     fn abort_worker_task(&self, issue_id: &IssueId) {
         let mut workers = lock_unpoisoned(&self.active_workers);
         if let Some(worker) = workers.remove(issue_id) {
+            self.take_running_attempt(issue_id);
             request_worker_stop(worker);
         }
     }
@@ -1180,6 +1262,12 @@ impl<T: TrackerClient + 'static> Runtime<T> {
             request_worker_stop(worker);
         }
         drop(workers);
+
+        let mut running_attempts = lock_unpoisoned(&self.running_attempts);
+        running_attempts.clear();
+
+        let mut pending_dispatch_attempts = lock_unpoisoned(&self.pending_dispatch_attempts);
+        pending_dispatch_attempts.clear();
 
         let mut retries = lock_unpoisoned(&self.scheduled_retries);
         for (_, handle) in retries.drain() {
@@ -1559,6 +1647,26 @@ fn next_retry_attempt(state: &OrchestratorState, issue_id: &IssueId) -> u32 {
         .map_or(1, |retry_entry| retry_entry.attempt.saturating_add(1))
 }
 
+fn next_running_retry_attempt(
+    state: &OrchestratorState,
+    running_attempt: Option<u32>,
+    issue_id: &IssueId,
+) -> u32 {
+    running_attempt
+        .filter(|attempt| *attempt > 0)
+        .map(|attempt| attempt.saturating_add(1))
+        .unwrap_or_else(|| next_retry_attempt(state, issue_id))
+}
+
+fn stall_elapsed_ms(entry: &symphony_domain::RunningEntry, now_secs: u64) -> Option<u64> {
+    let last_activity_secs = entry.last_codex_timestamp.or(entry.started_at)?;
+    Some(
+        now_secs
+            .saturating_sub(last_activity_secs)
+            .saturating_mul(1_000),
+    )
+}
+
 fn duration_from_millis_u128(millis: u128) -> Duration {
     Duration::from_millis(millis.min(u128::from(u64::MAX)) as u64)
 }
@@ -1637,6 +1745,7 @@ mod tests {
     struct MockWorkerLauncher {
         outcomes: Mutex<VecDeque<WorkerOutcome>>,
         launch_count: AtomicUsize,
+        attempts: Mutex<Vec<u32>>,
     }
 
     #[cfg(unix)]
@@ -1648,18 +1757,24 @@ mod tests {
             Self {
                 outcomes: Mutex::new(outcomes.into()),
                 launch_count: AtomicUsize::new(0),
+                attempts: Mutex::new(Vec::new()),
             }
         }
 
         fn launch_count(&self) -> usize {
             self.launch_count.load(Ordering::Relaxed)
         }
+
+        async fn launched_attempts(&self) -> Vec<u32> {
+            self.attempts.lock().await.clone()
+        }
     }
 
     #[async_trait]
     impl WorkerLauncher for MockWorkerLauncher {
-        async fn launch(&self, _ctx: WorkerContext) -> Result<WorkerOutcome, WorkerError> {
+        async fn launch(&self, ctx: WorkerContext) -> Result<WorkerOutcome, WorkerError> {
             self.launch_count.fetch_add(1, Ordering::Relaxed);
+            self.attempts.lock().await.push(ctx.attempt);
             let mut outcomes = self.outcomes.lock().await;
             Ok(outcomes.pop_front().unwrap_or(WorkerOutcome::Completed))
         }
@@ -1967,13 +2082,10 @@ mod tests {
             state
                 .running
                 .insert(issue_id.clone(), symphony_domain::RunningEntry::default());
-            state.retry_attempts.insert(
-                issue_id.clone(),
-                symphony_domain::RetryEntry {
-                    attempt: 2,
-                    ..symphony_domain::RetryEntry::default()
-                },
-            );
+        }
+        {
+            let mut running_attempts = lock_unpoisoned(&runtime.running_attempts);
+            running_attempts.insert(issue_id.clone(), 2);
         }
 
         let result = runtime
@@ -2159,14 +2271,18 @@ mod tests {
         {
             let mut state = runtime.state.lock().await;
             state.claimed.insert(issue_id.clone());
-            state
-                .running
-                .insert(issue_id.clone(), symphony_domain::RunningEntry::default());
-            let mut last_seen = runtime.last_seen.lock().await;
-            last_seen.insert(
+            state.running.insert(
                 issue_id.clone(),
-                std::time::Instant::now() - Duration::from_secs(400),
+                symphony_domain::RunningEntry {
+                    identifier: Some("SYM-99".to_owned()),
+                    started_at: Some(current_unix_timestamp_secs().saturating_sub(400)),
+                    ..symphony_domain::RunningEntry::default()
+                },
             );
+        }
+        {
+            let mut running_attempts = lock_unpoisoned(&runtime.running_attempts);
+            running_attempts.insert(issue_id.clone(), 3);
         }
 
         let mut config = RuntimeConfig::default();
@@ -2181,13 +2297,149 @@ mod tests {
             tick.commands,
             vec![Command::ScheduleRetry {
                 issue_id: issue_id.clone(),
-                attempt: 1,
+                attempt: 4,
             }]
         );
 
         let state = runtime.state().await;
         assert!(!state.running.contains_key(&issue_id));
         assert!(state.retry_attempts.contains_key(&issue_id));
+        assert_eq!(
+            lock_unpoisoned(&runtime.retry_metadata)
+                .get(&issue_id)
+                .and_then(|metadata| metadata.error.clone())
+                .as_deref(),
+            Some("stalled for 400000ms without codex activity")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_exit_retryable_failure_uses_running_attempt_for_backoff() {
+        let issue_id = issue("SYM-305");
+        let tracker = Arc::new(MutableTracker::default());
+        let runtime = Runtime::new(Arc::clone(&tracker));
+        let policy = RetryPolicy {
+            continuation_delay: Duration::from_secs(1),
+            failure_base_delay: Duration::from_secs(10),
+            max_failure_backoff: Duration::from_secs(300),
+        };
+
+        {
+            let mut state = runtime.state.lock().await;
+            state.claimed.insert(issue_id.clone());
+            state
+                .running
+                .insert(issue_id.clone(), symphony_domain::RunningEntry::default());
+        }
+        {
+            let mut running_attempts = lock_unpoisoned(&runtime.running_attempts);
+            running_attempts.insert(issue_id.clone(), 3);
+        }
+
+        let result = runtime
+            .handle_worker_exit(issue_id.clone(), WorkerExit::RetryableFailure, &policy)
+            .await
+            .expect("worker exit mapping should succeed");
+
+        assert_eq!(
+            result.retry_schedule,
+            Some(RetrySchedule {
+                issue_id: issue_id.clone(),
+                attempt: 4,
+                kind: RetryKind::Failure,
+                delay: Duration::from_secs(80),
+            }),
+        );
+        assert_eq!(
+            result
+                .state
+                .retry_attempts
+                .get(&issue_id)
+                .map(|entry| entry.attempt),
+            Some(4)
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_ready_retry_dispatches_worker_with_retry_attempt() {
+        let issue_id = issue("SYM-703A");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![tracker_issue(&issue_id.0)])
+            .await;
+        let launcher = Arc::new(MockWorkerLauncher::with_outcomes(vec![
+            WorkerOutcome::Completed,
+        ]));
+        let runtime = Arc::new(Runtime::with_worker_launcher(
+            Arc::clone(&tracker),
+            launcher.clone(),
+        ));
+
+        {
+            let mut state = runtime.state.lock().await;
+            state.claimed.insert(issue_id.clone());
+            state.retry_attempts.insert(
+                issue_id.clone(),
+                symphony_domain::RetryEntry {
+                    attempt: 3,
+                    ..symphony_domain::RetryEntry::default()
+                },
+            );
+        }
+
+        let mut config = RuntimeConfig::default();
+        config.codex.command = "true".to_owned();
+
+        runtime
+            .handle_ready_retry(issue_id.clone(), 3, config)
+            .await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        assert_eq!(launcher.launch_count(), 1);
+        assert_eq!(launcher.launched_attempts().await, vec![3]);
+    }
+
+    #[tokio::test]
+    async fn execute_worker_releases_dispatch_when_issue_becomes_blocked() {
+        let issue_id = issue("SYM-704B");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![
+                TrackerIssue::new(issue_id.clone(), "SYM-704B", TrackerState::new("Todo"))
+                    .with_title("Blocked after claim")
+                    .with_blocked_by(vec![TrackerBlockerRef {
+                        id: Some("SYM-999".to_owned()),
+                        identifier: Some("SYM-999".to_owned()),
+                        state: Some("In Progress".to_owned()),
+                    }]),
+            ])
+            .await;
+        let launcher = Arc::new(MockWorkerLauncher::default());
+        let runtime = Arc::new(Runtime::with_worker_launcher(
+            Arc::clone(&tracker),
+            launcher.clone(),
+        ));
+
+        runtime
+            .setup_running(issue_id.clone(), symphony_domain::RunningEntry::default())
+            .await;
+
+        {
+            let mut running_attempts = lock_unpoisoned(&runtime.running_attempts);
+            running_attempts.insert(issue_id.clone(), 2);
+        }
+
+        let config = RuntimeConfig::default();
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        runtime
+            .execute_worker(issue_id.clone(), 0, 2, config, stop_rx)
+            .await;
+
+        let state = runtime.state().await;
+        assert!(!state.claimed.contains(&issue_id));
+        assert!(!state.running.contains_key(&issue_id));
+        assert!(!state.retry_attempts.contains_key(&issue_id));
+        assert_eq!(launcher.launch_count(), 0);
     }
 
     #[tokio::test]
@@ -2313,12 +2565,12 @@ mod tests {
                 .retry_attempts
                 .get(&issue_id)
                 .map(|entry| entry.attempt),
-            Some(1)
+            Some(2)
         );
 
         runtime.cancel_retry_task(&issue_id);
         runtime
-            .handle_ready_retry(issue_id.clone(), 1, config.clone())
+            .handle_ready_retry(issue_id.clone(), 2, config.clone())
             .await;
         tokio::time::sleep(Duration::from_millis(25)).await;
 

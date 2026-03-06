@@ -3,7 +3,9 @@
 use std::env::temp_dir;
 
 use serde_json::json;
-use symphony_http::{STATE_ROUTE, handle_get, handle_get_with_workspace_envelope, issue_route};
+use symphony_http::{
+    DASHBOARD_ROUTE, STATE_ROUTE, handle_get, handle_get_with_workspace_envelope, issue_route,
+};
 use symphony_observability::{SnapshotErrorView, StateSnapshotEnvelope};
 use symphony_testkit::{issue_snapshot, runtime_snapshot, state_snapshot};
 
@@ -182,6 +184,32 @@ fn http_state_route_exposes_observability_contract_fields() {
 }
 
 #[test]
+fn http_state_route_humanizes_event_only_and_operator_messages() {
+    let mut running = issue_snapshot("SYM-10", "SYM-10", "Running", 0);
+    running.last_event = Some("worker/started".to_owned());
+    running.last_message = None;
+
+    let mut approval = issue_snapshot("SYM-11", "SYM-11", "Running", 0);
+    approval.last_event = Some("approval_required".to_owned());
+    approval.last_message = Some(r#"{"command":"gh pr view"}"#.to_owned());
+
+    let response = handle_get(
+        STATE_ROUTE,
+        &state_snapshot(runtime_snapshot(2, 0), vec![running, approval]),
+    );
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body["running"][0]["last_message"],
+        "worker started"
+    );
+    assert_eq!(
+        response.body["running"][1]["last_message"],
+        "approval required: gh pr view"
+    );
+}
+
+#[test]
 fn http_issue_route_exposes_workspace_and_recent_event_contract_fields() {
     let mut running = issue_snapshot("SYM-55", "SYM-55", "Running", 0);
     running.session_id = Some("session-55".to_owned());
@@ -229,4 +257,61 @@ fn http_issue_route_exposes_workspace_and_recent_event_contract_fields() {
     );
     assert_eq!(response.body["tracked"], json!({}));
     assert!(response.body["last_error"].is_null());
+}
+
+#[test]
+fn http_state_route_normalizes_negative_zero_runtime_totals() {
+    let mut runtime = runtime_snapshot(0, 0);
+    runtime.seconds_running = -0.0;
+    runtime.activity.throughput.window_seconds = -0.0;
+    runtime.activity.throughput.total_tokens_per_second = -0.0;
+
+    let response = handle_get(STATE_ROUTE, &state_snapshot(runtime, vec![]));
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body["codex_totals"]["seconds_running"], json!(0.0));
+    assert_eq!(
+        response.body["activity"]["throughput"]["window_seconds"],
+        json!(0.0)
+    );
+    assert_eq!(
+        response.body["activity"]["throughput"]["total_tokens_per_second"],
+        json!(0.0)
+    );
+}
+
+#[test]
+fn http_dashboard_route_polishes_stale_operator_rendering() {
+    let mut running = issue_snapshot("SYM-21", "SYM-21", "Running", 0);
+    running.last_event = Some("worker/started".to_owned());
+    running.last_message = None;
+    running.last_event_at = Some(1_700_000_060);
+
+    let mut retrying = issue_snapshot("SYM-22", "SYM-22", "Todo", 2);
+    retrying.retry_due_at = Some(1_700_000_120);
+    retrying.retry_error = Some("tracker timeout".to_owned());
+
+    let response = handle_get_with_workspace_envelope(
+        DASHBOARD_ROUTE,
+        &StateSnapshotEnvelope::stale(
+            state_snapshot(runtime_snapshot(1, 1), vec![running, retrying]),
+            SnapshotErrorView::timeout(),
+        ),
+        None,
+    );
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.content_type, "text/html; charset=utf-8");
+    assert!(response.rendered_body.contains("Operator Briefing"));
+    assert!(
+        response
+            .rendered_body
+            .contains("Serving cached runtime state")
+    );
+    assert!(response.rendered_body.contains("Snapshot Health"));
+    assert!(response.rendered_body.contains("Latest Issue Update"));
+    assert!(response.rendered_body.contains("Next Retry"));
+    assert!(response.rendered_body.contains("worker started"));
+    assert!(response.rendered_body.contains("tracker timeout"));
+    assert!(response.rendered_body.contains("stale"));
 }

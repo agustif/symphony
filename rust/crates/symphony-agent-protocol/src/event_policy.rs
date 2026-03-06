@@ -53,7 +53,18 @@ pub fn classify_policy_outcome(event: &AppServerEvent) -> Option<ProtocolPolicyO
         ));
     }
 
-    if event_signals_error_code(event, &["response_timeout", "read_timeout"]) {
+    if event_signals_error_code(
+        event,
+        &[
+            "response_timeout",
+            "read_timeout",
+            "startup_timeout",
+            "handshake_timeout",
+            "startup/read_timeout",
+            "startup/response_timeout",
+            "response_timed_out",
+        ],
+    ) {
         return Some(ProtocolPolicyOutcome::RetryableFailure(
             ProtocolFailureReason::ResponseTimeout,
         ));
@@ -347,6 +358,22 @@ mod tests {
         let outcome = classify_policy_outcome(&event(
             "startup/failed",
             serde_json::json!({"error": {"code": "response_timeout"}}),
+            None,
+            None,
+        ));
+        assert_eq!(
+            outcome,
+            Some(ProtocolPolicyOutcome::RetryableFailure(
+                ProtocolFailureReason::ResponseTimeout
+            ))
+        );
+    }
+
+    #[test]
+    fn classifies_startup_timeout_aliases_as_retryable_failure() {
+        let outcome = classify_policy_outcome(&event(
+            "startup/failed",
+            serde_json::json!({"details": {"reason": "handshake_timeout"}}),
             None,
             None,
         ));

@@ -150,7 +150,7 @@ impl LinearTracker {
     ) -> Self {
         Self {
             endpoint: endpoint.into(),
-            api_key: api_key.into(),
+            api_key: normalize_api_key(api_key.into()),
             project_slug: project_slug.into().trim().to_owned(),
             candidate_states: Vec::new(),
             http_client,
@@ -181,7 +181,7 @@ impl LinearTracker {
                 )
                 .await?;
 
-            for node in data.issues.nodes {
+            for node in data.issues.nodes.into_iter().flatten() {
                 let issue = normalize_tracker_issue(node)?;
                 insert_unique_issue_id(
                     &mut seen_issue_ids,
@@ -216,7 +216,7 @@ impl LinearTracker {
             let response = match self
                 .http_client
                 .post(self.endpoint.as_str())
-                .header("Authorization", format!("Bearer {}", self.api_key))
+                .header("Authorization", self.api_key.as_str())
                 .json(&graphql::GraphQlRequest {
                     query,
                     variables: variables.clone(),
@@ -284,6 +284,15 @@ impl LinearTracker {
     }
 }
 
+fn normalize_api_key(api_key: String) -> String {
+    let trimmed = api_key.trim();
+    trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+        .unwrap_or(trimmed)
+        .to_owned()
+}
+
 fn retry_backoff(attempt: usize) -> Duration {
     let exponent = attempt.saturating_sub(1).min(4) as u32;
     Duration::from_millis(DEFAULT_LINEAR_RETRY_BASE_DELAY_MILLIS.saturating_mul(1_u64 << exponent))
@@ -346,11 +355,16 @@ fn normalize_tracker_issue(issue: graphql::IssueNode) -> Result<TrackerIssue, Tr
 
 fn normalize_tracker_state(
     issue: graphql::IssueStateNode,
-) -> Result<(IssueId, TrackerState), TrackerError> {
-    Ok((
-        IssueId(normalize_non_empty(issue.id, "id")?),
-        TrackerState::new(normalize_non_empty(issue.state.name, "state.name")?),
-    ))
+) -> Result<Option<(IssueId, TrackerState)>, TrackerError> {
+    let issue_id = IssueId(normalize_non_empty(issue.id, "id")?);
+    let Some(state) = issue.state else {
+        return Ok(None);
+    };
+
+    Ok(Some((
+        issue_id,
+        TrackerState::new(normalize_non_empty(state.name, "state.name")?),
+    )))
 }
 
 fn normalize_state_filters(states: &[TrackerState]) -> Vec<String> {
@@ -384,7 +398,7 @@ fn normalize_requested_ids(ids: &[IssueId]) -> Result<Vec<String>, TrackerError>
 fn normalize_labels(labels: graphql::LabelConnection) -> Vec<String> {
     let mut normalized_labels = Vec::new();
     let mut seen = HashSet::new();
-    for label in labels.nodes {
+    for label in labels.nodes.into_iter().flatten() {
         let Some(label) = label.name else {
             continue;
         };
@@ -401,6 +415,7 @@ fn normalize_blockers(relations: graphql::InverseRelationConnection) -> Vec<Trac
     relations
         .nodes
         .into_iter()
+        .flatten()
         .filter_map(|relation| {
             let relation_type = normalize_optional_string(relation.relation_type)?;
             if !relation_type.eq_ignore_ascii_case("blocks") {
@@ -487,7 +502,7 @@ impl TrackerClient for LinearTracker {
                 )
                 .await?;
 
-            for node in data.issues.nodes {
+            for node in data.issues.nodes.into_iter().flatten() {
                 let issue = normalize_tracker_issue(node)?;
                 insert_unique_issue_id(
                     &mut seen_issue_ids,
@@ -539,8 +554,10 @@ impl TrackerClient for LinearTracker {
                 )
                 .await?;
 
-            for issue in data.issues.nodes {
-                let (id, state) = normalize_tracker_state(issue)?;
+            for issue in data.issues.nodes.into_iter().flatten() {
+                let Some((id, state)) = normalize_tracker_state(issue)? else {
+                    continue;
+                };
                 if !requested_id_set.contains(&id.0) {
                     continue;
                 }
@@ -567,5 +584,26 @@ impl TrackerClient for LinearTracker {
         }
 
         Ok(states)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_api_key;
+
+    #[test]
+    fn normalize_api_key_trims_optional_bearer_prefix() {
+        assert_eq!(
+            normalize_api_key("linear-api-key".to_owned()),
+            "linear-api-key"
+        );
+        assert_eq!(
+            normalize_api_key("Bearer linear-api-key".to_owned()),
+            "linear-api-key"
+        );
+        assert_eq!(
+            normalize_api_key(" bearer linear-api-key ".to_owned()),
+            "linear-api-key"
+        );
     }
 }

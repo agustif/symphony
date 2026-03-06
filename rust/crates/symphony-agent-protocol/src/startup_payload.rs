@@ -8,6 +8,8 @@ pub struct SupportedToolSpec {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(rename = "hookPoints", skip_serializing_if = "Option::is_none")]
+    pub hook_points: Option<Vec<String>>,
     #[serde(default = "default_input_schema")]
     pub input_schema: Value,
 }
@@ -17,6 +19,7 @@ impl SupportedToolSpec {
         Self {
             name: name.into(),
             description: None,
+            hook_points: None,
             input_schema: default_input_schema(),
         }
     }
@@ -28,6 +31,15 @@ impl SupportedToolSpec {
 
     pub fn with_input_schema(mut self, input_schema: Value) -> Self {
         self.input_schema = input_schema;
+        self
+    }
+
+    pub fn with_hook_points<I, S>(mut self, hook_points: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.hook_points = Some(hook_points.into_iter().map(Into::into).collect());
         self
     }
 }
@@ -176,6 +188,7 @@ mod tests {
             "0.1.0",
             &[SupportedToolSpec::new("linear_graphql")
                 .with_description("Execute Linear GraphQL queries")
+                .with_hook_points(["before_turn", "after_turn"])
                 .with_input_schema(json!({
                     "type": "object",
                     "properties": {
@@ -190,6 +203,10 @@ mod tests {
             .expect("supported tools list should be present");
         assert_eq!(supported.len(), 1);
         assert_eq!(supported[0]["name"], "linear_graphql");
+        assert_eq!(
+            supported[0]["hookPoints"][0],
+            serde_json::json!("before_turn")
+        );
         assert_eq!(
             supported[0]["input_schema"]["required"][0],
             serde_json::json!("query")

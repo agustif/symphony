@@ -1,9 +1,9 @@
 # symphony-tracker-linear Tasks
 
-## Status Snapshot (2026-03-05)
-- Completion: 91%
-- Done: task map defined, project-scoped candidate/state queries landed, page-size parity is fixed at `50`, normalized labels/blockers/priority/timestamps now match the current spec, and bounded timeout/retry transport policy with transient status/timeout coverage is implemented.
-- In Progress: remaining live API compatibility drills.
+## Status Snapshot (2026-03-06)
+- Completion: 93%
+- Done: task map defined, project-scoped candidate/state queries landed, page-size parity is fixed at `50`, normalized labels/blockers/priority/timestamps now match the current spec, bounded timeout/retry transport policy with transient status/timeout coverage is implemented, and live Linear auth-header compatibility now matches Elixir by sending the raw API token while tolerating accidental `Bearer ` prefixes in configured secrets.
+- In Progress: pagination edge/missing-node coverage and the remaining live API compatibility drills.
 - Remaining: full SPEC parity and production rollout gates.
 
 ## Scope
@@ -47,8 +47,8 @@ Implement Linear GraphQL adapter against `symphony-tracker` contract.
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 11.2 Linear query semantics | Implemented with bounded transport timeout/backoff behavior | Add any remaining live API compatibility drills | `L3.2` |
+| Sec. 11.2 Linear query semantics | Implemented with bounded transport timeout/backoff behavior and live-compatible auth header semantics | Add the remaining live API compatibility drills beyond header/auth behavior | `L3.2` |
 | Sec. 11.3 normalization rules | Implemented for current normalized contract | Keep coverage current as the tracker contract evolves | `L3.1`, `L3.2` |
 | Sec. 11.4 error handling contract | Implemented for status/graphql/payload/timeout boundaries | Keep transport retry boundaries covered as the adapter evolves | `L1.1`, `L3.2` |
-| Sec. 17.3 tracker validation matrix | Partial | Expand adapter contract tests to include pagination edge and missing-node cases | `L3.2` |
+| Sec. 17.3 tracker validation matrix | Partial | Expand adapter contract tests to include pagination edge, missing-node, and partial-data cases | `L3.2` |
 <!-- SPEC_GAP_MAP_END -->

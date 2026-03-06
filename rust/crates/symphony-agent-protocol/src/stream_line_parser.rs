@@ -33,6 +33,30 @@ impl StreamLineParser {
         self.stderr_buffer.as_str()
     }
 
+    pub fn finish_origin(
+        &mut self,
+        origin: LineOrigin,
+    ) -> Option<Result<ParsedLine, ProtocolError>> {
+        let buffer = self.buffer_mut(origin);
+        if buffer.is_empty() {
+            return None;
+        }
+
+        let trailing = std::mem::take(buffer);
+        Some(decode_line(origin, &trailing))
+    }
+
+    pub fn finish(&mut self) -> Vec<Result<ParsedLine, ProtocolError>> {
+        let mut trailing = Vec::new();
+        if let Some(stdout) = self.finish_origin(LineOrigin::Stdout) {
+            trailing.push(stdout);
+        }
+        if let Some(stderr) = self.finish_origin(LineOrigin::Stderr) {
+            trailing.push(stderr);
+        }
+        trailing
+    }
+
     fn buffer_mut(&mut self, origin: LineOrigin) -> &mut String {
         match origin {
             LineOrigin::Stdout => &mut self.stdout_buffer,

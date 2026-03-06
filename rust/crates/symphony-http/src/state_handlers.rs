@@ -224,20 +224,16 @@ pub fn dashboard_envelope_to_html(envelope: &StateSnapshotEnvelope) -> String {
         )),
     );
 
+    push_operator_briefing_panel(&mut html, &view, envelope, &now);
+
     if let Some(error) = &envelope.error {
-        let _ = write!(
-            html,
-            concat!(
-                "<section aria-labelledby=\"health-heading\">",
-                "<h2 id=\"health-heading\">Snapshot Health</h2>",
-                "<dl>",
-                "<dt>Code</dt><dd><code>{}</code></dd>",
-                "<dt>Message</dt><dd>{}</dd>",
-                "</dl>",
-                "</section>"
-            ),
-            escape_html(error.code.api_code()),
-            escape_html(&error.message),
+        push_snapshot_health_panel(
+            &mut html,
+            &view,
+            envelope,
+            &now,
+            error.code.api_code(),
+            &error.message,
         );
     }
 
@@ -369,20 +365,115 @@ fn normalize_issue_identifier(issue_identifier: &str) -> Option<&str> {
 }
 
 fn push_rate_limits_panel(html: &mut String, rate_limits: Option<&Value>) {
+    html.push_str(concat!(
+        "<section aria-labelledby=\"rate-limits-heading\">",
+        "<div class=\"section-header\">",
+        "<div>",
+        "<h2 id=\"rate-limits-heading\">Rate limits</h2>",
+        "<p class=\"section-copy\">Latest upstream rate-limit snapshot, when available.</p>",
+        "</div>",
+        "</div>"
+    ));
+
+    if rate_limits.is_some() {
+        let _ = write!(
+            html,
+            "<pre class=\"code-panel\">{}</pre>",
+            escape_html(&format_rate_limits(rate_limits)),
+        );
+    } else {
+        html.push_str(
+            "<p class=\"empty-state\">Runtime has not published any upstream rate-limit payloads yet.</p>",
+        );
+    }
+
+    html.push_str("</section>");
+}
+
+fn push_operator_briefing_panel(
+    html: &mut String,
+    view: &StateApiView,
+    envelope: &StateSnapshotEnvelope,
+    now: &DateTime<Utc>,
+) {
     let _ = write!(
         html,
         concat!(
-            "<section aria-labelledby=\"rate-limits-heading\">",
+            "<section aria-labelledby=\"briefing-heading\">",
             "<div class=\"section-header\">",
             "<div>",
-            "<h2 id=\"rate-limits-heading\">Rate limits</h2>",
-            "<p class=\"section-copy\">Latest upstream rate-limit snapshot, when available.</p>",
+            "<h2 id=\"briefing-heading\">Operator Briefing</h2>",
+            "<p class=\"section-copy\">Deterministic summary derived from the current HTTP snapshot surface.</p>",
             "</div>",
             "</div>",
-            "<pre class=\"code-panel\">{}</pre>",
+            "<div class=\"metric-grid\">",
+            "<article class=\"metric-card\">",
+            "<p class=\"metric-label\">Snapshot</p>",
+            "<p class=\"metric-value\">{}</p>",
+            "<p class=\"metric-detail\">{}</p>",
+            "</article>",
+            "<article class=\"metric-card\">",
+            "<p class=\"metric-label\">Generated</p>",
+            "<p class=\"metric-value\">{}</p>",
+            "<p class=\"metric-detail mono\">{}</p>",
+            "</article>",
+            "<article class=\"metric-card\">",
+            "<p class=\"metric-label\">Latest Issue Update</p>",
+            "<p class=\"metric-value\">{}</p>",
+            "<p class=\"metric-detail\">{}</p>",
+            "</article>",
+            "<article class=\"metric-card\">",
+            "<p class=\"metric-label\">Next Retry</p>",
+            "<p class=\"metric-value\">{}</p>",
+            "<p class=\"metric-detail\">{}</p>",
+            "</article>",
+            "</div>",
             "</section>"
         ),
-        escape_html(&format_rate_limits(rate_limits)),
+        escape_html(snapshot_status_value(envelope)),
+        escape_html(&snapshot_status_detail(view, envelope, now)),
+        escape_html(&format_relative_time(Some(&view.generated_at), now)),
+        escape_html(&view.generated_at),
+        escape_html(&latest_issue_update_value(view, now)),
+        escape_html(&latest_issue_update_detail(view)),
+        escape_html(&next_retry_value(&view.retrying, now)),
+        escape_html(&next_retry_detail(&view.retrying, now)),
+    );
+}
+
+fn push_snapshot_health_panel(
+    html: &mut String,
+    view: &StateApiView,
+    envelope: &StateSnapshotEnvelope,
+    now: &DateTime<Utc>,
+    error_code: &str,
+    error_message: &str,
+) {
+    let _ = write!(
+        html,
+        concat!(
+            "<section aria-labelledby=\"health-heading\">",
+            "<div class=\"section-header\">",
+            "<div>",
+            "<h2 id=\"health-heading\">Snapshot Health</h2>",
+            "<p class=\"section-copy\">Operator-facing degradation detail for cached or unavailable state.</p>",
+            "</div>",
+            "</div>",
+            "<dl>",
+            "<dt>Mode</dt><dd>{}</dd>",
+            "<dt>Code</dt><dd><code>{}</code></dd>",
+            "<dt>Message</dt><dd>{}</dd>",
+            "<dt>Operator impact</dt><dd>{}</dd>",
+            "<dt>Snapshot generated</dt><dd><span class=\"mono\" title=\"{}\">{}</span></dd>",
+            "</dl>",
+            "</section>"
+        ),
+        escape_html(snapshot_status_value(envelope)),
+        escape_html(error_code),
+        escape_html(error_message),
+        escape_html(&snapshot_status_detail(view, envelope, now)),
+        escape_html(&view.generated_at),
+        escape_html(&format_relative_time(Some(&view.generated_at), now)),
     );
 }
 
@@ -553,8 +644,108 @@ fn total_runtime_seconds(view: &StateApiView, now: &DateTime<Utc>) -> i64 {
             .sum::<i64>()
 }
 
+fn snapshot_status_value(envelope: &StateSnapshotEnvelope) -> &'static str {
+    match (&envelope.error, envelope.status) {
+        (Some(_), SnapshotStatus::Stale) => "stale",
+        (Some(_), _) => "offline",
+        (None, _) => "live",
+    }
+}
+
+fn snapshot_status_detail(
+    view: &StateApiView,
+    envelope: &StateSnapshotEnvelope,
+    now: &DateTime<Utc>,
+) -> String {
+    match (&envelope.error, envelope.status, envelope.snapshot.is_some()) {
+        (Some(_), SnapshotStatus::Stale, true) => format!(
+            "Serving cached runtime state with {} active and {} queued issues. Snapshot generated {}.",
+            view.counts.running,
+            view.counts.retrying,
+            format_relative_time(Some(&view.generated_at), now),
+        ),
+        (Some(_), _, false) => "No cached snapshot is available yet. JSON routes return error envelopes until the runtime recovers.".to_owned(),
+        (Some(_), _, true) => format!(
+            "Latest cached snapshot is still available with {} active and {} queued issues.",
+            view.counts.running,
+            view.counts.retrying,
+        ),
+        (None, _, _) => format!(
+            "Reading live in-memory runtime state with {} active and {} queued issues.",
+            view.counts.running,
+            view.counts.retrying,
+        ),
+    }
+}
+
+fn latest_issue_update_value(view: &StateApiView, now: &DateTime<Utc>) -> String {
+    latest_issue_update_entry(&view.running)
+        .map(|entry| {
+            let timestamp = entry
+                .last_event_at
+                .as_deref()
+                .or(entry.started_at.as_deref());
+            format_relative_time(timestamp, now)
+        })
+        .unwrap_or_else(|| "n/a".to_owned())
+}
+
+fn latest_issue_update_detail(view: &StateApiView) -> String {
+    latest_issue_update_entry(&view.running)
+        .map(|entry| {
+            let summary = entry
+                .last_message
+                .as_deref()
+                .or(entry.last_event.as_deref())
+                .unwrap_or("no reported event");
+            format!("{} · {}", entry.issue_identifier, summary)
+        })
+        .unwrap_or_else(|| "No active sessions have reported activity yet.".to_owned())
+}
+
+fn latest_issue_update_entry(running: &[RunningIssueView]) -> Option<&RunningIssueView> {
+    running.iter().max_by_key(|entry| {
+        parse_iso8601(
+            entry
+                .last_event_at
+                .as_deref()
+                .or(entry.started_at.as_deref()),
+        )
+    })
+}
+
+fn next_retry_value(retrying: &[RetryIssueView], now: &DateTime<Utc>) -> String {
+    next_retry_entry(retrying)
+        .map(|entry| format_relative_time(entry.due_at.as_deref(), now))
+        .unwrap_or_else(|| "none queued".to_owned())
+}
+
+fn next_retry_detail(retrying: &[RetryIssueView], now: &DateTime<Utc>) -> String {
+    next_retry_entry(retrying)
+        .map(|entry| {
+            let exact_due_at = entry.due_at.as_deref().unwrap_or("n/a");
+            format!(
+                "{} · attempt {} · due {}",
+                entry.issue_identifier,
+                entry.attempt,
+                format_relative_time(Some(exact_due_at), now),
+            )
+        })
+        .unwrap_or_else(|| "No issues are currently waiting for a retry window.".to_owned())
+}
+
+fn next_retry_entry(retrying: &[RetryIssueView]) -> Option<&RetryIssueView> {
+    retrying
+        .iter()
+        .filter_map(|entry| parse_iso8601(entry.due_at.as_deref()).map(|due_at| (due_at, entry)))
+        .min_by_key(|(due_at, _entry)| *due_at)
+        .map(|(_due_at, entry)| entry)
+}
+
 fn completed_runtime_seconds(view: &StateApiView) -> i64 {
-    view.codex_totals.seconds_running.max(0.0).trunc() as i64
+    normalized_operator_float(view.codex_totals.seconds_running)
+        .max(0.0)
+        .trunc() as i64
 }
 
 fn poll_status_value(view: &StateApiView) -> String {
@@ -599,11 +790,11 @@ fn last_activity_detail(view: &StateApiView) -> String {
 }
 
 fn format_tps(value: f64) -> String {
-    format!("{value:.1} tps")
+    format!("{:.1} tps", normalized_operator_float(value))
 }
 
 fn format_throughput_window(window_seconds: f64) -> String {
-    format!("{window_seconds:.1}s window")
+    format!("{:.1}s window", normalized_operator_float(window_seconds))
 }
 
 fn format_runtime_and_turns(
@@ -682,6 +873,10 @@ fn format_rate_limits(rate_limits: Option<&Value>) -> String {
     rate_limits
         .and_then(|value| serde_json::to_string_pretty(value).ok())
         .unwrap_or_else(|| "n/a".to_owned())
+}
+
+fn normalized_operator_float(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
 }
 
 fn parse_iso8601(timestamp: Option<&str>) -> Option<DateTime<Utc>> {

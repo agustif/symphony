@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{IssueSnapshot, IssueTaskMapKind, RuntimeSnapshot, RuntimeSpecView};
+use crate::{
+    IssueSnapshot, IssueTaskMapKind, RuntimeSnapshot, RuntimeSpecView, sanitize_event_text,
+    sanitize_message_text, strip_control_bytes,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -169,9 +172,45 @@ pub struct StateSpecView {
     pub runtime: RuntimeSpecView,
     pub issue_totals: IssueStatusTotalsSnapshot,
     pub task_maps: TaskMapSnapshot,
+    #[serde(default)]
+    pub summary: StateSummaryView,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSummaryView {
+    pub issues: String,
+    pub task_maps: String,
+    #[serde(default)]
+    pub running_identifiers: Vec<String>,
+    #[serde(default)]
+    pub retrying_identifiers: Vec<String>,
 }
 
 impl StateSnapshot {
+    #[must_use]
+    pub fn sanitized(&self) -> Self {
+        let mut issues = self.issues.clone();
+        for issue in &mut issues {
+            issue.identifier = strip_control_bytes(&issue.identifier);
+            issue.state = strip_control_bytes(&issue.state);
+            issue.workspace_path = issue.workspace_path.as_deref().map(strip_control_bytes);
+            issue.session_id = issue.session_id.as_deref().map(sanitize_message_text);
+            issue.last_event = issue.last_event.as_deref().map(sanitize_event_text);
+            issue.last_message = issue.last_message.as_deref().map(sanitize_message_text);
+            issue.retry_error = issue.retry_error.as_deref().map(sanitize_message_text);
+        }
+        issues.sort_by(|left, right| {
+            left.identifier
+                .cmp(&right.identifier)
+                .then(left.id.0.cmp(&right.id.0))
+        });
+
+        Self {
+            runtime: self.runtime.normalized(),
+            issues,
+        }
+    }
+
     pub fn issue(&self, issue_id: &str) -> Option<&IssueSnapshot> {
         self.issues.iter().find(|issue| issue.id.0 == issue_id)
     }
@@ -245,11 +284,58 @@ impl StateSnapshot {
     }
 
     #[must_use]
+    pub fn summary(&self) -> StateSummaryView {
+        let sanitized = self.sanitized();
+        let issue_totals = sanitized.issue_totals();
+        let task_maps = sanitized.task_maps();
+        let mut running_identifiers = sanitized
+            .running_issues()
+            .into_iter()
+            .map(|issue| issue.identifier.clone())
+            .collect::<Vec<_>>();
+        running_identifiers.sort();
+        let mut retrying_identifiers = sanitized
+            .retrying_issues()
+            .into_iter()
+            .map(|issue| issue.identifier.clone())
+            .collect::<Vec<_>>();
+        retrying_identifiers.sort();
+
+        StateSummaryView {
+            issues: format!(
+                "total={} active={} terminal={} running={} retrying={} completed={} failed={} canceled={} pending={} unknown={}",
+                issue_totals.total,
+                issue_totals.active,
+                issue_totals.terminal,
+                issue_totals.running,
+                issue_totals.retrying,
+                issue_totals.completed,
+                issue_totals.failed,
+                issue_totals.canceled,
+                issue_totals.pending,
+                issue_totals.unknown,
+            ),
+            task_maps: format!(
+                "running_rows={} retrying_rows={} inactive_tracked={} runtime_running_gap={} runtime_retrying_gap={}",
+                task_maps.running_rows,
+                task_maps.retrying_rows,
+                task_maps.inactive_tracked,
+                task_maps.runtime_running_gap,
+                task_maps.runtime_retrying_gap,
+            ),
+            running_identifiers,
+            retrying_identifiers,
+        }
+    }
+
+    #[must_use]
     pub fn spec_view(&self) -> StateSpecView {
+        let sanitized = self.sanitized();
         StateSpecView {
-            runtime: self.runtime.spec_view(),
-            issue_totals: self.issue_totals(),
-            task_maps: self.task_maps(),
+            runtime: sanitized.runtime.spec_view(),
+            issue_totals: sanitized.issue_totals(),
+            task_maps: sanitized.task_maps(),
+            summary: sanitized.summary(),
         }
     }
 }
@@ -464,6 +550,22 @@ mod tests {
         assert_eq!(spec_view.task_maps.inactive_tracked, 1);
         assert_eq!(spec_view.task_maps.runtime_running_gap, 0);
         assert_eq!(spec_view.task_maps.runtime_retrying_gap, 1);
+        assert_eq!(
+            spec_view.summary.issues,
+            "total=3 active=2 terminal=0 running=1 retrying=1 completed=0 failed=0 canceled=0 pending=1 unknown=0"
+        );
+        assert_eq!(
+            spec_view.summary.task_maps,
+            "running_rows=1 retrying_rows=1 inactive_tracked=1 runtime_running_gap=0 runtime_retrying_gap=1"
+        );
+        assert_eq!(
+            spec_view.summary.running_identifiers,
+            vec!["SYM-1".to_owned()]
+        );
+        assert_eq!(
+            spec_view.summary.retrying_identifiers,
+            vec!["SYM-2".to_owned()]
+        );
     }
 
     #[test]
@@ -514,6 +616,85 @@ mod tests {
                 SnapshotErrorCode::Timeout,
                 "Snapshot timed out"
             ))
+        );
+    }
+
+    #[test]
+    fn sanitized_state_snapshot_sorts_issues_and_redacts_text_fields() {
+        let snapshot = StateSnapshot {
+            runtime: RuntimeSnapshot {
+                running: 0,
+                retrying: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                seconds_running: -0.0,
+                rate_limits: None,
+                activity: crate::RuntimeActivitySnapshot::default(),
+            },
+            issues: vec![
+                IssueSnapshot {
+                    id: IssueId("issue-b".to_owned()),
+                    identifier: "SYM-2".to_owned(),
+                    state: "Running".to_owned(),
+                    retry_attempts: 0,
+                    workspace_path: Some("/tmp/workspace\u{0000}".to_owned()),
+                    session_id: Some("token=abc123".to_owned()),
+                    turn_count: 0,
+                    last_event: Some("authorization: Bearer secret".to_owned()),
+                    last_message: Some("api_key=linear-secret".to_owned()),
+                    started_at: None,
+                    last_event_at: None,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: 0,
+                    retry_due_at: None,
+                    retry_error: Some("cookie=session-123".to_owned()),
+                },
+                IssueSnapshot {
+                    id: IssueId("issue-a".to_owned()),
+                    identifier: "SYM-1".to_owned(),
+                    state: "Backlog".to_owned(),
+                    retry_attempts: 0,
+                    workspace_path: None,
+                    session_id: None,
+                    turn_count: 0,
+                    last_event: None,
+                    last_message: None,
+                    started_at: None,
+                    last_event_at: None,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: 0,
+                    retry_due_at: None,
+                    retry_error: None,
+                },
+            ],
+        };
+
+        let sanitized = snapshot.sanitized();
+        assert_eq!(sanitized.runtime.seconds_running, 0.0);
+        assert_eq!(sanitized.issues[0].identifier, "SYM-1");
+        assert_eq!(sanitized.issues[1].identifier, "SYM-2");
+        assert_eq!(
+            sanitized.issues[1].workspace_path.as_deref(),
+            Some("/tmp/workspace")
+        );
+        assert_eq!(
+            sanitized.issues[1].session_id.as_deref(),
+            Some("token=[REDACTED]")
+        );
+        assert_eq!(
+            sanitized.issues[1].last_event.as_deref(),
+            Some("authorization: [REDACTED]")
+        );
+        assert_eq!(
+            sanitized.issues[1].last_message.as_deref(),
+            Some("api_key=[REDACTED]")
+        );
+        assert_eq!(
+            sanitized.issues[1].retry_error.as_deref(),
+            Some("cookie=[REDACTED]")
         );
     }
 }

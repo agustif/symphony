@@ -1,10 +1,10 @@
 # Test Program Master Tasks
 
-## Status Snapshot (2026-03-05)
+## Status Snapshot (2026-03-06)
 - Completion: 60%
-- Done: shared deterministic harnesses landed in `symphony-testkit`, baseline conformance cases landed, suite thresholds are documented, and suite-specific CI jobs are added.
-- In Progress: required conformance expansion, protected release gates, and production-like validation depth.
-- Remaining: full required SPEC coverage, interleaving depth, and real integration evidence.
+- Done: shared deterministic harnesses landed in `symphony-testkit`, baseline conformance cases landed, suite thresholds are documented, suite-specific CI jobs are added, and the current tree has fresh local workspace evidence from `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and a live Linear-backed Rust app smoke run.
+- In Progress: required conformance expansion, protected release gates, and formalizing production-like validation depth into repeatable profiles.
+- Remaining: full required SPEC coverage, deeper interleaving/soak depth, and a checked-in real integration profile with explicit skip/evidence rules.
 
 ## Scope
 Deliver complete validation coverage from unit tests to long-running stress profiles.
@@ -47,5 +47,5 @@ Deliver complete validation coverage from unit tests to long-running stress prof
 | --- | --- | --- | --- |
 | Sec. 17.1-17.8 validation matrix | Partial suite coverage | Complete required coverage ownership and close remaining observability and host lifecycle gaps | `T2.1`, `T2.2` |
 | Sec. 18.1 required conformance gates | CI jobs exist | Promote required checks to release gates and back them with shared deterministic harnesses | `T1.1`, `T1.2`, `T2.2` |
-| Sec. 18.3 operational validation | Partial soak and failure tests | Add production-like long-run profiles and incident assertions | `T1.1` |
+| Sec. 18.3 operational validation | Partial soak and failure tests plus manual live-run evidence | Add checked-in production-like long-run profiles, explicit live integration harnesses, and incident assertions | `T1.1` |
 <!-- SPEC_GAP_MAP_END -->

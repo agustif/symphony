@@ -1,10 +1,10 @@
 # Documentation Program
 
-## Status Snapshot (2026-03-05)
-- Completion: 72%
-- Done: docs index, current port-status assessment, and initial implementation batch are merged.
-- In Progress: implementation-synchronized reference examples, runbook hardening, and cutover docs.
-- Remaining: full SPEC parity and production rollout gates.
+## Status Snapshot (2026-03-06)
+- Completion: 88%
+- Done: docs index, current port-status assessment, refreshed architecture overview, crate dependency map, operational runbook, cutover checklist, and the missing secret-handling and cutover-policy ADRs are merged.
+- In Progress: implementation-synchronized protocol/config examples and final drift cleanup across docs.
+- Remaining: the last reference examples and ongoing synchronization as parity work closes.
 
 ## Scope
 Deliver complete, non-duplicative documentation for architecture, decisions, and operations.
@@ -25,20 +25,20 @@ Deliver complete, non-duplicative documentation for architecture, decisions, and
 - [ ] Subtask D1.1.3: Enforce no duplicate decision text across files.
 
 ### Task D1.2: Reference quality bar
-- [ ] Subtask D1.2.1: Add explicit invariants section references to domain/runtime docs.
+- [x] Subtask D1.2.1: Add explicit invariants section references to domain/runtime docs.
 - [ ] Subtask D1.2.2: Add protocol examples aligned with app-server contract.
 - [ ] Subtask D1.2.3: Add configuration field examples aligned with parser behavior.
 
 ## Epic D2: Operational Docs
 ### Task D2.1: Runbook
-- [ ] Subtask D2.1.1: Startup, health checks, and incident triage steps.
-- [ ] Subtask D2.1.2: Retry saturation and stalled-session response procedures.
-- [ ] Subtask D2.1.3: Safe shutdown and recovery procedures.
+- [x] Subtask D2.1.1: Startup, health checks, and incident triage steps.
+- [x] Subtask D2.1.2: Retry saturation and stalled-session response procedures.
+- [x] Subtask D2.1.3: Safe shutdown and recovery procedures.
 
 ### Task D2.2: Cutover docs
-- [ ] Subtask D2.2.1: Shadow-mode checklist.
-- [ ] Subtask D2.2.2: Primary switch checklist.
-- [ ] Subtask D2.2.3: Rollback checklist.
+- [x] Subtask D2.2.1: Shadow-mode checklist.
+- [x] Subtask D2.2.2: Primary switch checklist.
+- [x] Subtask D2.2.3: Rollback checklist.
 
 ## Exit Criteria
 - [ ] All child task maps are complete.
@@ -49,8 +49,8 @@ Deliver complete, non-duplicative documentation for architecture, decisions, and
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
 | Sec. 3 system overview and Sec. 4 model docs | Partial | Complete source-of-truth architecture map with ownership and update cadence | `D1.1` |
-| Sec. 5-6 workflow/config contract docs | Partial | Add implementation-synchronized examples and drift checks | `D1.2` |
-| Sec. 7-10 runtime and protocol docs | Partial | Document full transition and app-server behavior with failure branches | `D1.2`, `D2.1` |
-| Sec. 13-15 observability and operations docs | Partial | Finish operator runbook, incident playbook, and safety procedures | `D2.1` |
-| Sec. 18 rollout checklist | Partial | Publish cutover and rollback checklist tied to CI and soak evidence | `D2.2` |
+| Sec. 5-6 workflow/config contract docs | Partial | Add implementation-synchronized config examples and drift checks | `D1.2` |
+| Sec. 7-10 runtime and protocol docs | Mostly implemented | Add concrete protocol examples aligned with the current app-server contract | `D1.2`, `D2.1` |
+| Sec. 13-15 observability and operations docs | Mostly implemented | Keep the runbook synchronized as runtime and operator surfaces evolve | `D2.1` |
+| Sec. 18 rollout checklist | Implemented | Keep cutover and rollback criteria synchronized with CI and live validation evidence | `D2.2` |
 <!-- SPEC_GAP_MAP_END -->

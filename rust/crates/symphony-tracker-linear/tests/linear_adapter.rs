@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
+    env, fs,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -20,6 +21,10 @@ use wiremock::{
 
 const API_KEY: &str = "linear-api-key";
 const PROJECT_SLUG: &str = "symphony";
+const REAL_LINEAR_ENDPOINT: &str = "https://api.linear.app/graphql";
+const REAL_LINEAR_ENV_FILE: &str = "/Users/af/symphony/.env.local";
+const REAL_LINEAR_WORKFLOW_FILE: &str = "/Users/af/symphony/elixir/WORKFLOW.md";
+const REAL_LINEAR_PROJECT_SLUG_ENV: &str = "LINEAR_PROJECT_SLUG";
 
 fn build_tracker(server: &MockServer) -> LinearTracker {
     LinearTracker::new(format!("{}/graphql", server.uri()), API_KEY, PROJECT_SLUG)
@@ -50,12 +55,83 @@ impl Respond for SequenceResponder {
     }
 }
 
+fn read_env_file_value(path: &str, key: &str) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+
+    contents.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let (candidate_key, raw_value) = trimmed.split_once('=')?;
+        if candidate_key.trim() != key {
+            return None;
+        }
+
+        let value = raw_value.trim().trim_matches('"').trim_matches('\'').trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_owned())
+        }
+    })
+}
+
+fn read_workflow_project_slug(path: &str) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    let mut frontmatter_lines = contents.lines();
+    if frontmatter_lines.next()?.trim() != "---" {
+        return None;
+    }
+
+    frontmatter_lines
+        .take_while(|line| line.trim() != "---")
+        .find_map(|line| {
+            let (key, raw_value) = line.split_once(':')?;
+            if key.trim() != "project_slug" {
+                return None;
+            }
+
+            let value = raw_value.trim().trim_matches('"').trim_matches('\'').trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_owned())
+            }
+        })
+}
+
+fn live_linear_api_key() -> Option<String> {
+    env::var("LINEAR_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| read_env_file_value(REAL_LINEAR_ENV_FILE, "LINEAR_API_KEY"))
+}
+
+fn live_linear_project_slug() -> Option<String> {
+    env::var(REAL_LINEAR_PROJECT_SLUG_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| read_env_file_value(REAL_LINEAR_ENV_FILE, REAL_LINEAR_PROJECT_SLUG_ENV))
+        .or_else(|| read_workflow_project_slug(REAL_LINEAR_WORKFLOW_FILE))
+}
+
+fn skip_live_linear_test(reason: impl AsRef<str>) {
+    eprintln!("skipped live Linear smoke test: {}", reason.as_ref());
+}
+
+fn should_skip_live_linear_error(error: &TrackerError) -> bool {
+    match error {
+        TrackerError::Transport { .. } => true,
+        TrackerError::Status { status, .. } => *status == 408 || *status == 429 || *status >= 500,
+        _ => false,
+    }
+}
+
 #[tokio::test]
 async fn fetch_candidates_by_states_normalizes_payload() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(header("authorization", "Bearer linear-api-key"))
+        .and(header("authorization", "linear-api-key"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": {
                 "issues": {
@@ -174,6 +250,39 @@ async fn fetch_candidates_by_states_normalizes_payload() {
 }
 
 #[tokio::test]
+async fn fetch_candidates_accepts_api_keys_with_bearer_prefix_but_sends_raw_token() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(header("authorization", "linear-api-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "issues": {
+                    "nodes": [],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let tracker = LinearTracker::new(
+        format!("{}/graphql", server.uri()),
+        "Bearer linear-api-key",
+        PROJECT_SLUG,
+    );
+    let issues = tracker
+        .fetch_candidates()
+        .await
+        .expect("bearer-prefixed api key should be normalized");
+
+    assert!(issues.is_empty());
+}
+
+#[tokio::test]
 async fn fetch_candidates_by_states_paginates_until_terminal_page() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -242,6 +351,72 @@ async fn fetch_candidates_by_states_paginates_until_terminal_page() {
     assert_eq!(issues.len(), 2);
     assert_eq!(issues[0].id, IssueId("lin_1".to_owned()));
     assert_eq!(issues[1].id, IssueId("lin_2".to_owned()));
+}
+
+#[tokio::test]
+async fn fetch_candidates_skips_null_issue_and_nested_nodes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        null,
+                        {
+                            "id": "lin_3",
+                            "identifier": "SYM-103",
+                            "title": "Null nodes are ignored",
+                            "state": { "name": "Todo" },
+                            "labels": {
+                                "nodes": [
+                                    null,
+                                    { "name": "Bug" },
+                                    { "name": " bug " }
+                                ]
+                            },
+                            "inverseRelations": {
+                                "nodes": [
+                                    null,
+                                    { "type": "blocks", "issue": null },
+                                    {
+                                        "type": "blocks",
+                                        "issue": {
+                                            "id": " blocker-1 ",
+                                            "identifier": " SYM-900 ",
+                                            "state": null
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let tracker = build_tracker(&server);
+    let issues = tracker
+        .fetch_candidates()
+        .await
+        .expect("null connection nodes should be ignored");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].id, IssueId("lin_3".to_owned()));
+    assert_eq!(issues[0].labels, vec!["bug".to_owned()]);
+    assert_eq!(issues[0].blocked_by.len(), 1);
+    assert_eq!(issues[0].blocked_by[0].id.as_deref(), Some("blocker-1"));
+    assert_eq!(
+        issues[0].blocked_by[0].identifier.as_deref(),
+        Some("SYM-900")
+    );
+    assert_eq!(issues[0].blocked_by[0].state, None);
 }
 
 #[tokio::test]
@@ -387,6 +562,78 @@ async fn fetch_candidates_surfaces_payload_errors_for_missing_cursor() {
         .fetch_candidates()
         .await
         .expect_err("pagination payload missing cursor should map to payload taxonomy");
+
+    assert!(
+        matches!(error, TrackerError::Payload { .. }),
+        "expected payload taxonomy variant"
+    );
+}
+
+#[tokio::test]
+async fn fetch_candidates_surfaces_payload_errors_for_repeated_cursor() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({
+            "variables": {
+                "after": null
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "lin_cursor_1",
+                            "identifier": "SYM-CURSOR-1",
+                            "title": "First page",
+                            "state": { "name": "Todo" }
+                        }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": true,
+                        "endCursor": "cursor-1"
+                    }
+                }
+            }
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({
+            "variables": {
+                "after": "cursor-1"
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "lin_cursor_2",
+                            "identifier": "SYM-CURSOR-2",
+                            "title": "Repeated cursor",
+                            "state": { "name": "In Progress" }
+                        }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": true,
+                        "endCursor": "cursor-1"
+                    }
+                }
+            }
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tracker = build_tracker(&server);
+    let error = tracker
+        .fetch_candidates()
+        .await
+        .expect_err("repeated cursor should map to payload taxonomy");
 
     assert!(
         matches!(error, TrackerError::Payload { .. }),
@@ -628,4 +875,88 @@ async fn fetch_states_by_ids_surfaces_payload_errors_for_duplicate_ids() {
         matches!(error, TrackerError::Payload { .. }),
         "expected payload taxonomy variant"
     );
+}
+
+#[tokio::test]
+async fn fetch_states_by_ids_skips_null_nodes_and_missing_states() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        null,
+                        { "id": "lin_7", "state": null },
+                        { "id": "lin_8", "state": { "name": "Done" } },
+                        { "id": "lin_ignored", "state": { "name": "Backlog" } }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let tracker = build_tracker(&server);
+    let states = tracker
+        .fetch_states_by_ids(&[IssueId("lin_7".to_owned()), IssueId("lin_8".to_owned())])
+        .await
+        .expect("missing nodes and missing state payloads should be ignored");
+
+    assert_eq!(states.len(), 1);
+    assert_eq!(
+        states.get(&IssueId("lin_8".to_owned())),
+        Some(&TrackerState::new("Done"))
+    );
+    assert!(!states.contains_key(&IssueId("lin_7".to_owned())));
+}
+
+#[tokio::test]
+#[ignore = "requires live Linear credentials and network access"]
+async fn live_linear_smoke_test_reports_explicit_skip_when_dependencies_are_unavailable() {
+    let Some(api_key) = live_linear_api_key() else {
+        skip_live_linear_test(format!(
+            "missing LINEAR_API_KEY in env or {}",
+            REAL_LINEAR_ENV_FILE
+        ));
+        return;
+    };
+    let Some(project_slug) = live_linear_project_slug() else {
+        skip_live_linear_test(format!(
+            "missing {} and no workflow project_slug fallback",
+            REAL_LINEAR_PROJECT_SLUG_ENV
+        ));
+        return;
+    };
+
+    let tracker = LinearTracker::new(REAL_LINEAR_ENDPOINT, api_key, project_slug);
+    let issues = match tracker.fetch_candidates().await {
+        Ok(issues) => issues,
+        Err(error) if should_skip_live_linear_error(&error) => {
+            skip_live_linear_test(error.to_string());
+            return;
+        }
+        Err(error) => panic!("live Linear candidate fetch failed: {error}"),
+    };
+
+    if let Some(issue) = issues.first() {
+        match tracker
+            .fetch_states_by_ids(std::slice::from_ref(&issue.id))
+            .await
+        {
+            Ok(states) => assert_eq!(states.get(&issue.id), Some(&issue.state)),
+            Err(error) if should_skip_live_linear_error(&error) => {
+                skip_live_linear_test(error.to_string());
+            }
+            Err(error) => panic!("live Linear state refresh failed: {error}"),
+        }
+    } else {
+        eprintln!(
+            "live Linear smoke test fetched zero visible issues; candidate fetch coverage only"
+        );
+    }
 }

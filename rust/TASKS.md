@@ -2,8 +2,8 @@
 
 ## Status Snapshot (2026-03-06)
 - Completion: 66%
-- Done: reducer/domain core, typed config and workflow parsing, baseline tracker and protocol adapters, baseline runtime scheduling, runtime-fed observability including activity/timing summary surfaces, Elixir-shaped HTTP/CLI surfaces for steady-state and degraded snapshot paths, and local Verus proof profiles are implemented and green.
-- In Progress: app-server session lifecycle parity, recovery semantics, host lifecycle hardening, required conformance coverage, and production-readiness validation.
+- Done: reducer/domain core, typed config and workflow parsing, baseline tracker and protocol adapters, baseline runtime scheduling, runtime-fed observability including activity/timing summary surfaces, Elixir-shaped HTTP/CLI surfaces for steady-state and degraded snapshot paths, live Linear-backed startup now reaches the real HTTP/runtime path, and local Verus proof profiles are implemented and green.
+- In Progress: app-server session lifecycle parity, recovery semantics, host lifecycle hardening, required conformance coverage, remaining live adapter edge cases, and production-readiness validation.
 - Remaining: full SPEC-accurate recovery, remaining validation gaps, and rollout gates.
 
 ## Scope
@@ -90,7 +90,7 @@ Deliver a production-grade Rust runtime for Symphony from first principles, with
 | Sec. 4, Sec. 7, Sec. 8, Sec. 16 core orchestration model | Mostly implemented across domain/runtime | Reuse one app-server session across `max_turns`, drive reconciliation from real protocol activity, explicitly stop child processes on restart/shutdown, and restore the remaining spec backoff semantics | `C.1`, `D.1`, `D.2` |
 | Sec. 5 and Sec. 6 workflow and config contract | Implemented for baseline parsing and override precedence | Close retained-invalid reload handling, remove non-spec startup gates, and add dispatch-time config revalidation parity | `C.2`, `C.4`, `D.1` |
 | Sec. 9 and Sec. 15 workspace and safety constraints | Mostly implemented | Add transient workspace cleanup on reuse, richer hook failure taxonomy, and rollback coverage for cleanup failures | `C.4`, `D.1`, `D.3` |
-| Sec. 10, Sec. 11, Sec. 12 adapter and prompt pipeline | Mostly implemented across tracker/protocol/runtime | Expand app-server session/version compatibility, supported-tool hooks, and remaining live Linear API drills | `C.3`, `D.1` |
+| Sec. 10, Sec. 11, Sec. 12 adapter and prompt pipeline | Mostly implemented across tracker/protocol/runtime | Expand app-server session/version compatibility, supported-tool hooks, and the remaining live Linear API plus tracker edge-case drills | `C.3`, `D.1` |
 | Sec. 13 and Sec. 14 observability and recovery | Mostly implemented for steady-state and degraded snapshot paths | Finish dashboard depth and restart/recovery parity | `C.4`, `D.1`, `F.2` |
 | Sec. 17 and Sec. 18 validation and DoD gates | Partially implemented | Finish required conformance for the remaining Sec. 17.6 payload-completeness cases, Sec. 17.7 refresh/logging lifecycle cases, and Sec. 18.1, then add real integration plus soak evidence | `D.1`, `D.2`, `D.3`, `F.1` |
 | Formal verification and operational rollout | Useful progress, but separate from core conformance percentage | Complete invariant-to-proof traceability, CI policy, runbooks, and cutover criteria without counting them as Sec. 17/18 completion | `E.1`, `F.2` |

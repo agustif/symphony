@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use symphony_config::RuntimeConfig;
 use symphony_domain::{Command, Event, IssueId, OrchestratorState, RetryEntry, RunningEntry};
 use symphony_runtime::{
@@ -204,4 +204,59 @@ fn non_active_reconciliation_preserves_running_retrying_and_active_candidates() 
     let stale = non_active_reconciliation_ids(&state, &active_ids);
 
     assert_eq!(stale, vec![issue_stale]);
+}
+
+#[tokio::test]
+async fn stall_detection_uses_last_protocol_activity_timestamp() {
+    let issue_id = IssueId("SYM-15".into());
+    let tracker = Arc::new(FakeTracker::with_default_issues(vec![TrackerIssue::new(
+        issue_id.clone(),
+        "SYM-15",
+        TrackerState::new("Todo"),
+    )]));
+    let runtime = Runtime::new(tracker);
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after epoch")
+        .as_secs();
+
+    runtime
+        .setup_running(
+            issue_id.clone(),
+            RunningEntry {
+                identifier: Some("SYM-15".to_owned()),
+                started_at: Some(now_secs.saturating_sub(600)),
+                ..RunningEntry::default()
+            },
+        )
+        .await;
+    runtime
+        .handle_protocol_update(
+            issue_id.clone(),
+            Some("thread-SYM-15:turn-1".to_owned()),
+            Some("thread-SYM-15".to_owned()),
+            Some("turn-1".to_owned()),
+            None,
+            Some("turn/update".to_owned()),
+            Some(now_secs.saturating_sub(30)),
+            Some("recent activity".to_owned()),
+            None,
+            None,
+        )
+        .await
+        .expect("protocol update should apply");
+
+    let mut config = RuntimeConfig::default();
+    config.codex.stall_timeout_ms = 300_000;
+
+    let tick = runtime
+        .run_tick(&config)
+        .await
+        .expect("tick should succeed");
+
+    assert!(
+        tick.commands.is_empty(),
+        "recent protocol activity should suppress stale restart"
+    );
 }

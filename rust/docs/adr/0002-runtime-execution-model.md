@@ -23,6 +23,16 @@ Adopt a tick-based execution model with strict stage ordering:
 Reducer transitions are the only legal way to mutate orchestration state.
 Invariant checks are a hard gate before side effects.
 
+Tokio is the accepted async runtime for host supervision, timers, and worker
+coordination. Runtime tasks may execute concurrently, but reducer state
+transitions must remain serialized at the orchestration boundary.
+
+Timer policy follows explicit orchestration semantics:
+
+- poll cadence is driven by configured polling interval plus refresh signals
+- retry delays are computed from typed retry policy, not ad hoc sleeps
+- shutdown paths may use short coordination grace periods before abort fallback
+
 ## Consequences
 - Enables deterministic replay for reducer logic.
 - Keeps IO failures out of the domain mutation path.

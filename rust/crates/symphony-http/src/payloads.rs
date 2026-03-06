@@ -103,7 +103,7 @@ impl From<&RuntimeSnapshot> for CodexTotalsView {
             input_tokens: snapshot.input_tokens,
             output_tokens: snapshot.output_tokens,
             total_tokens: snapshot.total_tokens,
-            seconds_running: snapshot.seconds_running,
+            seconds_running: normalize_operator_float(snapshot.seconds_running),
         }
     }
 }
@@ -159,10 +159,18 @@ impl From<&RuntimeSnapshot> for RuntimeActivityView {
             next_poll_due_at: iso8601(snapshot.activity.next_poll_due_at),
             last_runtime_activity_at: iso8601(snapshot.activity.last_runtime_activity_at),
             throughput: ThroughputView {
-                window_seconds: snapshot.activity.throughput.window_seconds,
-                input_tokens_per_second: snapshot.activity.throughput.input_tokens_per_second,
-                output_tokens_per_second: snapshot.activity.throughput.output_tokens_per_second,
-                total_tokens_per_second: snapshot.activity.throughput.total_tokens_per_second,
+                window_seconds: normalize_operator_float(
+                    snapshot.activity.throughput.window_seconds,
+                ),
+                input_tokens_per_second: normalize_operator_float(
+                    snapshot.activity.throughput.input_tokens_per_second,
+                ),
+                output_tokens_per_second: normalize_operator_float(
+                    snapshot.activity.throughput.output_tokens_per_second,
+                ),
+                total_tokens_per_second: normalize_operator_float(
+                    snapshot.activity.throughput.total_tokens_per_second,
+                ),
             },
         }
     }
@@ -593,6 +601,10 @@ pub fn now_iso8601_utc() -> String {
     now.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+fn normalize_operator_float(value: f64) -> f64 {
+    if value == 0.0 { 0.0 } else { value }
+}
+
 fn iso8601(timestamp_secs: Option<u64>) -> Option<String> {
     let seconds = timestamp_secs?;
     let timestamp = DateTime::<Utc>::from_timestamp(seconds as i64, 0)?;
@@ -600,17 +612,16 @@ fn iso8601(timestamp_secs: Option<u64>) -> Option<String> {
 }
 
 fn summarize_codex_message(event: Option<&str>, message: Option<&str>) -> Option<String> {
-    let message = message?;
-    let trimmed = sanitize_message_text(message);
-    let trimmed = trimmed.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let parsed = serde_json::from_str::<Value>(trimmed).ok();
+    let sanitized = message.map(sanitize_message_text);
+    let trimmed = sanitized
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let parsed = trimmed.and_then(|value| serde_json::from_str::<Value>(value).ok());
     let summary = humanize_codex_event(event, parsed.as_ref())
         .or_else(|| humanize_codex_payload(parsed.as_ref()))
-        .unwrap_or_else(|| inline_text(trimmed));
+        .or_else(|| trimmed.map(inline_text))
+        .or_else(|| humanize_event_label(event))?;
 
     Some(truncate_message(&summary, 140))
 }
@@ -659,6 +670,11 @@ fn humanize_codex_event(event: Option<&str>, message: Option<&Value>) -> Option<
         )),
         "turn_failed" => Some(format_reason_prefix("turn failed", message)),
         "turn_cancelled" => Some("turn cancelled".to_owned()),
+        "turn_completed" => Some("turn completed".to_owned()),
+        "approval_required" => Some(match map_string(message, &["command"]) {
+            Some(command) => format!("approval required: {}", inline_text(&command)),
+            None => "approval required".to_owned(),
+        }),
         "startup_failed" => Some(format_reason_prefix("startup failed", message)),
         "turn_ended_with_error" => Some(format_reason_prefix("turn ended with error", message)),
         _ => None,
@@ -692,6 +708,10 @@ fn humanize_codex_method(method: &str, message: Option<&Value>) -> Option<String
     let normalized = normalize_key(Some(method))?;
     match normalized.as_str() {
         "item_tool_requestuserinput" => Some("tool input request".to_owned()),
+        "thread_start" => Some("thread started".to_owned()),
+        "turn_start" => Some("turn started".to_owned()),
+        "turn_completed" => Some("turn completed".to_owned()),
+        "worker_started" => Some("worker started".to_owned()),
         "turn_failed" => Some(format_reason_prefix("turn failed", message)),
         _ => {
             let tool_name = map_string(message, &["name"])
@@ -706,6 +726,25 @@ fn humanize_codex_method(method: &str, message: Option<&Value>) -> Option<String
             Some(normalized.replace('_', " "))
         }
     }
+}
+
+fn humanize_event_label(event: Option<&str>) -> Option<String> {
+    let normalized = normalize_key(event)?;
+    Some(match normalized.as_str() {
+        "worker_started" => "worker started".to_owned(),
+        "worker_stopped" => "worker stopped".to_owned(),
+        "thread_start" => "thread started".to_owned(),
+        "turn_start" => "turn started".to_owned(),
+        "turn_completed" => "turn completed".to_owned(),
+        "turn_cancelled" => "turn cancelled".to_owned(),
+        "turn_failed" => "turn failed".to_owned(),
+        "approval_required" => "approval required".to_owned(),
+        "approval_auto_approved" => "approval request auto-approved".to_owned(),
+        "tool_call_completed" => "dynamic tool call completed".to_owned(),
+        "tool_call_failed" => "dynamic tool call failed".to_owned(),
+        "unsupported_tool_call" => "unsupported dynamic tool call rejected".to_owned(),
+        other => other.replace('_', " "),
+    })
 }
 
 fn humanize_dynamic_tool_event(prefix: &str, message: Option<&Value>) -> String {
@@ -795,7 +834,10 @@ fn truncate_message(message: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::summarize_codex_message;
+    use super::{
+        CodexTotalsView, ThroughputView, normalize_operator_float, summarize_codex_message,
+    };
+    use symphony_observability::{RuntimeActivitySnapshot, RuntimeSnapshot, ThroughputSnapshot};
 
     #[test]
     fn summarizes_session_started_messages() {
@@ -842,8 +884,70 @@ mod tests {
     }
 
     #[test]
+    fn humanizes_event_only_updates_without_raw_json_payloads() {
+        assert_eq!(
+            summarize_codex_message(Some("worker/started"), None).as_deref(),
+            Some("worker started")
+        );
+        assert_eq!(
+            summarize_codex_message(Some("turn/completed"), None).as_deref(),
+            Some("turn completed")
+        );
+    }
+
+    #[test]
+    fn preserves_plain_text_turn_updates_when_present() {
+        let message = summarize_codex_message(Some("turn/start"), Some("turn 2 started"));
+        assert_eq!(message.as_deref(), Some("turn 2 started"));
+    }
+
+    #[test]
+    fn humanizes_approval_required_commands() {
+        let message = summarize_codex_message(
+            Some("approval_required"),
+            Some(r#"{"command":"gh pr view"}"#),
+        );
+
+        assert_eq!(message.as_deref(), Some("approval required: gh pr view"));
+    }
+
+    #[test]
     fn falls_back_to_inline_text_for_plain_messages() {
         let message = summarize_codex_message(None, Some("plain\ntext"));
         assert_eq!(message.as_deref(), Some("plain text"));
+    }
+
+    #[test]
+    fn normalizes_negative_zero_operator_floats() {
+        let totals = CodexTotalsView::from(&RuntimeSnapshot {
+            running: 0,
+            retrying: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            seconds_running: -0.0,
+            rate_limits: None,
+            activity: RuntimeActivitySnapshot {
+                throughput: ThroughputSnapshot {
+                    window_seconds: -0.0,
+                    input_tokens_per_second: -0.0,
+                    output_tokens_per_second: -0.0,
+                    total_tokens_per_second: -0.0,
+                },
+                ..RuntimeActivitySnapshot::default()
+            },
+        });
+
+        assert_eq!(totals.seconds_running, 0.0);
+        assert_eq!(normalize_operator_float(-0.0), 0.0);
+
+        let throughput = ThroughputView {
+            window_seconds: normalize_operator_float(-0.0),
+            input_tokens_per_second: normalize_operator_float(-0.0),
+            output_tokens_per_second: normalize_operator_float(-0.0),
+            total_tokens_per_second: normalize_operator_float(-0.0),
+        };
+        assert_eq!(throughput.window_seconds, 0.0);
+        assert_eq!(throughput.total_tokens_per_second, 0.0);
     }
 }
