@@ -1,6 +1,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 pub const DEFAULT_LINEAR_ENDPOINT: &str = "https://api.linear.app/graphql";
 pub const DEFAULT_POLL_INTERVAL_MS: u64 = 30_000;
@@ -109,12 +110,12 @@ impl Default for AgentConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CodexConfig {
     pub command: String,
-    pub approval_policy: Option<String>,
+    pub approval_policy: Option<JsonValue>,
     pub thread_sandbox: Option<String>,
-    pub turn_sandbox_policy: Option<String>,
+    pub turn_sandbox_policy: Option<JsonValue>,
     pub turn_timeout_ms: u64,
     pub read_timeout_ms: u64,
     pub stall_timeout_ms: i64,
@@ -152,7 +153,7 @@ pub struct ServerConfig {
     pub port: Option<u16>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct RuntimeConfig {
     pub tracker: TrackerConfig,
     pub polling: PollingConfig,

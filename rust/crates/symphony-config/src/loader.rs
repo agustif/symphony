@@ -3,6 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use serde_json::{Number as JsonNumber, Value as JsonValue};
 use serde_yaml::{Mapping, Value};
 
 use crate::{
@@ -193,11 +194,11 @@ fn parse_codex_config(
     }
 
     codex.approval_policy =
-        optional_trimmed_string(section, "approval_policy", "codex.approval_policy")?;
+        optional_policy_value(section, "approval_policy", "codex.approval_policy")?;
     codex.thread_sandbox =
         optional_trimmed_string(section, "thread_sandbox", "codex.thread_sandbox")?;
     codex.turn_sandbox_policy =
-        optional_trimmed_string(section, "turn_sandbox_policy", "codex.turn_sandbox_policy")?;
+        optional_policy_value(section, "turn_sandbox_policy", "codex.turn_sandbox_policy")?;
 
     if let Some(turn_timeout_ms) =
         optional_positive_u64(section, "turn_timeout_ms", "codex.turn_timeout_ms")?
@@ -351,6 +352,65 @@ fn optional_trimmed_string(
     Ok(optional_string(map, key, field)?
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty()))
+}
+
+fn optional_policy_value(
+    map: &Mapping,
+    key: &'static str,
+    field: &'static str,
+) -> Result<Option<JsonValue>, ConfigError> {
+    let Some(value) = map.get(yaml_key(key)) else {
+        return Ok(None);
+    };
+
+    match value {
+        Value::Null => Ok(None),
+        Value::String(raw) if raw.trim().is_empty() => Ok(None),
+        _ => json_value_from_yaml(value, field).map(Some),
+    }
+}
+
+fn json_value_from_yaml(value: &Value, field: &'static str) -> Result<JsonValue, ConfigError> {
+    match value {
+        Value::Null => Ok(JsonValue::Null),
+        Value::Bool(flag) => Ok(JsonValue::Bool(*flag)),
+        Value::Number(number) => {
+            if let Some(value) = number.as_i64() {
+                Ok(JsonValue::Number(JsonNumber::from(value)))
+            } else if let Some(value) = number.as_u64() {
+                Ok(JsonValue::Number(JsonNumber::from(value)))
+            } else {
+                Err(ConfigError::InvalidType {
+                    field,
+                    expected: "null, boolean, integer, string, list, or map",
+                })
+            }
+        }
+        Value::String(raw) => Ok(JsonValue::String(raw.trim().to_owned())),
+        Value::Sequence(values) => values
+            .iter()
+            .map(|value| json_value_from_yaml(value, field))
+            .collect::<Result<Vec<_>, _>>()
+            .map(JsonValue::Array),
+        Value::Mapping(entries) => entries
+            .iter()
+            .map(|(key, value)| {
+                let Some(key) = key.as_str() else {
+                    return Err(ConfigError::InvalidType {
+                        field,
+                        expected: "map with string keys",
+                    });
+                };
+
+                Ok((key.to_owned(), json_value_from_yaml(value, field)?))
+            })
+            .collect::<Result<_, _>>()
+            .map(JsonValue::Object),
+        _ => Err(ConfigError::InvalidType {
+            field,
+            expected: "null, boolean, integer, string, list, or map",
+        }),
+    }
 }
 
 fn optional_string(
@@ -557,6 +617,7 @@ mod tests {
         loader::{from_front_matter_with_env, parse_yaml, yaml_key},
         model::{DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT},
     };
+    use serde_json::json;
     use serde_yaml::Value;
 
     struct TestEnv {
@@ -829,6 +890,104 @@ tracker:
         assert_eq!(
             from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[])),
             Err(ConfigError::MissingCodexCommand)
+        );
+    }
+
+    #[test]
+    fn preserves_structured_codex_policy_fields() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+codex:
+  command: codex app-server --json
+  approval_policy:
+    reject:
+      sandbox_approval: true
+      rules: true
+      mcp_elicitations: true
+  thread_sandbox: workspace-write
+  turn_sandbox_policy:
+    type: workspaceWrite
+    writableRoots:
+      - /tmp/symphony-workspaces
+"#,
+        );
+
+        let config = from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[]))
+            .expect("config should parse");
+
+        assert_eq!(
+            config.codex.approval_policy,
+            Some(json!({
+                "reject": {
+                    "sandbox_approval": true,
+                    "rules": true,
+                    "mcp_elicitations": true
+                }
+            }))
+        );
+        assert_eq!(
+            config.codex.turn_sandbox_policy,
+            Some(json!({
+                "type": "workspaceWrite",
+                "writableRoots": ["/tmp/symphony-workspaces"]
+            }))
+        );
+        assert_eq!(
+            config.codex.thread_sandbox.as_deref(),
+            Some("workspace-write")
+        );
+    }
+
+    #[test]
+    fn trims_legacy_string_codex_policy_fields() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+codex:
+  command: codex app-server --json
+  approval_policy: " never "
+  turn_sandbox_policy: " workspace-write "
+"#,
+        );
+
+        let config = from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[]))
+            .expect("config should parse");
+
+        assert_eq!(config.codex.approval_policy, Some(json!("never")));
+        assert_eq!(
+            config.codex.turn_sandbox_policy,
+            Some(json!("workspace-write"))
+        );
+    }
+
+    #[test]
+    fn rejects_structured_policy_maps_with_non_string_keys() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+codex:
+  command: codex app-server --json
+  turn_sandbox_policy:
+    1: workspaceWrite
+"#,
+        );
+
+        assert_eq!(
+            from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[])),
+            Err(ConfigError::InvalidType {
+                field: "codex.turn_sandbox_policy",
+                expected: "map with string keys",
+            })
         );
     }
 }

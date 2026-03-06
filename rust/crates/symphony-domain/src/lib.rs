@@ -21,9 +21,12 @@ pub struct Usage {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunningEntry {
     pub identifier: Option<String>,
+    pub tracker_state: Option<String>,
     pub session_id: Option<String>,
     pub thread_id: Option<String>,
     pub turn_id: Option<String>,
+    pub turn_count: u32,
+    pub started_at: Option<u64>,
     pub codex_app_server_pid: Option<u32>,
     pub last_codex_event: Option<String>,
     pub last_codex_timestamp: Option<u64>,
@@ -38,9 +41,12 @@ pub struct CodexTotals {
     pub total_tokens: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryEntry {
     pub attempt: u32,
+    pub identifier: Option<String>,
+    pub error: Option<String>,
+    pub due_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,27 +55,29 @@ pub struct OrchestratorState {
     pub running: HashMap<IssueId, RunningEntry>,
     pub retry_attempts: HashMap<IssueId, RetryEntry>,
     pub codex_totals: CodexTotals,
+    pub codex_rate_limits: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentUpdate {
+    pub issue_id: IssueId,
+    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub pid: Option<u32>,
+    pub event: Option<String>,
+    pub timestamp: Option<u64>,
+    pub message: Option<String>,
+    pub usage: Option<Usage>,
+    pub rate_limits: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Claim(IssueId),
     MarkRunning(IssueId),
-    UpdateAgent {
-        issue_id: IssueId,
-        session_id: Option<String>,
-        thread_id: Option<String>,
-        turn_id: Option<String>,
-        pid: Option<u32>,
-        event: Option<String>,
-        timestamp: Option<u64>,
-        message: Option<String>,
-        usage: Option<Usage>,
-    },
-    QueueRetry {
-        issue_id: IssueId,
-        attempt: u32,
-    },
+    UpdateAgent(Box<AgentUpdate>),
+    QueueRetry { issue_id: IssueId, attempt: u32 },
     Release(IssueId),
 }
 
@@ -191,21 +199,34 @@ pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState,
             state.running.insert(issue_id, RunningEntry::default());
             return (state, vec![Command::Dispatch(dispatch_issue_id)]);
         }
-        Event::UpdateAgent {
-            issue_id,
-            session_id,
-            thread_id,
-            turn_id,
-            pid,
-            event,
-            timestamp,
-            message,
-            usage,
-        } => {
+        Event::UpdateAgent(update) => {
+            let AgentUpdate {
+                issue_id,
+                session_id,
+                thread_id,
+                turn_id,
+                pid,
+                event,
+                timestamp,
+                message,
+                usage,
+                rate_limits,
+            } = *update;
             if !state.running.contains_key(&issue_id) {
                 return reject_transition(state, issue_id, TransitionRejection::MissingClaim);
             }
             if let Some(entry) = state.running.get_mut(&issue_id) {
+                let previous_session_id = entry.session_id.clone();
+                let previous_thread_id = entry.thread_id.clone();
+                let session_changed = session_id
+                    .as_ref()
+                    .is_some_and(|next| previous_session_id.as_ref() != Some(next));
+                let thread_changed = thread_id
+                    .as_ref()
+                    .is_some_and(|next| previous_thread_id.as_ref() != Some(next));
+                if session_changed || thread_changed {
+                    entry.usage = Usage::default();
+                }
                 if let Some(sid) = session_id {
                     entry.session_id = Some(sid);
                 }
@@ -213,6 +234,9 @@ pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState,
                     entry.thread_id = Some(tid);
                 }
                 if let Some(tuid) = turn_id {
+                    if entry.turn_id.as_ref() != Some(&tuid) {
+                        entry.turn_count = entry.turn_count.saturating_add(1);
+                    }
                     entry.turn_id = Some(tuid);
                 }
                 if let Some(p) = pid {
@@ -222,16 +246,28 @@ pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState,
                     entry.last_codex_event = Some(e);
                 }
                 if let Some(ts) = timestamp {
+                    if entry.started_at.is_none() {
+                        entry.started_at = Some(ts);
+                    }
                     entry.last_codex_timestamp = Some(ts);
                 }
                 if let Some(msg) = message {
                     entry.last_codex_message = Some(msg);
                 }
-                if let Some(u) = &usage {
-                    entry.usage = u.clone();
-                    state.codex_totals.input_tokens += u.input_tokens;
-                    state.codex_totals.output_tokens += u.output_tokens;
-                    state.codex_totals.total_tokens += u.total_tokens;
+                if let Some(u) = usage {
+                    let previous_usage = entry.usage.clone();
+                    let delta = Usage {
+                        input_tokens: u.input_tokens.saturating_sub(previous_usage.input_tokens),
+                        output_tokens: u.output_tokens.saturating_sub(previous_usage.output_tokens),
+                        total_tokens: u.total_tokens.saturating_sub(previous_usage.total_tokens),
+                    };
+                    entry.usage = u;
+                    state.codex_totals.input_tokens += delta.input_tokens;
+                    state.codex_totals.output_tokens += delta.output_tokens;
+                    state.codex_totals.total_tokens += delta.total_tokens;
+                }
+                if let Some(next_rate_limits) = rate_limits {
+                    state.codex_rate_limits = Some(next_rate_limits);
                 }
             }
             return (state, Vec::new());
@@ -259,9 +295,13 @@ pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState,
                 );
             }
             state.running.remove(&issue_id);
-            state
-                .retry_attempts
-                .insert(issue_id.clone(), RetryEntry { attempt });
+            state.retry_attempts.insert(
+                issue_id.clone(),
+                RetryEntry {
+                    attempt,
+                    ..RetryEntry::default()
+                },
+            );
             return (state, vec![Command::ScheduleRetry { issue_id, attempt }]);
         }
         Event::Release(issue_id) => {
@@ -400,7 +440,10 @@ mod tests {
         assert!(state.claimed.contains(&issue_id));
         assert_eq!(
             state.retry_attempts.get(&issue_id),
-            Some(&RetryEntry { attempt: 2 }),
+            Some(&RetryEntry {
+                attempt: 2,
+                ..RetryEntry::default()
+            }),
         );
         assert_eq!(
             commands,
@@ -452,9 +495,13 @@ mod tests {
         let issue_id = issue_id("SYM-77");
         let mut state = OrchestratorState::default();
         state.claimed.insert(issue_id.clone());
-        state
-            .retry_attempts
-            .insert(issue_id.clone(), RetryEntry { attempt: 2 });
+        state.retry_attempts.insert(
+            issue_id.clone(),
+            RetryEntry {
+                attempt: 2,
+                ..RetryEntry::default()
+            },
+        );
 
         let (state, commands) = reduce(
             state.clone(),
@@ -466,7 +513,10 @@ mod tests {
 
         assert_eq!(
             state.retry_attempts.get(&issue_id),
-            Some(&RetryEntry { attempt: 2 })
+            Some(&RetryEntry {
+                attempt: 2,
+                ..RetryEntry::default()
+            })
         );
         assert_eq!(
             commands,
@@ -493,9 +543,13 @@ mod tests {
         let issue_id = issue_id("SYM-314");
         let mut state = OrchestratorState::default();
         state.claimed.insert(issue_id.clone());
-        state
-            .retry_attempts
-            .insert(issue_id, RetryEntry { attempt: 0 });
+        state.retry_attempts.insert(
+            issue_id,
+            RetryEntry {
+                attempt: 0,
+                ..RetryEntry::default()
+            },
+        );
         assert_eq!(
             validate_invariants(&state),
             Err(InvariantError::RetryAttemptMustBePositive),
@@ -510,9 +564,13 @@ mod tests {
 
         let mut retrying_state = OrchestratorState::default();
         retrying_state.claimed.insert(issue_id.clone());
-        retrying_state
-            .retry_attempts
-            .insert(issue_id.clone(), RetryEntry { attempt: 1 });
+        retrying_state.retry_attempts.insert(
+            issue_id.clone(),
+            RetryEntry {
+                attempt: 1,
+                ..RetryEntry::default()
+            },
+        );
 
         assert_deterministic(OrchestratorState::default(), Event::Claim(issue_id.clone()));
         assert_deterministic(running_state.clone(), Event::MarkRunning(issue_id.clone()));

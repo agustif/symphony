@@ -2,6 +2,12 @@
 
 use std::collections::HashMap;
 
+#[path = "../../crates/symphony-cli/src/reload_classification.rs"]
+mod reload_classification;
+
+use reload_classification::{
+    HostOwnedConfigChange, WorkflowReloadDisposition, classify_workflow_reload,
+};
 use symphony_config::{
     CliOverrides, ConfigError, EnvProvider, apply_cli_overrides, from_front_matter_with_env,
 };
@@ -161,4 +167,145 @@ Run tests.
 
     let applied = apply_cli_overrides(config, &overrides).expect("overrides should apply");
     assert_eq!(applied.server.port, Some(9000));
+}
+
+#[test]
+fn workflow_reload_classifies_server_port_changes_as_restart_required() {
+    let current = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+server:
+  port: 3000
+---
+Run tests.
+"#,
+        &TestEnv::default(),
+    );
+    let next = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+server:
+  port: 4051
+---
+Run tests.
+"#,
+        &TestEnv::default(),
+    );
+
+    assert_eq!(
+        classify_workflow_reload(&current, &next),
+        WorkflowReloadDisposition::RestartRequired {
+            reasons: vec![HostOwnedConfigChange::ServerPort],
+        }
+    );
+}
+
+#[test]
+fn workflow_reload_classifies_tracker_changes_as_restart_required() {
+    let current = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+  active_states:
+    - Todo
+    - In Progress
+---
+Run tests.
+"#,
+        &TestEnv::default(),
+    );
+    let mut next = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  endpoint: https://example.invalid/graphql
+  project_slug: next-project
+  active_states:
+    - Todo
+    - Doing
+---
+Run tests.
+"#,
+        &TestEnv::from_entries(&[("LINEAR_API_KEY", "next-token")]),
+    );
+    next.log_level.level = "debug".to_owned();
+
+    assert_eq!(
+        classify_workflow_reload(&current, &next),
+        WorkflowReloadDisposition::RestartRequired {
+            reasons: vec![
+                HostOwnedConfigChange::TrackerEndpoint,
+                HostOwnedConfigChange::TrackerApiKey,
+                HostOwnedConfigChange::TrackerProjectSlug,
+                HostOwnedConfigChange::TrackerActiveStates,
+                HostOwnedConfigChange::LogLevel,
+            ],
+        }
+    );
+}
+
+#[test]
+fn workflow_reload_keeps_runtime_safe_changes_live_applicable() {
+    let current = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+polling:
+  interval_ms: 15000
+agent:
+  max_turns: 8
+---
+Run tests.
+"#,
+        &TestEnv::default(),
+    );
+    let next = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+polling:
+  interval_ms: 45000
+agent:
+  max_turns: 21
+---
+Run tests.
+"#,
+        &TestEnv::default(),
+    );
+
+    assert_eq!(
+        classify_workflow_reload(&current, &next),
+        WorkflowReloadDisposition::LiveApply
+    );
+}
+
+#[test]
+fn workflow_reload_restart_reasons_report_stable_field_paths() {
+    let reasons = [
+        HostOwnedConfigChange::TrackerEndpoint,
+        HostOwnedConfigChange::TrackerApiKey,
+        HostOwnedConfigChange::TrackerProjectSlug,
+        HostOwnedConfigChange::TrackerActiveStates,
+        HostOwnedConfigChange::ServerPort,
+        HostOwnedConfigChange::LogLevel,
+    ];
+
+    assert_eq!(
+        reasons.map(HostOwnedConfigChange::field_path),
+        [
+            "tracker.endpoint",
+            "tracker.api_key",
+            "tracker.project_slug",
+            "tracker.active_states",
+            "server.port",
+            "log_level.level",
+        ]
+    );
 }

@@ -1,10 +1,10 @@
 # symphony-cli Tasks
 
-## Status Snapshot (2026-03-05)
-- Completion: 88%
-- Done: task map defined, startup override/reload precedence, `--port` and `--logs-root` flags, optional HTTP wiring, signal-safe graceful shutdown, and explicit host task-failure exit-code mapping.
-- In Progress: host lifecycle fault-injection and end-to-end coverage expansion.
-- Remaining: full SPEC parity and production rollout gates.
+## Status Snapshot (2026-03-06)
+- Completion: 74%
+- Done: baseline flag parsing, startup diagnostics, workflow-driven startup validation, optional HTTP wiring, runtime-driven HTTP snapshot serving, refresh unavailable mapping, degraded snapshot timeout/stale caching, signal-handling shutdown paths, and core host-lifecycle failure mapping tests are implemented.
+- In Progress: host-supervision parity, reload diagnostics, and remaining end-to-end lifecycle coverage.
+- Remaining: full CLI and host behavior parity with the spec and the Elixir reference.
 
 ## Scope
 Own executable entrypoint, startup wiring, flags, and host lifecycle behavior.
@@ -21,22 +21,24 @@ Own executable entrypoint, startup wiring, flags, and host lifecycle behavior.
 ### Task C1.2: Startup flow
 - [x] Subtask C1.2.1: Validate workflow path and config before run.
 - [x] Subtask C1.2.2: Structured startup diagnostics.
-- [x] Subtask C1.2.3: Apply CLI override precedence in startup and workflow reload paths.
+- [x] Subtask C1.2.3: Remove non-spec startup gates and keep startup contract workflow-driven.
+- [ ] Subtask C1.2.4: Surface retained-invalid reload diagnostics consistently.
 
 ## Epic C2: Runtime Wiring
 ### Task C2.1: Dependency wiring
-- [x] Subtask C2.1.1: Construct tracker/protocol/workspace adapters.
-- [x] Subtask C2.1.2: Start runtime and optional HTTP service.
+- [x] Subtask C2.1.1: Construct tracker, protocol, workspace, and HTTP adapters.
+- [ ] Subtask C2.1.2: Monitor core task death and fail the host immediately when supervision is lost.
+- [ ] Subtask C2.1.3: Align refresh and reload wiring with runtime-side config validation.
 
 ### Task C2.2: Shutdown and signals
-- [x] Subtask C2.2.1: Graceful shutdown handling.
-- [x] Subtask C2.2.2: Exit code mapping.
+- [x] Subtask C2.2.1: Baseline graceful shutdown handling.
+- [ ] Subtask C2.2.2: Host exit and cleanup parity for background-task failure and restart scenarios.
 
 ## Epic C3: Tests
 ### Task C3.1: CLI behavior tests
 - [x] Subtask C3.1.1: Parse and validation tests.
-- [x] Subtask C3.1.2: Startup failure mapping tests.
-- [ ] Subtask C3.1.3: End-to-end host tests for HTTP startup/bind failures, refresh signaling, and `--logs-root` file initialization.
+- [x] Subtask C3.1.2: Baseline startup failure mapping tests.
+- [ ] Subtask C3.1.3: End-to-end host tests for refresh signaling and `--logs-root` file initialization after adding bind-failure and task-death coverage.
 
 ## Exit Criteria
 - [ ] CLI provides production-grade startup and control behavior.
@@ -45,8 +47,8 @@ Own executable entrypoint, startup wiring, flags, and host lifecycle behavior.
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 6.1 startup config precedence | Implemented for core paths and port overrides | Add exhaustive precedence regressions for all field combinations in live reload paths | `C1.1`, `C3.1` |
-| Sec. 13.7 optional HTTP extension wiring | Implemented with `server.port` + `--port` host startup | Add integration tests for bind-failure mapping and refresh lifecycle behavior | `C2.1`, `C3.1` |
-| Sec. 14.2 failure and recovery host behavior | Explicit exit-code mapping implemented for bootstrap/runtime/watcher/http/log-init paths | Add snapshot-tested operator contract documentation for each exit-code class | `C2.2` |
-| Sec. 17.7 CLI and host lifecycle validation | Partial | Add end-to-end tests for startup failure modes and controlled shutdown with HTTP enabled | `C3.1` |
+| Sec. 6.1 startup config precedence | Baseline precedence implemented | Add full live-reload parity while keeping the workflow contract authoritative | `C1.2`, `C3.1` |
+| Sec. 13.7 optional HTTP extension wiring | Mostly implemented for steady-state and degraded snapshot requests | Finish end-to-end refresh/log initialization tests and remaining host lifecycle edges | `C2.1`, `C3.1` |
+| Sec. 14.2 failure and recovery host behavior | Partial with task-failure exit mapping | Preserve cleanup semantics across restart paths and supervised task loss | `C2.1`, `C2.2` |
+| Sec. 17.7 CLI and host lifecycle validation | Partial | Add end-to-end tests for refresh/log initialization, startup failure modes, shutdown, and full host supervision with HTTP enabled | `C3.1` |
 <!-- SPEC_GAP_MAP_END -->

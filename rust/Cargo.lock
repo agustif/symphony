@@ -1465,6 +1465,7 @@ name = "symphony-config"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "serde_yaml",
  "thiserror",
 ]
@@ -1483,6 +1484,7 @@ dependencies = [
 name = "symphony-http"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde_json",
  "symphony-observability",
  "symphony-testkit",
@@ -1493,6 +1495,7 @@ name = "symphony-observability"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
  "symphony-domain",
 ]
 

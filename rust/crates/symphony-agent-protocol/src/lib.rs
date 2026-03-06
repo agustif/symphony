@@ -15,8 +15,8 @@ mod stream_line_parser;
 
 pub use app_server_event::AppServerEvent;
 pub use event_extract::{
-    ProtocolUsage, build_session_id, extract_thread_id, extract_tool_call_id, extract_tool_name,
-    extract_turn_id, extract_usage,
+    ProtocolRateLimits, ProtocolUsage, build_session_id, extract_rate_limits, extract_thread_id,
+    extract_tool_call_id, extract_tool_name, extract_turn_id, extract_usage,
 };
 pub use event_policy::{ProtocolFailureReason, ProtocolPolicyOutcome, classify_policy_outcome};
 pub use line_origin::LineOrigin;
@@ -82,10 +82,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_event_envelope_with_missing_method() {
+    fn accepts_response_envelope_without_method() {
+        let line = r#"{"id":3,"result":{"thread":{"id":"thread-1"}}}"#;
+        let event = decode_stdout_line(line).expect("response envelope should decode");
+        assert_eq!(event.id, Some(serde_json::json!(3)));
+        assert_eq!(event.method, "");
+        assert_eq!(
+            event.result,
+            Some(serde_json::json!({"thread": {"id": "thread-1"}}))
+        );
+    }
+
+    #[test]
+    fn rejects_payload_without_method_or_response() {
         let error = decode_stdout_line(r#"{"params":{"issue_id":"SYM-7"}}"#)
-            .expect_err("missing method should fail");
-        assert!(matches!(error, ProtocolError::InvalidStdoutLine(_)));
+            .expect_err("missing method should fail without a response payload");
+        assert!(matches!(error, ProtocolError::MissingMethod));
     }
 
     #[test]

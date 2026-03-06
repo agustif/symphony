@@ -1,10 +1,10 @@
 # symphony-runtime Tasks
 
-## Status Snapshot (2026-03-05)
-- Completion: 96%
-- Done: task map defined, startup terminal workspace cleanup, active-run tracker-state reconciliation with terminal cleanup hooks, candidate required-field filtering plus `Todo` blocker gating, worker protocol-stream policy handling for approval/input-required and timeout/cancelled with normalized startup/runtime error categories, live app-server handshake integration using shared startup payload builders, buffered handshake stream preservation into runtime monitoring, unsupported dynamic tool-call fallback responses (`success=false,error=unsupported_tool_call`) without permanent-failure escalation, concrete `linear_graphql` tool execution with input validation and structured success/failure outputs, retry-ready tracker revalidation before relaunch, stale-dispatch release handling for vanished candidates, startup cleanup fault-drill coverage, and mocked GraphQL tool-path integration coverage.
-- In Progress: final restart-policy documentation and algorithm traceability coverage.
-- Remaining: full SPEC parity and production rollout gates.
+## Status Snapshot (2026-03-06)
+- Completion: 76%
+- Done: baseline poll/dispatch loop, blocker-aware candidate gating, startup terminal cleanup, protocol-driven state updates, observer-facing state snapshots, retry due-time metadata, best-effort `after_run`, unsupported dynamic tool-call fallback, concrete `linear_graphql` execution, and app-server multi-turn session reuse are implemented.
+- In Progress: explicit subprocess lifecycle control, stall/restart activity parity, and final backoff semantics.
+- Remaining: full SPEC-accurate orchestration and recovery behavior.
 
 ## Scope
 Own async orchestration loop, scheduling, dispatch, reconciliation, and retry execution.
@@ -19,39 +19,46 @@ Own async orchestration loop, scheduling, dispatch, reconciliation, and retry ex
 ### Task R1.1: Poll loop lifecycle
 - [x] Subtask R1.1.1: Tick scheduling and immediate refresh triggers.
 - [x] Subtask R1.1.2: Runtime config reload integration.
+- [ ] Subtask R1.1.3: Dispatch-time config revalidation and retained-invalid reload parity.
 
 ### Task R1.2: Dispatch selection
-- [x] Subtask R1.2.1: Candidate filtering with active/terminal rules.
-- [x] Subtask R1.2.2: Global/per-state slot enforcement.
+- [x] Subtask R1.2.1: Candidate filtering with active and terminal rules.
+- [x] Subtask R1.2.2: Global and per-state slot enforcement.
 - [x] Subtask R1.2.3: `Todo` blocker gating and required-field eligibility checks.
 
 ## Epic R2: Retry and Reconciliation
 ### Task R2.1: Retry queue engine
-- [x] Subtask R2.1.1: Continuation and failure backoff scheduling.
-- [x] Subtask R2.1.2: Retry cancellation and replacement rules.
+- [ ] Subtask R2.1.1: Continuation and failure backoff parity.
+- [x] Subtask R2.1.2: Retry cancellation, replacement, and observer-facing due-time semantics.
 
 ### Task R2.2: Active-run reconciliation
-- [x] Subtask R2.2.1: Stall detection and forced restart.
-- [x] Subtask R2.2.2: Tracker refresh reconciliation actions.
+- [ ] Subtask R2.2.1: Stall detection and forced restart driven by real protocol activity timestamps.
+- [ ] Subtask R2.2.2: Tracker refresh reconciliation with explicit child-stop and cleanup behavior.
 
 ## Epic R3: Worker Lifecycle
-### Task R3.1: Worker spawn/monitor
+### Task R3.1: Worker spawn and session lifecycle
 - [x] Subtask R3.1.1: Spawn with workspace and prompt context.
-- [x] Subtask R3.1.2: Exit reason mapping to retries.
+- [x] Subtask R3.1.2: Reuse one app-server session across `max_turns`.
+- [ ] Subtask R3.1.3: Stop subprocesses and sessions explicitly on terminal stop, non-active stop, restart, and host shutdown.
 
 ### Task R3.2: Event integration
-- [x] Subtask R3.2.1: Integrate protocol updates into runtime state.
-- [x] Subtask R3.2.2: Surface snapshot updates for observers.
-- [x] Subtask R3.2.3: Treat approval/input-required protocol signals as permanent worker failures.
-- [x] Subtask R3.2.4: Align protocol timeout/error taxonomy with explicit runtime policy outcomes.
+- [x] Subtask R3.2.1: Integrate live protocol updates into runtime state and activity tracking.
+- [x] Subtask R3.2.2: Surface spec-accurate snapshot updates for observers.
+- [x] Subtask R3.2.3: Treat approval and input-required protocol signals as terminal policy outcomes.
+- [x] Subtask R3.2.4: Align protocol timeout and error taxonomy with explicit runtime policy outcomes.
 - [x] Subtask R3.2.5: Return unsupported dynamic tool-call responses while keeping the session alive.
-- [x] Subtask R3.2.6: Implement `linear_graphql` tool-call execution path using tracker-config endpoint/auth.
+- [x] Subtask R3.2.6: Implement `linear_graphql` tool-call execution with validated input and structured outputs.
+
+### Task R3.3: Hook and exit semantics
+- [x] Subtask R3.3.1: Treat `after_run` hook failures as best-effort diagnostics, not worker failures.
+- [x] Subtask R3.3.2: Preserve worker/session metadata needed by observability and recovery paths.
 
 ## Epic R4: Tests
-### Task R4.1: Deterministic unit/integration tests
-- [x] Subtask R4.1.1: Poll/dispatch/retry tests.
-- [x] Subtask R4.1.2: Reconciliation and stall tests.
-- [x] Subtask R4.1.3: Add integration tests for approval/input-required hard-fail and timeout-path behavior.
+### Task R4.1: Deterministic unit and integration tests
+- [x] Subtask R4.1.1: Baseline poll, dispatch, and retry tests.
+- [x] Subtask R4.1.2: Baseline reconciliation and stall tests.
+- [x] Subtask R4.1.3: Add session-reuse, child-stop, retry-metadata, and protocol-update integration coverage.
+- [ ] Subtask R4.1.4: Add algorithm-to-code traceability assertions for the reference algorithms.
 
 ## Exit Criteria
 - [ ] Runtime behavior matches required orchestration semantics.
@@ -60,9 +67,9 @@ Own async orchestration loop, scheduling, dispatch, reconciliation, and retry ex
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 8.1-8.5 poll, dispatch, retry, reconcile loops | Core scheduler implemented with blocker-aware candidate gating, retry-ready revalidation, and slot-aware requeue behavior | Add exhaustive parity for tracker partial-data branches and remaining reconcile error drills | `R1.2`, `R2.1`, `R2.2` |
-| Sec. 8.6 startup terminal workspace cleanup | Implemented with tracker-failure and hook-failure coverage | Add stronger ordering/fault-drill coverage for tracker partial-data cleanup cases | `R2.2`, `R4.1` |
-| Sec. 10 app-server integration and Sec. 12 prompt assembly | Worker stream monitor consumes typed protocol policy outcomes for approval/input-required and timeout paths, preserves buffered post-handshake stream bytes, returns unsupported dynamic tool-call responses, executes `linear_graphql` with validated input and structured outputs, and has mocked GraphQL integration coverage | Expand startup/version compatibility coverage | `R3.2`, `R4.1` |
-| Sec. 14 recovery behavior and restart semantics | Mostly implemented | Complete restart policy docs and protocol/session crash recovery drills | `R2.2`, `R4.1` |
-| Sec. 16.2-16.6 reference algorithms | Mostly implemented | Add algorithm-to-code traceability assertions in tests | `R4.1` |
+| Sec. 8.1-8.5 poll, dispatch, retry, and reconcile loops | Mostly implemented | Restore the remaining spec backoff semantics and validate reload-driven dispatch behavior | `R1.1`, `R2.1`, `R4.1` |
+| Sec. 8.6 startup terminal workspace cleanup | Implemented for baseline cleanup paths | Add parity for partial-data cleanup and cleanup-failure ordering | `R2.2`, `R4.1` |
+| Sec. 10 app-server integration and Sec. 12 prompt assembly | Mostly implemented | Finish real-activity-driven reconciliation, explicit session stop semantics, and version compatibility coverage | `R2.2`, `R3.1`, `R3.2`, `R4.1` |
+| Sec. 14 recovery behavior and restart semantics | Partial | Drive stall detection from real activity, stop child processes explicitly, and align restart cleanup semantics | `R2.2`, `R3.1`, `R4.1` |
+| Sec. 16.2-16.6 reference algorithms | Partial | Add algorithm-to-code traceability assertions and remaining edge-branch coverage | `R4.1` |
 <!-- SPEC_GAP_MAP_END -->

@@ -33,8 +33,6 @@ pub enum ConfigError {
     MissingTrackerActiveStates,
     #[error("unsupported tracker kind: {0}")]
     UnsupportedTrackerKind(String),
-    #[error("`tracker.api_key` is required after env resolution")]
-    MissingTrackerApiKey,
     #[error("`tracker.project_slug` is required for linear tracker")]
     MissingTrackerProjectSlug,
     #[error("`agent.max_concurrent_agents_by_state` contains an invalid or empty state key")]

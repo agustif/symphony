@@ -165,9 +165,13 @@ fn terminal_reconciliation_releases_claimed_running_and_retrying() {
     state
         .running
         .insert(issue_terminal.clone(), RunningEntry::default());
-    state
-        .retry_attempts
-        .insert(issue_terminal.clone(), RetryEntry { attempt: 2 });
+    state.retry_attempts.insert(
+        issue_terminal.clone(),
+        RetryEntry {
+            attempt: 2,
+            ..RetryEntry::default()
+        },
+    );
 
     let terminal_ids = HashSet::from([issue_terminal.clone()]);
     let releases = terminal_reconciliation_ids(&state, &terminal_ids);
@@ -188,9 +192,13 @@ fn non_active_reconciliation_preserves_running_retrying_and_active_candidates() 
     state.claimed.insert(issue_retrying.clone());
     state.claimed.insert(issue_active_candidate.clone());
     state.running.insert(issue_running, RunningEntry::default());
-    state
-        .retry_attempts
-        .insert(issue_retrying, RetryEntry { attempt: 1 });
+    state.retry_attempts.insert(
+        issue_retrying,
+        RetryEntry {
+            attempt: 1,
+            ..RetryEntry::default()
+        },
+    );
 
     let active_ids = HashSet::from([issue_active_candidate]);
     let stale = non_active_reconciliation_ids(&state, &active_ids);

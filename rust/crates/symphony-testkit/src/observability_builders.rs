@@ -9,6 +9,9 @@ pub fn runtime_snapshot(running: usize, retrying: usize) -> RuntimeSnapshot {
         input_tokens: 0,
         output_tokens: 0,
         total_tokens: 0,
+        seconds_running: 0.0,
+        rate_limits: None,
+        activity: symphony_observability::RuntimeActivitySnapshot::default(),
     }
 }
 
@@ -23,6 +26,18 @@ pub fn issue_snapshot(
         identifier: identifier.to_owned(),
         state: state.to_owned(),
         retry_attempts,
+        workspace_path: None,
+        session_id: None,
+        turn_count: 0,
+        last_event: None,
+        last_message: None,
+        started_at: None,
+        last_event_at: None,
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        retry_due_at: None,
+        retry_error: None,
     }
 }
 

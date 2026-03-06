@@ -6,6 +6,7 @@ use crate::{ProtocolMethodCategory, ProtocolMethodKind};
 pub struct AppServerEvent {
     #[serde(default)]
     pub id: Option<serde_json::Value>,
+    #[serde(default)]
     pub method: String,
     #[serde(default)]
     pub params: serde_json::Value,

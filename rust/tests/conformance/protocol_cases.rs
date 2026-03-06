@@ -199,7 +199,7 @@ fn protocol_extractors_read_nested_thread_turn_ids_and_build_session_id() {
 #[test]
 fn protocol_usage_extractor_accepts_usage_shape_variants() {
     let event = decode_stdout_line(
-        r#"{"method":"turn/completed","result":{"turn":{"usage":{"inputTokens":120,"completionTokens":30}}}}"#,
+        r#"{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":120,"completionTokens":30}}}}"#,
     )
     .expect("usage payload should decode");
     let usage = extract_usage(&event).expect("usage should be extracted");

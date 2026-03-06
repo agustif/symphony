@@ -40,9 +40,13 @@ fn mark_running_conformance_always_claims_issue() {
 fn release_conformance_clears_seeded_retry_tracking() {
     let issue = issue_id("SYM-77");
     let mut state = OrchestratorState::default();
-    state
-        .retry_attempts
-        .insert(issue.clone(), RetryEntry { attempt: 3 });
+    state.retry_attempts.insert(
+        issue.clone(),
+        RetryEntry {
+            attempt: 3,
+            ..RetryEntry::default()
+        },
+    );
     state.claimed.insert(issue.clone());
     state
         .running

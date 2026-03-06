@@ -1,20 +1,41 @@
+# Manual environment for working on either implementation inside Coast.
+# Start the Elixir dashboard manually with:
+# coast exec <instance> -- bash -lc 'cd elixir && mix setup && ./bin/symphony ./WORKFLOW.md --port 4000'
 [coast]
 name = "symphony"
 runtime = "dind"
 worktree_dir = ".worktrees"
 autostart = false
+primary_port = "dashboard"
 
 [coast.setup]
 packages = [
   "bash",
-  "git",
   "curl",
+  "git",
   "make",
+  "ca-certificates",
+  "python3",
   "nodejs",
   "npm",
-  "python3",
-  "ca-certificates",
+  "elixir",
+  "erlang28",
+  "rust",
+  "cargo",
+  "build-base",
 ]
+run = [
+  "mix local.hex --force",
+  "mix local.rebar --force",
+]
+
+[ports]
+dashboard = 4000
+
+[secrets.linear_api_key]
+extractor = "env"
+var = "LINEAR_API_KEY"
+inject = "env:LINEAR_API_KEY"
 
 [assign]
 default = "none"

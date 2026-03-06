@@ -1,8 +1,8 @@
 # symphony-config Tasks
 
-## Status Snapshot (2026-03-05)
+## Status Snapshot (2026-03-06)
 - Completion: 98%
-- Done: typed schema/defaults, state/path normalization, env indirection hardening, validation range checks with expanded tests, and `server.port` front-matter plus CLI override support.
+- Done: typed schema/defaults, state/path normalization, env indirection hardening, validation range checks with expanded tests, degraded startup parity when tracker auth is absent, structured Codex policy-field parity for object-form workflow data, and `server.port` front-matter plus CLI override support.
 - In Progress: exhaustive precedence matrix generation across all overrideable fields.
 - Remaining: final SPEC parity and rollout gates.
 

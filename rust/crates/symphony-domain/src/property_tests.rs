@@ -96,9 +96,13 @@ mod tests {
             state
                 .running
                 .insert(issue_id.clone(), RunningEntry::default());
-            state
-                .retry_attempts
-                .insert(issue_id.clone(), RetryEntry { attempt: 1 });
+            state.retry_attempts.insert(
+                issue_id.clone(),
+                RetryEntry {
+                    attempt: 1,
+                    ..RetryEntry::default()
+                },
+            );
 
             let (new_state, _) = reduce(state, Event::Release(issue_id.clone()));
 
@@ -225,9 +229,13 @@ mod tests {
         for i in 0..simple_random() % 2 {
             let id = issue_id(&format!("SYM-{}", i + 20));
             state.claimed.insert(id.clone());
-            state
-                .retry_attempts
-                .insert(id, RetryEntry { attempt: i + 1 });
+            state.retry_attempts.insert(
+                id,
+                RetryEntry {
+                    attempt: i + 1,
+                    ..RetryEntry::default()
+                },
+            );
         }
 
         state
@@ -251,7 +259,7 @@ mod tests {
                 issue_id,
                 attempt: simple_random() % 5 + 1,
             },
-            _ => Event::UpdateAgent {
+            _ => Event::UpdateAgent(Box::new(AgentUpdate {
                 issue_id,
                 session_id: Some("session".to_string()),
                 thread_id: Some("thread".to_string()),
@@ -265,7 +273,8 @@ mod tests {
                     output_tokens: 50,
                     total_tokens: 150,
                 }),
-            },
+                rate_limits: None,
+            })),
         }
     }
 

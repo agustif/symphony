@@ -1,8 +1,8 @@
 # symphony-agent-protocol Tasks
 
-## Status Snapshot (2026-03-05)
-- Completion: 98%
-- Done: startup/turn sequencing validator and typed protocol method categorization are implemented with coverage for malformed envelopes, including approval-required and `requestUserInput` alias normalization, typed policy-outcome mapping for approval/input-required/timeout/cancelled paths with normalized error categories (`codex_not_found`, `invalid_workspace_cwd`, `response_timeout`, `response_error`, `port_exit`), non-fatal handling for `unsupported_tool_call` marker events, startup payload builders with optional tool advertisement support, and payload extractors for nested `thread_id`/`turn_id`, usage-shape variants, and tool-call id/name fields.
+## Status Snapshot (2026-03-06)
+- Completion: 99%
+- Done: startup/turn sequencing validator and typed protocol method categorization are implemented with coverage for malformed envelopes, including approval-required and `requestUserInput` alias normalization, typed policy-outcome mapping for approval/input-required/timeout/cancelled paths with normalized error categories (`codex_not_found`, `invalid_workspace_cwd`, `response_timeout`, `response_error`, `port_exit`), non-fatal handling for `unsupported_tool_call` marker events, startup payload builders with optional tool advertisement support, response-envelope decoding for methodless `result`/`error` payloads, and payload extractors for nested `thread_id`/`turn_id`, usage-shape variants, and tool-call id/name fields.
 - In Progress: stress-path streaming robustness and rate-limit payload compatibility depth.
 - Remaining: full SPEC parity and production rollout gates.
 
@@ -21,6 +21,7 @@ Own coding-agent app-server protocol transport, framing, and event translation.
 ### Task P1.2: Stream parsing contract
 - [x] Subtask P1.2.1: Parse JSON protocol lines from stdout only.
 - [x] Subtask P1.2.2: Route stderr to diagnostics without protocol parsing.
+- [x] Subtask P1.2.3: Accept JSON-RPC response envelopes that carry `result` or `error` without a `method` field.
 
 ## Epic P2: Event Translation
 ### Task P2.1: Runtime event mapping
@@ -44,7 +45,7 @@ Own coding-agent app-server protocol transport, framing, and event translation.
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 10.2 session startup handshake | Sequence validator plus startup payload builders support initialize/initialized/thread-start/turn-start and optional tool advertisement, and runtime launch path now consumes these payload builders | Expand compatibility checks across app-server version-specific startup field variants | `P1.1`, `P3.1` |
+| Sec. 10.2 session startup handshake | Sequence validator plus startup payload builders support initialize/initialized/thread-start/turn-start and optional tool advertisement, runtime launch path consumes these payload builders, and methodless response envelopes carrying startup IDs now decode correctly | Expand compatibility checks across app-server version-specific startup field variants | `P1.1`, `P1.2`, `P3.1` |
 | Sec. 10.3 stdout streaming contract | Implemented and tested | Add high-volume stream backpressure and reassembly stress tests | `P1.2`, `P3.1` |
 | Sec. 10.5 approval and user-input policy mapping | Typed method categories and policy outcome mapping cover approval/input-required, including alias variants; unsupported tool-call markers are non-fatal so sessions can continue | Add non-default policy strategy hooks (operator-surfacing and auto-resolve variants) plus concrete optional tool handlers | `P2.1`, `P2.2` |
 | Sec. 10.6 timeout and error mapping | Typed timeout/error mapping implemented for turn-failed/cancelled plus normalized error categories (`codex_not_found`, `invalid_workspace_cwd`, `response_timeout`, `response_error`, `port_exit`) | Expand coverage for payload-shape compatibility variants and startup handshake timeout branches | `P2.1`, `P3.1` |

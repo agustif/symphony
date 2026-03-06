@@ -75,13 +75,13 @@ pub fn build_initialized_notification() -> Value {
 pub fn build_thread_start_request(
     id: Value,
     cwd: &Path,
-    approval_policy: Option<&str>,
+    approval_policy: Option<&Value>,
     sandbox: Option<&str>,
 ) -> Value {
     let mut params = Map::new();
     params.insert("cwd".to_owned(), json!(cwd.to_string_lossy()));
     if let Some(approval_policy) = approval_policy {
-        params.insert("approvalPolicy".to_owned(), json!(approval_policy));
+        params.insert("approvalPolicy".to_owned(), approval_policy.clone());
     }
     if let Some(sandbox) = sandbox {
         params.insert("sandbox".to_owned(), json!(sandbox));
@@ -100,8 +100,8 @@ pub fn build_turn_start_request(
     prompt_text: &str,
     cwd: &Path,
     title: &str,
-    approval_policy: Option<&str>,
-    sandbox_policy: Option<&str>,
+    approval_policy: Option<&Value>,
+    sandbox_policy: Option<&Value>,
 ) -> Value {
     let mut params = Map::new();
     params.insert("threadId".to_owned(), json!(thread_id));
@@ -117,12 +117,12 @@ pub fn build_turn_start_request(
     params.insert("cwd".to_owned(), json!(cwd.to_string_lossy()));
     params.insert("title".to_owned(), json!(title));
     if let Some(approval_policy) = approval_policy {
-        params.insert("approvalPolicy".to_owned(), json!(approval_policy));
+        params.insert("approvalPolicy".to_owned(), approval_policy.clone());
     }
     if let Some(sandbox_policy) = sandbox_policy {
         params.insert(
             "sandboxPolicy".to_owned(),
-            json!({ "type": sandbox_policy }),
+            normalized_sandbox_policy(sandbox_policy),
         );
     }
 
@@ -131,6 +131,13 @@ pub fn build_turn_start_request(
         "method": "turn/start",
         "params": params
     })
+}
+
+fn normalized_sandbox_policy(value: &Value) -> Value {
+    match value {
+        Value::String(policy_type) => json!({ "type": policy_type }),
+        other => other.clone(),
+    }
 }
 
 fn default_input_schema() -> Value {
@@ -194,12 +201,12 @@ mod tests {
         let request = build_thread_start_request(
             json!(2),
             Path::new("/tmp/workspace"),
-            Some("auto"),
+            Some(&json!({"mode": "auto"})),
             Some("workspace-write"),
         );
 
         assert_eq!(request["method"], "thread/start");
-        assert_eq!(request["params"]["approvalPolicy"], "auto");
+        assert_eq!(request["params"]["approvalPolicy"]["mode"], "auto");
         assert_eq!(request["params"]["sandbox"], "workspace-write");
         assert_eq!(request["params"]["cwd"], "/tmp/workspace");
     }
@@ -212,8 +219,8 @@ mod tests {
             "Fix issue SYM-1",
             Path::new("/tmp/workspace"),
             "SYM-1: Fix issue",
-            Some("auto"),
-            Some("workspace-write"),
+            Some(&json!({"reject": {"sandbox_approval": true}})),
+            Some(&json!({"type": "workspaceWrite"})),
         );
 
         assert_eq!(request["method"], "turn/start");
@@ -221,8 +228,31 @@ mod tests {
         assert_eq!(request["params"]["input"][0]["text"], "Fix issue SYM-1");
         assert_eq!(request["params"]["title"], "SYM-1: Fix issue");
         assert_eq!(
+            request["params"]["approvalPolicy"]["reject"]["sandbox_approval"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
             request["params"]["sandboxPolicy"]["type"],
-            serde_json::json!("workspace-write")
+            serde_json::json!("workspaceWrite")
+        );
+    }
+
+    #[test]
+    fn turn_start_request_promotes_legacy_string_sandbox_policy() {
+        let request = build_turn_start_request(
+            json!(3),
+            "thread-1",
+            "Fix issue SYM-1",
+            Path::new("/tmp/workspace"),
+            "SYM-1: Fix issue",
+            Some(&json!("auto")),
+            Some(&json!("workspace-write")),
+        );
+
+        assert_eq!(request["params"]["approvalPolicy"], "auto");
+        assert_eq!(
+            request["params"]["sandboxPolicy"],
+            serde_json::json!({"type": "workspace-write"})
         );
     }
 

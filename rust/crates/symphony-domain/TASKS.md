@@ -1,8 +1,8 @@
 # symphony-domain Tasks
 
 ## Status Snapshot (2026-03-05)
-- Completion: 80%
-- Done: task map defined and initial implementation batch merged, including serialization-safe transition rejection payloads and structured invariant violation diagnostics.
+- Completion: 92%
+- Done: task map defined and merged with serialization-safe transition rejection payloads, structured invariant violation diagnostics, and property-based transition-sequence tests.
 - In Progress: edge-case conformance and proof depth.
 - Remaining: full SPEC parity and production rollout gates.
 
@@ -39,7 +39,7 @@ Own pure domain types, reducer transitions, and invariant validation.
 
 ### Task D3.2: Test depth
 - [x] Subtask D3.2.1: Unit tests for every transition.
-- [ ] Subtask D3.2.2: Property tests for transition sequences.
+- [x] Subtask D3.2.2: Property tests for transition sequences.
 
 ## Exit Criteria
 - [ ] Reducer and invariants are deterministic and fully tested.

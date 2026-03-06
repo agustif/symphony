@@ -4,8 +4,6 @@ use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum StartupConfigError {
-    MissingConfigFile { path: PathBuf },
-    ConfigPathNotFile { path: PathBuf },
     MissingWorkflowFile { path: PathBuf, explicit: bool },
     WorkflowPathNotFile { path: PathBuf, explicit: bool },
 }
@@ -13,12 +11,6 @@ pub enum StartupConfigError {
 impl Display for StartupConfigError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingConfigFile { path } => {
-                write!(f, "runtime config file does not exist: {}", path.display())
-            }
-            Self::ConfigPathNotFile { path } => {
-                write!(f, "runtime config path is not a file: {}", path.display())
-            }
             Self::MissingWorkflowFile { path, .. } => {
                 write!(f, "workflow file does not exist: {}", path.display())
             }

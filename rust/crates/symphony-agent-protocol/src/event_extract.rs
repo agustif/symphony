@@ -10,6 +10,8 @@ pub struct ProtocolUsage {
     pub total_tokens: u64,
 }
 
+pub type ProtocolRateLimits = Value;
+
 pub fn extract_thread_id(event: &AppServerEvent) -> Option<String> {
     extract_first_string(event, &[&["thread", "id"], &["thread_id"], &["threadId"]])
 }
@@ -29,20 +31,62 @@ pub fn build_session_id(thread_id: Option<&str>, turn_id: Option<&str>) -> Optio
 
 pub fn extract_usage(event: &AppServerEvent) -> Option<ProtocolUsage> {
     let usage_candidates = [
+        value_at_path(
+            &event.params,
+            &["msg", "payload", "info", "total_token_usage"],
+        ),
+        value_at_path(
+            &event.params,
+            &["msg", "payload", "info", "totalTokenUsage"],
+        ),
+        value_at_path(&event.params, &["msg", "info", "total_token_usage"]),
+        value_at_path(&event.params, &["msg", "info", "totalTokenUsage"]),
+        value_at_path(&event.params, &["tokenUsage", "total"]),
+        value_at_path(&event.params, &["token_usage", "total"]),
+        event.result.as_ref().and_then(|value| {
+            value_at_path(value, &["msg", "payload", "info", "total_token_usage"])
+        }),
         event
             .result
             .as_ref()
-            .and_then(|value| value.get("turn"))
-            .and_then(|turn| turn.get("usage")),
-        event.result.as_ref().and_then(|value| value.get("usage")),
-        event.params.get("usage"),
-        event.result.as_ref(),
-        Some(&event.params),
+            .and_then(|value| value_at_path(value, &["msg", "payload", "info", "totalTokenUsage"])),
+        event
+            .result
+            .as_ref()
+            .and_then(|value| value_at_path(value, &["msg", "info", "total_token_usage"])),
+        event
+            .result
+            .as_ref()
+            .and_then(|value| value_at_path(value, &["msg", "info", "totalTokenUsage"])),
+        event
+            .result
+            .as_ref()
+            .and_then(|value| value_at_path(value, &["tokenUsage", "total"])),
+        event
+            .result
+            .as_ref()
+            .and_then(|value| value_at_path(value, &["token_usage", "total"])),
     ];
 
     for candidate in usage_candidates.into_iter().flatten() {
         if let Some(usage) = parse_usage(candidate) {
             return Some(usage);
+        }
+    }
+
+    None
+}
+
+pub fn extract_rate_limits(event: &AppServerEvent) -> Option<ProtocolRateLimits> {
+    let payloads = [
+        Some(&event.params),
+        event.result.as_ref(),
+        event.error.as_ref(),
+    ];
+
+    for payload in payloads.into_iter().flatten() {
+        if let Some(rate_limits) = rate_limits_from_payload(payload) {
+            return Some(rate_limits);
         }
     }
 
@@ -156,6 +200,37 @@ fn extract_u64(value: &Value, keys: &[&str]) -> Option<u64> {
     })
 }
 
+fn rate_limits_from_payload(value: &Value) -> Option<Value> {
+    if let Some(direct) = value
+        .get("rate_limits")
+        .or_else(|| value.get("rateLimits"))
+        .filter(|candidate| candidate.is_object())
+    {
+        return Some(direct.clone());
+    }
+
+    if rate_limits_map(value) {
+        return Some(value.clone());
+    }
+
+    match value {
+        Value::Object(map) => map.values().find_map(rate_limits_from_payload),
+        Value::Array(values) => values.iter().find_map(rate_limits_from_payload),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
+}
+
+fn rate_limits_map(value: &Value) -> bool {
+    let Some(map) = value.as_object() else {
+        return false;
+    };
+    map.contains_key("primary")
+        || map.contains_key("secondary")
+        || map.contains_key("credits")
+        || map.contains_key("limit_id")
+        || map.contains_key("limit_name")
+}
+
 fn value_at_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
     let mut current = value;
     for key in path {
@@ -218,10 +293,14 @@ mod tests {
         let event = event(
             serde_json::json!({}),
             Some(serde_json::json!({
-                "turn": {
-                    "usage": {
-                        "inputTokens": 120,
-                        "completionTokens": 30
+                "msg": {
+                    "payload": {
+                        "info": {
+                            "total_token_usage": {
+                                "inputTokens": 120,
+                                "completionTokens": 30
+                            }
+                        }
                     }
                 }
             })),
@@ -240,10 +319,12 @@ mod tests {
     fn extracts_usage_from_flat_snake_case_payload_with_explicit_total() {
         let event = event(
             serde_json::json!({
-                "usage": {
-                    "input_tokens": "200",
-                    "output_tokens": 50,
-                    "total_tokens": 260
+                "tokenUsage": {
+                    "total": {
+                        "input_tokens": "200",
+                        "output_tokens": 50,
+                        "total_tokens": 260
+                    }
                 }
             }),
             None,
@@ -262,6 +343,44 @@ mod tests {
     fn usage_extraction_returns_none_without_usage_fields() {
         let event = event(serde_json::json!({"message":"no usage"}), None);
         assert_eq!(extract_usage(&event), None);
+    }
+
+    #[test]
+    fn usage_extraction_ignores_generic_turn_usage_payloads() {
+        let event = event(
+            serde_json::json!({}),
+            Some(serde_json::json!({
+                "turn": {
+                    "usage": {
+                        "inputTokens": 120,
+                        "completionTokens": 30
+                    }
+                }
+            })),
+        );
+        assert_eq!(extract_usage(&event), None);
+    }
+
+    #[test]
+    fn extracts_nested_rate_limits_from_payload() {
+        let event = event(
+            serde_json::json!({
+                "msg": {
+                    "payload": {
+                        "rate_limits": {
+                            "primary": {"remaining": 9}
+                        }
+                    }
+                }
+            }),
+            None,
+        );
+        assert_eq!(
+            extract_rate_limits(&event),
+            Some(serde_json::json!({
+                "primary": {"remaining": 9}
+            }))
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
 # Documentation Program
 
 ## Status Snapshot (2026-03-05)
-- Completion: 65%
-- Done: task map defined and initial implementation batch merged.
-- In Progress: hardening, edge-case conformance, and proof depth.
+- Completion: 72%
+- Done: docs index, current port-status assessment, and initial implementation batch are merged.
+- In Progress: implementation-synchronized reference examples, runbook hardening, and cutover docs.
 - Remaining: full SPEC parity and production rollout gates.
 
 ## Scope
@@ -15,11 +15,13 @@ Deliver complete, non-duplicative documentation for architecture, decisions, and
 ## Child Task Maps
 - Architecture docs: [architecture/TASKS.md](architecture/TASKS.md)
 - ADRs: [adr/TASKS.md](adr/TASKS.md)
+- Current status assessment: [port-status.md](port-status.md)
+- Validation evidence: [../TESTS_AND_PROOFS_SUMMARY.md](../TESTS_AND_PROOFS_SUMMARY.md)
 
 ## Epic D1: Information Architecture
 ### Task D1.1: Document map and ownership
-- [ ] Subtask D1.1.1: Establish doc index with ownership and update cadence.
-- [ ] Subtask D1.1.2: Define which topics live in architecture docs vs ADRs.
+- [x] Subtask D1.1.1: Establish doc index with ownership and update cadence.
+- [x] Subtask D1.1.2: Define which topics live in architecture docs vs ADRs.
 - [ ] Subtask D1.1.3: Enforce no duplicate decision text across files.
 
 ### Task D1.2: Reference quality bar

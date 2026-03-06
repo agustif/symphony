@@ -45,9 +45,13 @@ pub fn orchestrator_state_from_labels(
         let id = issue_id(label);
         state.running.remove(&id);
         state.claimed.insert(id.clone());
-        state
-            .retry_attempts
-            .insert(id.clone(), RetryEntry { attempt: *attempt });
+        state.retry_attempts.insert(
+            id.clone(),
+            RetryEntry {
+                attempt: *attempt,
+                ..RetryEntry::default()
+            },
+        );
     }
 
     state

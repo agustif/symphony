@@ -23,12 +23,15 @@ This workspace is the new long-term Rust implementation of Symphony, designed fr
 - `crates/symphony-testkit`: reusable fixtures/fakes for integration tests.
 
 ## Architecture Docs
+- [Docs Index](docs/README.md)
+- [Current Port Status](docs/port-status.md)
 - [Architecture Overview](docs/architecture/overview.md)
 - [ADR-0001: Reducer-First Runtime](docs/adr/0001-reducer-first-runtime.md)
 - [ADR-0002: Runtime Execution Model](docs/adr/0002-runtime-execution-model.md)
 - [ADR-0003: Adapter Boundary Contract](docs/adr/0003-adapter-boundary-contract.md)
 - [ADR-0004: Retry Semantics](docs/adr/0004-retry-semantics.md)
 - [ADR-0005: Observability Contract](docs/adr/0005-observability-contract.md)
+- [Latest Tests and Proofs Summary](TESTS_AND_PROOFS_SUMMARY.md)
 
 ## Local Quality Gates
 ```bash

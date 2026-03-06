@@ -6,11 +6,16 @@ mod sanitization;
 mod state_snapshot;
 
 pub use issue_snapshot::IssueSnapshot;
+pub use issue_snapshot::IssueTaskMapKind;
 pub use runtime_snapshot::{
-    CodexTotalsSnapshot, RateLimitSnapshot, RuntimeCounts, RuntimeSnapshot, RuntimeSpecView,
+    CodexTotalsSnapshot, RuntimeActivitySnapshot, RuntimeCounts, RuntimeSnapshot, RuntimeSpecView,
+    ThroughputSnapshot,
 };
 pub use sanitization::{sanitize_event_text, sanitize_message_text, strip_control_bytes};
-pub use state_snapshot::{IssueStatusTotalsSnapshot, StateSnapshot, StateSpecView};
+pub use state_snapshot::{
+    IssueStatusTotalsSnapshot, SnapshotErrorCode, SnapshotErrorView, SnapshotStatus, StateSnapshot,
+    StateSnapshotEnvelope, StateSpecView, TaskMapSnapshot,
+};
 
 #[cfg(test)]
 mod tests {
@@ -25,9 +30,20 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             total_tokens: 0,
+            seconds_running: 0.0,
+            rate_limits: None,
+            activity: RuntimeActivitySnapshot::default(),
         };
         assert_eq!(snapshot.running + snapshot.retrying, 0);
         assert_eq!(snapshot.spec_view().counts.running, 0);
+        assert_eq!(
+            snapshot
+                .spec_view()
+                .activity
+                .throughput
+                .total_tokens_per_second,
+            0.0
+        );
     }
 
     #[test]
@@ -39,12 +55,27 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
+                seconds_running: 0.0,
+                rate_limits: None,
+                activity: RuntimeActivitySnapshot::default(),
             },
             issues: vec![IssueSnapshot {
                 id: IssueId("SYM-42".to_owned()),
                 identifier: "SYM-42".to_owned(),
                 state: "Running".to_owned(),
                 retry_attempts: 2,
+                workspace_path: None,
+                session_id: None,
+                turn_count: 0,
+                last_event: None,
+                last_message: None,
+                started_at: None,
+                last_event_at: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                retry_due_at: None,
+                retry_error: None,
             }],
         };
 

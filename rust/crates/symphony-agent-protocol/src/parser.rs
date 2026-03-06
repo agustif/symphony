@@ -10,7 +10,9 @@ pub fn decode_stdout_line(line: &str) -> Result<AppServerEvent, ProtocolError> {
         ProtocolError::InvalidStdoutLine(format!("line `{normalized}`: {error}"))
     })?;
 
-    if event.method.trim().is_empty() {
+    let missing_method = event.method.trim().is_empty();
+    let has_response_payload = event.result.is_some() || event.error.is_some();
+    if missing_method && !has_response_payload {
         return Err(ProtocolError::MissingMethod);
     }
 

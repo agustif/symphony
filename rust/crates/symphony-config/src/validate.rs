@@ -78,16 +78,6 @@ pub fn validate(config: &RuntimeConfig) -> Result<(), ConfigError> {
         }
     }
 
-    let has_api_key = config
-        .tracker
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty());
-    if !has_api_key {
-        return Err(ConfigError::MissingTrackerApiKey);
-    }
-
     let has_project_slug = config
         .tracker
         .project_slug
@@ -120,11 +110,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_api_key() {
+    fn allows_missing_api_key_for_degraded_startup() {
         let mut config = RuntimeConfig::default();
         config.tracker.project_slug = Some("symphony".to_owned());
 
-        assert_eq!(validate(&config), Err(ConfigError::MissingTrackerApiKey));
+        assert_eq!(validate(&config), Ok(()));
     }
 
     #[test]

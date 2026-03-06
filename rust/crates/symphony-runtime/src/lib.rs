@@ -2,24 +2,34 @@
 
 pub mod worker;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
+use std::time::Instant;
 
 use symphony_config::RuntimeConfig;
 use symphony_domain::{
-    Command, Event, InvariantError, IssueId, OrchestratorState, reduce, validate_invariants,
+    AgentUpdate, CodexTotals, Command, Event, InvariantError, IssueId, OrchestratorState, reduce,
+    validate_invariants,
 };
-use symphony_observability::RuntimeSnapshot;
+use symphony_observability::{
+    IssueSnapshot, RuntimeActivitySnapshot, RuntimeSnapshot, StateSnapshot, ThroughputSnapshot,
+};
 use symphony_tracker::{TrackerClient, TrackerError, TrackerIssue, TrackerState};
 use symphony_workspace::{WorkspaceHooks, remove_workspace, remove_workspace_with_hooks};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use worker::{ShellHookExecutor, WorkerContext, WorkerLauncher, WorkerOutcome};
+use worker::{
+    ShellHookExecutor, WorkerContext, WorkerExecutionConfig, WorkerLauncher, WorkerOutcome,
+    WorkerProtocolUpdate, WorkerRuntimeHandles,
+};
 
 const DEFAULT_PROMPT_TEMPLATE: &str =
     "Issue {{issue_identifier}}: {{issue_title}}\n{{issue_description}}";
+const THROUGHPUT_WINDOW_SECONDS: u64 = 5;
+static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -59,8 +69,8 @@ pub struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
-            continuation_delay: Duration::from_secs(5),
-            failure_base_delay: Duration::from_secs(1),
+            continuation_delay: Duration::from_secs(1),
+            failure_base_delay: Duration::from_secs(10),
             max_failure_backoff: Duration::from_secs(300),
         }
     }
@@ -116,12 +126,43 @@ pub struct Runtime<T: TrackerClient> {
     tracker: Arc<T>,
     worker_launcher: Arc<dyn WorkerLauncher>,
     state: Mutex<OrchestratorState>,
-    last_seen: Mutex<HashMap<IssueId, std::time::Instant>>,
-    active_workers: StdMutex<HashMap<IssueId, JoinHandle<()>>>,
+    retry_metadata: StdMutex<HashMap<IssueId, RetryMetadata>>,
+    last_seen: Mutex<HashMap<IssueId, Instant>>,
+    active_workers: StdMutex<HashMap<IssueId, ActiveWorkerHandle>>,
     scheduled_retries: StdMutex<HashMap<IssueId, JoinHandle<()>>>,
     pending_terminal_cleanup: StdMutex<HashMap<IssueId, String>>,
+    telemetry: StdMutex<RuntimeTelemetry>,
     prompt_template: RwLock<String>,
     snapshot_tx: tokio::sync::watch::Sender<RuntimeSnapshot>,
+}
+
+struct ActiveWorkerHandle {
+    worker_id: u64,
+    join: JoinHandle<()>,
+    stop_tx: tokio::sync::watch::Sender<bool>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RetryMetadata {
+    identifier: Option<String>,
+    due_at: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RuntimeTelemetry {
+    poll_in_progress: bool,
+    last_poll_started_at: Option<u64>,
+    last_poll_completed_at: Option<u64>,
+    next_poll_due_at: Option<u64>,
+    last_runtime_activity_at: Option<u64>,
+    token_samples: VecDeque<TokenSample>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TokenSample {
+    at: u64,
+    totals: CodexTotals,
 }
 
 impl<T: TrackerClient + 'static> Runtime<T> {
@@ -136,15 +177,20 @@ impl<T: TrackerClient + 'static> Runtime<T> {
             input_tokens: 0,
             output_tokens: 0,
             total_tokens: 0,
+            seconds_running: 0.0,
+            rate_limits: None,
+            activity: RuntimeActivitySnapshot::default(),
         });
         Self {
             tracker,
             worker_launcher,
             state: Mutex::new(OrchestratorState::default()),
+            retry_metadata: StdMutex::new(HashMap::new()),
             last_seen: Mutex::new(HashMap::new()),
             active_workers: StdMutex::new(HashMap::new()),
             scheduled_retries: StdMutex::new(HashMap::new()),
             pending_terminal_cleanup: StdMutex::new(HashMap::new()),
+            telemetry: StdMutex::new(RuntimeTelemetry::default()),
             prompt_template: RwLock::new(DEFAULT_PROMPT_TEMPLATE.to_owned()),
             snapshot_tx,
         }
@@ -162,6 +208,42 @@ impl<T: TrackerClient + 'static> Runtime<T> {
     pub async fn report_activity(&self, issue_id: IssueId) {
         let mut last_seen = self.last_seen.lock().await;
         last_seen.insert(issue_id, std::time::Instant::now());
+    }
+
+    fn publish_snapshot(&self, state: &OrchestratorState) {
+        let _ = self.snapshot_tx.send(self.snapshot_from_state(state));
+    }
+
+    fn record_protocol_metrics(&self, state: &OrchestratorState, timestamp_secs: u64) {
+        let mut telemetry = lock_unpoisoned(&self.telemetry);
+        telemetry.last_runtime_activity_at = Some(timestamp_secs);
+        record_token_sample(
+            &mut telemetry.token_samples,
+            timestamp_secs,
+            &state.codex_totals,
+        );
+    }
+
+    fn mark_poll_started(&self, timestamp_secs: u64) {
+        let mut telemetry = lock_unpoisoned(&self.telemetry);
+        telemetry.poll_in_progress = true;
+        telemetry.last_poll_started_at = Some(timestamp_secs);
+        telemetry.last_runtime_activity_at = Some(timestamp_secs);
+        telemetry.next_poll_due_at = None;
+    }
+
+    fn mark_poll_completed(&self, timestamp_secs: u64, next_interval_ms: u64) {
+        let mut telemetry = lock_unpoisoned(&self.telemetry);
+        telemetry.poll_in_progress = false;
+        telemetry.last_poll_completed_at = Some(timestamp_secs);
+        telemetry.last_runtime_activity_at = Some(timestamp_secs);
+        telemetry.next_poll_due_at =
+            Some(timestamp_secs.saturating_add(duration_to_rounded_up_seconds(next_interval_ms)));
+    }
+
+    fn mark_next_poll_due(&self, timestamp_secs: u64) {
+        let mut telemetry = lock_unpoisoned(&self.telemetry);
+        telemetry.next_poll_due_at = Some(timestamp_secs);
     }
 
     pub async fn run_tick(&self, config: &RuntimeConfig) -> Result<TickResult, RuntimeError> {
@@ -344,13 +426,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         validate_invariants(&state)?;
         *state_guard = state.clone();
 
-        let _ = self.snapshot_tx.send(RuntimeSnapshot {
-            running: state.running.len(),
-            retrying: state.retry_attempts.len(),
-            input_tokens: state.codex_totals.input_tokens,
-            output_tokens: state.codex_totals.output_tokens,
-            total_tokens: state.codex_totals.total_tokens,
-        });
+        self.publish_snapshot(&state);
 
         Ok(TickResult { state, commands })
     }
@@ -365,10 +441,16 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let mut state = state_guard.clone();
         let mut commands = Vec::new();
         let mut retry_schedule = None;
+        let next_retry_metadata = match worker_exit {
+            WorkerExit::Completed | WorkerExit::PermanentFailure => None,
+            WorkerExit::Continuation | WorkerExit::RetryableFailure => {
+                Some(build_retry_metadata(&state, &issue_id))
+            }
+        };
 
         match worker_exit {
             WorkerExit::Completed | WorkerExit::PermanentFailure => {
-                state = apply_event(state, Event::Release(issue_id), &mut commands)?;
+                state = apply_event(state, Event::Release(issue_id.clone()), &mut commands)?;
             }
             WorkerExit::Continuation | WorkerExit::RetryableFailure => {
                 let attempt = next_retry_attempt(&state, &issue_id);
@@ -398,14 +480,20 @@ impl<T: TrackerClient + 'static> Runtime<T> {
 
         validate_invariants(&state)?;
         *state_guard = state.clone();
+        drop(state_guard);
 
-        let _ = self.snapshot_tx.send(RuntimeSnapshot {
-            running: state.running.len(),
-            retrying: state.retry_attempts.len(),
-            input_tokens: state.codex_totals.input_tokens,
-            output_tokens: state.codex_totals.output_tokens,
-            total_tokens: state.codex_totals.total_tokens,
-        });
+        match next_retry_metadata {
+            Some(metadata) => {
+                let mut retry_metadata = lock_unpoisoned(&self.retry_metadata);
+                retry_metadata.insert(issue_id.clone(), metadata);
+            }
+            None => {
+                let mut retry_metadata = lock_unpoisoned(&self.retry_metadata);
+                retry_metadata.remove(&issue_id);
+            }
+        }
+
+        self.publish_snapshot(&state);
 
         Ok(WorkerExitResult {
             state,
@@ -422,13 +510,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         state = apply_event(state, event, &mut commands)?;
         *state_guard = state.clone();
 
-        let _ = self.snapshot_tx.send(RuntimeSnapshot {
-            running: state.running.len(),
-            retrying: state.retry_attempts.len(),
-            input_tokens: state.codex_totals.input_tokens,
-            output_tokens: state.codex_totals.output_tokens,
-            total_tokens: state.codex_totals.total_tokens,
-        });
+        self.publish_snapshot(&state);
 
         Ok(())
     }
@@ -447,8 +529,9 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         timestamp: Option<u64>,
         message: Option<String>,
         usage: Option<symphony_domain::Usage>,
+        rate_limits: Option<serde_json::Value>,
     ) -> Result<(), RuntimeError> {
-        let update_event = Event::UpdateAgent {
+        let update_event = Event::UpdateAgent(Box::new(AgentUpdate {
             issue_id,
             session_id,
             thread_id,
@@ -458,24 +541,39 @@ impl<T: TrackerClient + 'static> Runtime<T> {
             timestamp,
             message,
             usage,
-        };
+            rate_limits,
+        }));
+        let activity_timestamp = timestamp.unwrap_or_else(current_unix_timestamp_secs);
+        let mut state_guard = self.state.lock().await;
+        let mut state = state_guard.clone();
+        let mut commands = Vec::new();
 
-        self.update_agent(update_event).await
+        state = apply_event(state, update_event, &mut commands)?;
+        *state_guard = state.clone();
+        drop(state_guard);
+
+        self.record_protocol_metrics(&state, activity_timestamp);
+        self.publish_snapshot(&state);
+
+        Ok(())
     }
 
     pub async fn snapshot(&self) -> RuntimeSnapshot {
         let state = self.state.lock().await;
-        RuntimeSnapshot {
-            running: state.running.len(),
-            retrying: state.retry_attempts.len(),
-            input_tokens: state.codex_totals.input_tokens,
-            output_tokens: state.codex_totals.output_tokens,
-            total_tokens: state.codex_totals.total_tokens,
-        }
+        self.snapshot_from_state(&state)
     }
 
     pub async fn state(&self) -> OrchestratorState {
         self.state.lock().await.clone()
+    }
+
+    pub async fn state_snapshot(&self) -> StateSnapshot {
+        let state = self.state.lock().await.clone();
+        let retry_metadata = lock_unpoisoned(&self.retry_metadata).clone();
+        StateSnapshot {
+            runtime: self.snapshot_from_state(&state),
+            issues: build_issue_snapshots(&state, &retry_metadata),
+        }
     }
 
     /// Sets up an issue as claimed and running. For testing purposes.
@@ -483,6 +581,20 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let mut state = self.state.lock().await;
         state.claimed.insert(issue_id.clone());
         state.running.insert(issue_id, entry);
+    }
+
+    fn snapshot_from_state(&self, state: &OrchestratorState) -> RuntimeSnapshot {
+        let telemetry = lock_unpoisoned(&self.telemetry);
+        RuntimeSnapshot {
+            running: state.running.len(),
+            retrying: state.retry_attempts.len(),
+            input_tokens: state.codex_totals.input_tokens,
+            output_tokens: state.codex_totals.output_tokens,
+            total_tokens: state.codex_totals.total_tokens,
+            seconds_running: aggregate_running_seconds(state),
+            rate_limits: state.codex_rate_limits.clone(),
+            activity: runtime_activity_snapshot(&telemetry),
+        }
     }
 
     pub async fn run_poll_loop(
@@ -505,11 +617,13 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         );
         self.startup_terminal_workspace_cleanup(&initial_config)
             .await;
+        self.mark_next_poll_due(current_unix_timestamp_secs());
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     let new_config = config.read().await.clone();
+                    self.mark_poll_started(current_unix_timestamp_secs());
 
                     // Detect config reload by version change
                     if new_config.version != current_version {
@@ -527,11 +641,16 @@ impl<T: TrackerClient + 'static> Runtime<T> {
                         Ok(tick) => self.process_tick_commands(tick.commands, new_config.clone()).await,
                         Err(error) => tracing::error!("Tick failed: {:?}", error),
                     }
+                    self.mark_poll_completed(
+                        current_unix_timestamp_secs(),
+                        new_config.polling.interval_ms.max(100),
+                    );
                     interval = tokio::time::interval(Duration::from_millis(new_config.polling.interval_ms.max(100)));
                     interval.reset();
                 }
                 Some(_) = refresh_rx.recv() => {
                     let new_config = config.read().await.clone();
+                    self.mark_poll_started(current_unix_timestamp_secs());
 
                     // Trigger immediate tick with potential config reload
                     if new_config.version != current_version {
@@ -547,6 +666,10 @@ impl<T: TrackerClient + 'static> Runtime<T> {
                         Ok(tick) => self.process_tick_commands(tick.commands, new_config.clone()).await,
                         Err(error) => tracing::error!("Refresh tick failed: {:?}", error),
                     }
+                    self.mark_poll_completed(
+                        current_unix_timestamp_secs(),
+                        new_config.polling.interval_ms.max(100),
+                    );
                     interval = tokio::time::interval(Duration::from_millis(new_config.polling.interval_ms.max(100)));
                     interval.reset();
                 }
@@ -578,6 +701,8 @@ impl<T: TrackerClient + 'static> Runtime<T> {
                 Command::ReleaseClaim(issue_id) => {
                     self.cancel_retry_task(&issue_id);
                     self.abort_worker_task(&issue_id);
+                    let mut retry_metadata = lock_unpoisoned(&self.retry_metadata);
+                    retry_metadata.remove(&issue_id);
                     self.cleanup_terminal_workspace_if_pending(&issue_id, &config);
                 }
                 Command::TransitionRejected { issue_id, reason } => {
@@ -592,32 +717,48 @@ impl<T: TrackerClient + 'static> Runtime<T> {
             return;
         }
 
+        let worker_id = NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
         let runtime = Arc::clone(self);
         let issue_for_task = issue_id.clone();
-        let handle = tokio::spawn(async move {
+        let join = tokio::spawn(async move {
             runtime
-                .execute_worker(issue_for_task.clone(), attempt, config)
+                .execute_worker(issue_for_task.clone(), worker_id, attempt, config, stop_rx)
                 .await;
             let mut workers = lock_unpoisoned(&runtime.active_workers);
-            workers.remove(&issue_for_task);
+            if workers
+                .get(&issue_for_task)
+                .is_some_and(|handle| handle.worker_id == worker_id)
+            {
+                workers.remove(&issue_for_task);
+            }
         });
 
         let mut workers = lock_unpoisoned(&self.active_workers);
-        workers.insert(issue_id, handle);
+        workers.insert(
+            issue_id,
+            ActiveWorkerHandle {
+                worker_id,
+                join,
+                stop_tx,
+            },
+        );
     }
 
     fn has_active_worker(&self, issue_id: &IssueId) -> bool {
         let workers = lock_unpoisoned(&self.active_workers);
         workers
             .get(issue_id)
-            .is_some_and(|handle| !handle.is_finished())
+            .is_some_and(|handle| !handle.join.is_finished())
     }
 
     async fn execute_worker(
         self: &Arc<Self>,
         issue_id: IssueId,
+        worker_id: u64,
         attempt: u32,
         config: RuntimeConfig,
+        stop_rx: tokio::sync::watch::Receiver<bool>,
     ) {
         let issue = match self.fetch_issue(&issue_id).await {
             Ok(Some(issue)) => issue,
@@ -640,21 +781,57 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         };
 
         let hooks = workspace_hooks_from_config(&config);
-        self.record_running_identifier(&issue_id, &issue.identifier)
-            .await;
+        self.record_running_issue_metadata(&issue_id, &issue).await;
         let prompt_template = self.prompt_template.read().await.clone();
+        let active_states = tracker_states_from_names(&config.tracker.active_states);
+        let (protocol_update_tx, mut protocol_update_rx) =
+            tokio::sync::mpsc::unbounded_channel::<WorkerProtocolUpdate>();
+        let runtime_for_updates = Arc::clone(self);
+        let update_issue_id = issue_id.clone();
+        let protocol_update_task = tokio::spawn(async move {
+            while let Some(update) = protocol_update_rx.recv().await {
+                runtime_for_updates
+                    .report_activity(update_issue_id.clone())
+                    .await;
+                let _ = runtime_for_updates
+                    .handle_protocol_update(
+                        update_issue_id.clone(),
+                        update.session_id,
+                        update.thread_id,
+                        update.turn_id,
+                        update.pid,
+                        update.event,
+                        update.timestamp,
+                        update.message,
+                        update.usage,
+                        update.rate_limits,
+                    )
+                    .await;
+            }
+        });
+        let tracker_client: Arc<dyn TrackerClient> = self.tracker.clone();
         let worker_context = match WorkerContext::new(
             issue,
             attempt,
-            config.workspace.root.clone(),
-            hooks,
-            config.tracker.clone(),
-            config.codex.clone(),
-            prompt_template,
+            WorkerExecutionConfig {
+                root: config.workspace.root.clone(),
+                hooks,
+                tracker_config: config.tracker.clone(),
+                codex_config: config.codex.clone(),
+                prompt_template,
+            },
+            WorkerRuntimeHandles {
+                tracker_client,
+                active_states,
+                max_turns: config.agent.max_turns,
+                protocol_updates: Some(protocol_update_tx),
+                stop_rx,
+            },
         ) {
             Ok(context) => context,
             Err(error) => {
                 tracing::error!(issue_id = %issue_id.0, "invalid worker context: {error}");
+                protocol_update_task.abort();
                 let retry_policy = retry_policy_for_config(&config);
                 let _ = self
                     .handle_worker_exit(issue_id, WorkerExit::PermanentFailure, &retry_policy)
@@ -670,6 +847,20 @@ impl<T: TrackerClient + 'static> Runtime<T> {
                 WorkerOutcome::RetryableFailure
             }
         };
+        let _ = protocol_update_task.await;
+        {
+            let mut workers = lock_unpoisoned(&self.active_workers);
+            if workers
+                .get(&issue_id)
+                .is_some_and(|handle| handle.worker_id == worker_id)
+            {
+                workers.remove(&issue_id);
+            }
+        }
+
+        if matches!(worker_outcome, WorkerOutcome::Stopped) {
+            return;
+        }
 
         let worker_exit = map_worker_outcome(worker_outcome);
         let retry_policy = retry_policy_for_config(&config);
@@ -693,10 +884,14 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         Ok(candidates.into_iter().find(|issue| issue.id == *issue_id))
     }
 
-    async fn record_running_identifier(&self, issue_id: &IssueId, identifier: &str) {
+    async fn record_running_issue_metadata(&self, issue_id: &IssueId, issue: &TrackerIssue) {
         let mut state = self.state.lock().await;
         if let Some(entry) = state.running.get_mut(issue_id) {
-            entry.identifier = Some(identifier.to_owned());
+            entry.identifier = Some(issue.identifier.clone());
+            entry.tracker_state = Some(issue.state.as_str().to_owned());
+            if entry.started_at.is_none() {
+                entry.started_at = Some(current_unix_timestamp_secs());
+            }
         }
     }
 
@@ -790,6 +985,12 @@ impl<T: TrackerClient + 'static> Runtime<T> {
 
     fn schedule_retry_task(self: &Arc<Self>, schedule: RetrySchedule, config: RuntimeConfig) {
         self.cancel_retry_task(&schedule.issue_id);
+        {
+            let mut retry_metadata = lock_unpoisoned(&self.retry_metadata);
+            let metadata = retry_metadata.entry(schedule.issue_id.clone()).or_default();
+            metadata.due_at =
+                Some(current_unix_timestamp_secs().saturating_add(schedule.delay.as_secs()));
+        }
 
         let runtime = Arc::clone(self);
         let issue_id = schedule.issue_id.clone();
@@ -889,6 +1090,10 @@ impl<T: TrackerClient + 'static> Runtime<T> {
                 };
                 if let Some(entry) = state.running.get_mut(&issue_id) {
                     entry.identifier = Some(issue.identifier);
+                    entry.tracker_state = Some(issue.state.as_str().to_owned());
+                    if entry.started_at.is_none() {
+                        entry.started_at = Some(current_unix_timestamp_secs());
+                    }
                 }
             }
         }
@@ -896,13 +1101,12 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         *state_guard = state.clone();
         drop(state_guard);
 
-        let _ = self.snapshot_tx.send(RuntimeSnapshot {
-            running: state.running.len(),
-            retrying: state.retry_attempts.len(),
-            input_tokens: state.codex_totals.input_tokens,
-            output_tokens: state.codex_totals.output_tokens,
-            total_tokens: state.codex_totals.total_tokens,
-        });
+        {
+            let mut retry_metadata = lock_unpoisoned(&self.retry_metadata);
+            retry_metadata.remove(&issue_id);
+        }
+
+        self.publish_snapshot(&state);
 
         self.process_tick_commands(commands, config).await;
     }
@@ -940,13 +1144,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         *state_guard = state.clone();
         drop(state_guard);
 
-        let _ = self.snapshot_tx.send(RuntimeSnapshot {
-            running: state.running.len(),
-            retrying: state.retry_attempts.len(),
-            input_tokens: state.codex_totals.input_tokens,
-            output_tokens: state.codex_totals.output_tokens,
-            total_tokens: state.codex_totals.total_tokens,
-        });
+        self.publish_snapshot(&state);
 
         for command in commands {
             if let Command::ScheduleRetry {
@@ -971,15 +1169,15 @@ impl<T: TrackerClient + 'static> Runtime<T> {
 
     fn abort_worker_task(&self, issue_id: &IssueId) {
         let mut workers = lock_unpoisoned(&self.active_workers);
-        if let Some(handle) = workers.remove(issue_id) {
-            handle.abort();
+        if let Some(worker) = workers.remove(issue_id) {
+            request_worker_stop(worker);
         }
     }
 
     fn abort_background_tasks(&self) {
         let mut workers = lock_unpoisoned(&self.active_workers);
-        for (_, handle) in workers.drain() {
-            handle.abort();
+        for (_, worker) in workers.drain() {
+            request_worker_stop(worker);
         }
         drop(workers);
 
@@ -991,6 +1189,197 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let mut pending_cleanup = lock_unpoisoned(&self.pending_terminal_cleanup);
         pending_cleanup.clear();
     }
+}
+
+fn request_worker_stop(worker: ActiveWorkerHandle) {
+    let _ = worker.stop_tx.send(true);
+    tokio::spawn(async move {
+        let mut join = worker.join;
+        if tokio::time::timeout(Duration::from_secs(2), &mut join)
+            .await
+            .is_err()
+        {
+            join.abort();
+            let _ = join.await;
+        }
+    });
+}
+
+fn build_issue_snapshots(
+    state: &OrchestratorState,
+    retry_metadata: &HashMap<IssueId, RetryMetadata>,
+) -> Vec<IssueSnapshot> {
+    let mut issues = Vec::with_capacity(state.running.len() + state.retry_attempts.len());
+
+    for (issue_id, entry) in &state.running {
+        issues.push(IssueSnapshot {
+            id: issue_id.clone(),
+            identifier: entry
+                .identifier
+                .clone()
+                .unwrap_or_else(|| issue_id.0.clone()),
+            state: entry
+                .tracker_state
+                .clone()
+                .unwrap_or_else(|| "Running".to_owned()),
+            retry_attempts: 0,
+            workspace_path: None,
+            session_id: entry.session_id.clone(),
+            turn_count: entry.turn_count,
+            last_event: entry.last_codex_event.clone(),
+            last_message: entry.last_codex_message.clone(),
+            started_at: entry.started_at,
+            last_event_at: entry.last_codex_timestamp,
+            input_tokens: entry.usage.input_tokens,
+            output_tokens: entry.usage.output_tokens,
+            total_tokens: entry.usage.total_tokens,
+            retry_due_at: None,
+            retry_error: None,
+        });
+    }
+
+    for (issue_id, entry) in &state.retry_attempts {
+        let metadata = retry_metadata.get(issue_id);
+        issues.push(IssueSnapshot {
+            id: issue_id.clone(),
+            identifier: metadata
+                .and_then(|details| details.identifier.clone())
+                .unwrap_or_else(|| issue_id.0.clone()),
+            state: "Retrying".to_owned(),
+            retry_attempts: entry.attempt,
+            workspace_path: None,
+            session_id: None,
+            turn_count: 0,
+            last_event: None,
+            last_message: None,
+            started_at: None,
+            last_event_at: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            retry_due_at: metadata.and_then(|details| details.due_at),
+            retry_error: metadata.and_then(|details| details.error.clone()),
+        });
+    }
+
+    issues.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+    issues
+}
+
+fn build_retry_metadata(state: &OrchestratorState, issue_id: &IssueId) -> RetryMetadata {
+    let mut metadata = RetryMetadata::default();
+    if let Some(entry) = state.running.get(issue_id) {
+        metadata.identifier = entry.identifier.clone();
+        metadata.error = entry.last_codex_message.clone();
+    }
+    metadata
+}
+
+fn aggregate_running_seconds(state: &OrchestratorState) -> f64 {
+    let now = current_unix_timestamp_secs();
+    state
+        .running
+        .values()
+        .filter_map(|entry| entry.started_at)
+        .map(|started_at| now.saturating_sub(started_at) as f64)
+        .sum()
+}
+
+fn runtime_activity_snapshot(telemetry: &RuntimeTelemetry) -> RuntimeActivitySnapshot {
+    RuntimeActivitySnapshot {
+        poll_in_progress: telemetry.poll_in_progress,
+        last_poll_started_at: telemetry.last_poll_started_at,
+        last_poll_completed_at: telemetry.last_poll_completed_at,
+        next_poll_due_at: telemetry.next_poll_due_at,
+        last_runtime_activity_at: telemetry.last_runtime_activity_at,
+        throughput: throughput_snapshot(&telemetry.token_samples),
+    }
+}
+
+fn throughput_snapshot(samples: &VecDeque<TokenSample>) -> ThroughputSnapshot {
+    let Some(latest) = samples.back() else {
+        return ThroughputSnapshot {
+            window_seconds: THROUGHPUT_WINDOW_SECONDS as f64,
+            ..ThroughputSnapshot::default()
+        };
+    };
+    let cutoff = latest.at.saturating_sub(THROUGHPUT_WINDOW_SECONDS);
+    let baseline = samples
+        .iter()
+        .rev()
+        .find(|sample| sample.at <= cutoff)
+        .cloned()
+        .unwrap_or_else(|| samples.front().cloned().unwrap_or_else(|| latest.clone()));
+    let elapsed_seconds = latest.at.saturating_sub(baseline.at).max(1) as f64;
+    let delta_input = latest
+        .totals
+        .input_tokens
+        .saturating_sub(baseline.totals.input_tokens);
+    let delta_output = latest
+        .totals
+        .output_tokens
+        .saturating_sub(baseline.totals.output_tokens);
+    let delta_total = latest
+        .totals
+        .total_tokens
+        .saturating_sub(baseline.totals.total_tokens);
+
+    ThroughputSnapshot {
+        window_seconds: elapsed_seconds,
+        input_tokens_per_second: delta_input as f64 / elapsed_seconds,
+        output_tokens_per_second: delta_output as f64 / elapsed_seconds,
+        total_tokens_per_second: delta_total as f64 / elapsed_seconds,
+    }
+}
+
+fn record_token_sample(
+    samples: &mut VecDeque<TokenSample>,
+    timestamp_secs: u64,
+    totals: &CodexTotals,
+) {
+    let normalized_at = samples
+        .back()
+        .map_or(timestamp_secs, |sample| sample.at.max(timestamp_secs));
+    let next_sample = TokenSample {
+        at: normalized_at,
+        totals: totals.clone(),
+    };
+
+    if samples
+        .back()
+        .is_some_and(|sample| sample.totals == next_sample.totals)
+    {
+        return;
+    }
+
+    samples.push_back(next_sample);
+    trim_token_samples(samples);
+}
+
+fn trim_token_samples(samples: &mut VecDeque<TokenSample>) {
+    let Some(latest) = samples.back().cloned() else {
+        return;
+    };
+    let cutoff = latest.at.saturating_sub(THROUGHPUT_WINDOW_SECONDS);
+    while samples.len() > 2 && samples.get(1).is_some_and(|sample| sample.at < cutoff) {
+        samples.pop_front();
+    }
+}
+
+fn duration_to_rounded_up_seconds(duration_ms: u64) -> u64 {
+    let seconds = duration_ms / 1_000;
+    if duration_ms.is_multiple_of(1_000) {
+        seconds
+    } else {
+        seconds.saturating_add(1)
+    }
+}
+
+fn current_unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1005,15 +1394,18 @@ fn map_worker_outcome(outcome: WorkerOutcome) -> WorkerExit {
         WorkerOutcome::Continuation => WorkerExit::Continuation,
         WorkerOutcome::RetryableFailure => WorkerExit::RetryableFailure,
         WorkerOutcome::PermanentFailure => WorkerExit::PermanentFailure,
+        WorkerOutcome::Stopped => WorkerExit::Completed,
     }
 }
 
 fn retry_policy_for_config(config: &RuntimeConfig) -> RetryPolicy {
-    let poll_ms = config.polling.interval_ms.max(10);
+    let failure_base_ms = 10_000_u64;
     RetryPolicy {
-        continuation_delay: Duration::from_millis(poll_ms),
-        failure_base_delay: Duration::from_millis(poll_ms),
-        max_failure_backoff: Duration::from_millis(config.agent.max_retry_backoff_ms.max(poll_ms)),
+        continuation_delay: Duration::from_secs(1),
+        failure_base_delay: Duration::from_millis(failure_base_ms),
+        max_failure_backoff: Duration::from_millis(
+            config.agent.max_retry_backoff_ms.max(failure_base_ms),
+        ),
     }
 }
 
@@ -1247,6 +1639,10 @@ mod tests {
         launch_count: AtomicUsize,
     }
 
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct HangingChildWorkerLauncher;
+
     impl MockWorkerLauncher {
         fn with_outcomes(outcomes: Vec<WorkerOutcome>) -> Self {
             Self {
@@ -1266,6 +1662,36 @@ mod tests {
             self.launch_count.fetch_add(1, Ordering::Relaxed);
             let mut outcomes = self.outcomes.lock().await;
             Ok(outcomes.pop_front().unwrap_or(WorkerOutcome::Completed))
+        }
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl WorkerLauncher for HangingChildWorkerLauncher {
+        async fn launch(&self, ctx: WorkerContext) -> Result<WorkerOutcome, WorkerError> {
+            let mut child = tokio::process::Command::new("sh");
+            child.arg("-lc").arg("sleep 30");
+            child.kill_on_drop(true);
+            child.stdin(std::process::Stdio::null());
+            child.stdout(std::process::Stdio::null());
+            child.stderr(std::process::Stdio::null());
+
+            let child = child
+                .spawn()
+                .map_err(|error| WorkerError::LaunchFailed(error.to_string()))?;
+
+            if let Some(protocol_updates) = &ctx.protocol_updates {
+                let _ = protocol_updates.send(WorkerProtocolUpdate {
+                    pid: child.id(),
+                    event: Some("worker/started".to_owned()),
+                    timestamp: Some(current_unix_timestamp_secs()),
+                    ..WorkerProtocolUpdate::default()
+                });
+            }
+
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(child);
+            Ok(WorkerOutcome::Completed)
         }
     }
 
@@ -1299,6 +1725,70 @@ mod tests {
             created_at: None,
             updated_at: None,
         }
+    }
+
+    #[cfg(unix)]
+    fn sleeping_app_server_command(thread_id: &str, turn_id: &str) -> String {
+        let thread_start = serde_json::json!({
+            "result": {
+                "thread": {
+                    "id": thread_id,
+                }
+            }
+        });
+        let turn_start = serde_json::json!({
+            "result": {
+                "turn": {
+                    "id": turn_id,
+                }
+            }
+        });
+
+        format!(
+            "printf '%s\\n' '{thread_start}'; sleep 0.05; printf '%s\\n' '{turn_start}'; sleep 30 # app-server"
+        )
+    }
+
+    #[cfg(unix)]
+    fn process_is_running(pid: u32) -> bool {
+        std::process::Command::new("sh")
+            .arg("-lc")
+            .arg(format!("kill -0 {pid} >/dev/null 2>&1"))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_worker_pid<T: TrackerClient + 'static>(
+        runtime: &Runtime<T>,
+        issue_id: &IssueId,
+    ) -> u32 {
+        for _ in 0..80 {
+            let state = runtime.state().await;
+            if let Some(pid) = state
+                .running
+                .get(issue_id)
+                .and_then(|entry| entry.codex_app_server_pid)
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        panic!("worker pid for {} was not published", issue_id.0);
+    }
+
+    #[cfg(unix)]
+    async fn assert_process_exits(pid: u32, reason: &str) {
+        for _ in 0..120 {
+            if !process_is_running(pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        panic!("child process {pid} still appears to be running after {reason}");
     }
 
     #[tokio::test]
@@ -1477,9 +1967,13 @@ mod tests {
             state
                 .running
                 .insert(issue_id.clone(), symphony_domain::RunningEntry::default());
-            state
-                .retry_attempts
-                .insert(issue_id.clone(), symphony_domain::RetryEntry { attempt: 2 });
+            state.retry_attempts.insert(
+                issue_id.clone(),
+                symphony_domain::RetryEntry {
+                    attempt: 2,
+                    ..symphony_domain::RetryEntry::default()
+                },
+            );
         }
 
         let result = runtime
@@ -1783,7 +2277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retryable_failure_schedules_retry_and_relaunches_worker() {
+    async fn retryable_failure_relaunches_worker_once_retry_is_ready() {
         let issue_id = issue("SYM-601");
         let tracker = Arc::new(MutableTracker::default());
         tracker.set_candidates(vec![tracker_issue("SYM-601")]).await;
@@ -1809,9 +2303,27 @@ mod tests {
             .process_tick_commands(tick.commands, config.clone())
             .await;
 
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
 
         let state = runtime.state().await;
+        assert!(state.claimed.contains(&issue_id));
+        assert!(!state.running.contains_key(&issue_id));
+        assert_eq!(
+            state
+                .retry_attempts
+                .get(&issue_id)
+                .map(|entry| entry.attempt),
+            Some(1)
+        );
+
+        runtime.cancel_retry_task(&issue_id);
+        runtime
+            .handle_ready_retry(issue_id.clone(), 1, config.clone())
+            .await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let state = runtime.state().await;
+
         assert!(!state.claimed.contains(&issue_id));
         assert!(!state.running.contains_key(&issue_id));
         assert!(!state.retry_attempts.contains_key(&issue_id));
@@ -1828,9 +2340,13 @@ mod tests {
         {
             let mut state = runtime.state.lock().await;
             state.claimed.insert(issue_id.clone());
-            state
-                .retry_attempts
-                .insert(issue_id.clone(), symphony_domain::RetryEntry { attempt: 1 });
+            state.retry_attempts.insert(
+                issue_id.clone(),
+                symphony_domain::RetryEntry {
+                    attempt: 1,
+                    ..symphony_domain::RetryEntry::default()
+                },
+            );
         }
 
         runtime
@@ -1850,9 +2366,13 @@ mod tests {
         {
             let mut state = runtime.state.lock().await;
             state.claimed.insert(issue_id.clone());
-            state
-                .retry_attempts
-                .insert(issue_id.clone(), symphony_domain::RetryEntry { attempt: 1 });
+            state.retry_attempts.insert(
+                issue_id.clone(),
+                symphony_domain::RetryEntry {
+                    attempt: 1,
+                    ..symphony_domain::RetryEntry::default()
+                },
+            );
         }
 
         let mut config = RuntimeConfig::default();
@@ -1892,9 +2412,13 @@ mod tests {
         {
             let mut state = runtime.state.lock().await;
             state.claimed.insert(issue_id.clone());
-            state
-                .retry_attempts
-                .insert(issue_id.clone(), symphony_domain::RetryEntry { attempt: 1 });
+            state.retry_attempts.insert(
+                issue_id.clone(),
+                symphony_domain::RetryEntry {
+                    attempt: 1,
+                    ..symphony_domain::RetryEntry::default()
+                },
+            );
             state.claimed.insert(issue("SYM-703"));
             state
                 .running
@@ -1939,13 +2463,112 @@ mod tests {
             .await;
 
         let config = RuntimeConfig::default();
-        runtime.execute_worker(issue_id.clone(), 1, config).await;
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        runtime
+            .execute_worker(issue_id.clone(), 0, 1, config, stop_rx)
+            .await;
 
         let state = runtime.state().await;
         assert!(!state.claimed.contains(&issue_id));
         assert!(!state.running.contains_key(&issue_id));
         assert!(!state.retry_attempts.contains_key(&issue_id));
         assert_eq!(launcher.launch_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn release_claim_stop_path_kills_active_app_server_child_process() {
+        let issue_id = issue("SYM-705");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![tracker_issue(&issue_id.0)])
+            .await;
+        let runtime = Arc::new(Runtime::new(Arc::clone(&tracker)));
+
+        let root = unique_temp_root("release-claim-stop");
+        let mut config = RuntimeConfig::default();
+        config.workspace.root = root.clone();
+        config.codex.command =
+            sleeping_app_server_command("thread-release-stop", "turn-release-stop");
+        config.codex.turn_timeout_ms = 5_000;
+        config.codex.read_timeout_ms = 500;
+
+        let dispatch_tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("dispatch tick should succeed");
+        assert_eq!(
+            dispatch_tick.commands,
+            vec![Command::Dispatch(issue_id.clone())]
+        );
+        runtime
+            .process_tick_commands(dispatch_tick.commands, config.clone())
+            .await;
+
+        let pid = wait_for_worker_pid(runtime.as_ref(), &issue_id).await;
+        assert!(process_is_running(pid));
+
+        tracker.set_candidates(Vec::new()).await;
+        let release_tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("release tick should succeed");
+        assert_eq!(
+            release_tick.commands,
+            vec![Command::ReleaseClaim(issue_id.clone())]
+        );
+        runtime
+            .process_tick_commands(release_tick.commands, config)
+            .await;
+
+        assert_process_exits(pid, "release claim stop path").await;
+
+        let state = runtime.state().await;
+        assert!(!state.claimed.contains(&issue_id));
+        assert!(!state.running.contains_key(&issue_id));
+        assert!(!runtime.has_active_worker(&issue_id));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn abort_background_tasks_kills_child_process_when_worker_ignores_stop() {
+        let issue_id = issue("SYM-706");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![tracker_issue(&issue_id.0)])
+            .await;
+        let runtime = Arc::new(Runtime::with_worker_launcher(
+            Arc::clone(&tracker),
+            Arc::new(HangingChildWorkerLauncher),
+        ));
+
+        let dispatch_tick = runtime
+            .run_tick(&RuntimeConfig::default())
+            .await
+            .expect("dispatch tick should succeed");
+        assert_eq!(
+            dispatch_tick.commands,
+            vec![Command::Dispatch(issue_id.clone())]
+        );
+        runtime
+            .process_tick_commands(dispatch_tick.commands, RuntimeConfig::default())
+            .await;
+
+        let pid = wait_for_worker_pid(runtime.as_ref(), &issue_id).await;
+        assert!(process_is_running(pid));
+
+        runtime.abort_background_tasks();
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            process_is_running(pid),
+            "child exited before the abort fallback path could run"
+        );
+
+        assert_process_exits(pid, "runtime abort fallback").await;
+        assert!(!runtime.has_active_worker(&issue_id));
     }
 
     #[tokio::test]
@@ -2054,6 +2677,11 @@ mod tests {
                 Some(1700000000),
                 Some("Processing issue".to_owned()),
                 Some(usage.clone()),
+                Some(serde_json::json!({
+                    "primary": {
+                        "remaining": 11
+                    }
+                })),
             )
             .await
             .expect("protocol update should succeed");
@@ -2079,11 +2707,110 @@ mod tests {
         assert_eq!(state.codex_totals.input_tokens, 100);
         assert_eq!(state.codex_totals.output_tokens, 50);
         assert_eq!(state.codex_totals.total_tokens, 150);
+        assert_eq!(
+            state.codex_rate_limits,
+            Some(serde_json::json!({
+                "primary": {
+                    "remaining": 11
+                }
+            }))
+        );
 
         let snapshot = runtime.snapshot().await;
         assert_eq!(snapshot.input_tokens, 100);
         assert_eq!(snapshot.output_tokens, 50);
         assert_eq!(snapshot.total_tokens, 150);
+        assert_eq!(snapshot.activity.last_runtime_activity_at, Some(1700000000));
+        assert_eq!(snapshot.activity.throughput.window_seconds, 1.0);
+        assert_eq!(snapshot.activity.throughput.total_tokens_per_second, 0.0);
+    }
+
+    #[tokio::test]
+    async fn handle_protocol_update_tracks_rolling_throughput_from_absolute_totals() {
+        let issue_id = issue("SYM-502");
+        let tracker = Arc::new(MutableTracker::default());
+        let runtime = Runtime::new(Arc::clone(&tracker));
+
+        {
+            let mut state = runtime.state.lock().await;
+            state.claimed.insert(issue_id.clone());
+            state
+                .running
+                .insert(issue_id.clone(), symphony_domain::RunningEntry::default());
+        }
+
+        runtime
+            .handle_protocol_update(
+                issue_id.clone(),
+                Some("session-1".to_owned()),
+                Some("thread-1".to_owned()),
+                Some("turn-1".to_owned()),
+                None,
+                Some("turn.start".to_owned()),
+                Some(1_700_000_000),
+                None,
+                Some(symphony_domain::Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    total_tokens: 15,
+                }),
+                None,
+            )
+            .await
+            .expect("first protocol update should succeed");
+
+        runtime
+            .handle_protocol_update(
+                issue_id.clone(),
+                Some("session-1".to_owned()),
+                Some("thread-1".to_owned()),
+                Some("turn-2".to_owned()),
+                None,
+                Some("turn.completed".to_owned()),
+                Some(1_700_000_005),
+                None,
+                Some(symphony_domain::Usage {
+                    input_tokens: 30,
+                    output_tokens: 20,
+                    total_tokens: 50,
+                }),
+                None,
+            )
+            .await
+            .expect("second protocol update should succeed");
+
+        let snapshot = runtime.snapshot().await;
+        assert_eq!(
+            snapshot.activity.last_runtime_activity_at,
+            Some(1_700_000_005)
+        );
+        assert_eq!(snapshot.activity.throughput.window_seconds, 5.0);
+        assert_eq!(snapshot.activity.throughput.input_tokens_per_second, 4.0);
+        assert_eq!(snapshot.activity.throughput.output_tokens_per_second, 3.0);
+        assert_eq!(snapshot.activity.throughput.total_tokens_per_second, 7.0);
+    }
+
+    #[test]
+    fn poll_activity_snapshot_tracks_progress_and_next_due_time() {
+        let runtime = Runtime::new(Arc::new(MutableTracker::default()));
+        let state = OrchestratorState::default();
+
+        runtime.mark_next_poll_due(1_700_000_000);
+        runtime.mark_poll_started(1_700_000_001);
+        runtime.mark_poll_completed(1_700_000_006, 30_000);
+
+        let snapshot = runtime.snapshot_from_state(&state);
+        assert!(!snapshot.activity.poll_in_progress);
+        assert_eq!(snapshot.activity.last_poll_started_at, Some(1_700_000_001));
+        assert_eq!(
+            snapshot.activity.last_poll_completed_at,
+            Some(1_700_000_006)
+        );
+        assert_eq!(snapshot.activity.next_poll_due_at, Some(1_700_000_036));
+        assert_eq!(
+            snapshot.activity.last_runtime_activity_at,
+            Some(1_700_000_006)
+        );
     }
 
     #[tokio::test]
@@ -2097,6 +2824,7 @@ mod tests {
             .handle_protocol_update(
                 issue_id.clone(),
                 Some("session-123".to_owned()),
+                None,
                 None,
                 None,
                 None,

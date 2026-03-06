@@ -55,7 +55,6 @@ pub fn startup_config_from_cli(cli: CliArgs, cwd: &Path) -> RuntimeStartupConfig
 }
 
 pub fn validate_startup_config(config: &RuntimeStartupConfig) -> Result<(), StartupConfigError> {
-    validate_config_path(&config.config_path)?;
     validate_workflow_path(&config.workflow_path, config.workflow_path_explicit)?;
     Ok(())
 }
@@ -83,22 +82,6 @@ where
     let startup = build_startup_config_from_args(args, cwd)?;
     validate_startup_config(&startup)?;
     Ok(startup)
-}
-
-fn validate_config_path(config_path: &Path) -> Result<(), StartupConfigError> {
-    if !config_path.exists() {
-        return Err(StartupConfigError::MissingConfigFile {
-            path: config_path.to_path_buf(),
-        });
-    }
-
-    if !config_path.is_file() {
-        return Err(StartupConfigError::ConfigPathNotFile {
-            path: config_path.to_path_buf(),
-        });
-    }
-
-    Ok(())
 }
 
 fn validate_workflow_path(workflow_path: &Path, explicit: bool) -> Result<(), StartupConfigError> {
@@ -203,13 +186,12 @@ mod tests {
     }
 
     #[test]
-    fn validated_builder_accepts_existing_config_and_workflow() {
-        let cwd = temp_dir("validated_builder_accepts_existing_config_and_workflow");
-        write_file(cwd.join("symphony.runtime.json"));
+    fn validated_builder_accepts_existing_workflow_without_config_file() {
+        let cwd = temp_dir("validated_builder_accepts_existing_workflow_without_config_file");
         write_file(cwd.join("WORKFLOW.md"));
 
         let startup = build_validated_startup_config_from_args(["symphony"], &cwd)
-            .expect("existing config and workflow should validate");
+            .expect("existing workflow should validate without a config file");
 
         assert_eq!(startup.config_path, cwd.join("symphony.runtime.json"));
         assert_eq!(startup.workflow_path, cwd.join("WORKFLOW.md"));
@@ -218,7 +200,6 @@ mod tests {
     #[test]
     fn validated_builder_rejects_missing_default_workflow() {
         let cwd = temp_dir("validated_builder_rejects_missing_default_workflow");
-        write_file(cwd.join("symphony.runtime.json"));
 
         let error = build_validated_startup_config_from_args(["symphony"], &cwd)
             .expect_err("missing default workflow should fail validation");
@@ -235,7 +216,6 @@ mod tests {
     #[test]
     fn validated_builder_rejects_missing_explicit_workflow() {
         let cwd = temp_dir("validated_builder_rejects_missing_explicit_workflow");
-        write_file(cwd.join("symphony.runtime.json"));
 
         let error =
             build_validated_startup_config_from_args(["symphony", "relative/WORKFLOW.md"], &cwd)
@@ -251,17 +231,17 @@ mod tests {
     }
 
     #[test]
-    fn validated_builder_rejects_missing_config() {
-        let cwd = temp_dir("validated_builder_rejects_missing_config");
+    fn validated_builder_accepts_missing_explicit_config_path() {
+        let cwd = temp_dir("validated_builder_accepts_missing_explicit_config_path");
         write_file(cwd.join("WORKFLOW.md"));
 
-        let error = build_validated_startup_config_from_args(["symphony"], &cwd)
-            .expect_err("missing config should fail validation");
+        let startup = build_validated_startup_config_from_args(
+            ["symphony", "--config", "config/runtime.json"],
+            &cwd,
+        )
+        .expect("missing config path should not fail startup validation");
 
-        assert!(matches!(
-            error,
-            CliStartupError::StartupConfig(StartupConfigError::MissingConfigFile { .. })
-        ));
+        assert_eq!(startup.config_path, cwd.join("config/runtime.json"));
     }
 
     fn temp_dir(name: &str) -> PathBuf {

@@ -1,10 +1,10 @@
 # Rust Reimplementation Master Plan
 
-## Status Snapshot (2026-03-05)
-- Completion: 91%
-- Done: parallel implementation batch merged across domain/runtime, config/workflow/workspace, tracker/linear, protocol/http/cli, docs, CI/proofs, test scaffolds, concrete Verus proof module rewrites, proof CI installation/guard wiring, explicit suite-gate CI jobs, completed conformance matrix coverage, runtime startup terminal cleanup, graceful shutdown hardening, CLI `--port`/`--logs-root` wiring, typed protocol policy mapping for approval/input-required/timeout plus normalized startup/runtime error categories, protocol startup payload builders with optional tool advertisement support, nested protocol payload extractors for session IDs/usage/tool-call metadata, live runtime handshake integration, buffered handshake stream preservation, unsupported dynamic tool-call fallback responses that keep sessions alive, concrete `linear_graphql` tool execution path, serialization-safe domain rejection/violation diagnostic payloads, richer tracker normalization parity, blocker-aware dispatch gating, retry-ready tracker revalidation, stale-dispatch release handling, live tool-path integration coverage, startup cleanup fault-drill coverage, green local Verus quick/full proof profiles on the installed toolchain, bounded Linear transport retry coverage for transient status/timeout failures, and cumulative runtime token totals flowing through observability and HTTP state views.
-- In Progress: operational hardening and remaining proof depth.
-- Remaining: full production-grade completion gates from conformance through rollout.
+## Status Snapshot (2026-03-06)
+- Completion: 66%
+- Done: reducer/domain core, typed config and workflow parsing, baseline tracker and protocol adapters, baseline runtime scheduling, runtime-fed observability including activity/timing summary surfaces, Elixir-shaped HTTP/CLI surfaces for steady-state and degraded snapshot paths, and local Verus proof profiles are implemented and green.
+- In Progress: app-server session lifecycle parity, recovery semantics, host lifecycle hardening, required conformance coverage, and production-readiness validation.
+- Remaining: full SPEC-accurate recovery, remaining validation gaps, and rollout gates.
 
 ## Scope
 Deliver a production-grade Rust runtime for Symphony from first principles, with strict correctness guarantees, comprehensive tests, and formal verification.
@@ -13,6 +13,8 @@ Deliver a production-grade Rust runtime for Symphony from first principles, with
 - Docs program: [docs/TASKS.md](docs/TASKS.md)
 - Test program: [tests/TASKS.md](tests/TASKS.md)
 - Proof program: [proofs/TASKS.md](proofs/TASKS.md)
+- Current status assessment: [docs/port-status.md](docs/port-status.md)
+- Latest tests and proofs summary: [TESTS_AND_PROOFS_SUMMARY.md](TESTS_AND_PROOFS_SUMMARY.md)
 
 ## Global Exit Criteria
 - [ ] All crate-level TASKS epics complete.
@@ -47,19 +49,19 @@ Deliver a production-grade Rust runtime for Symphony from first principles, with
 
 ### Task C.3: Tracker and protocol adapters
 - [x] Subtask C.3.1: Complete initial tracker contract in [crates/symphony-tracker/TASKS.md](crates/symphony-tracker/TASKS.md).
-- [x] Subtask C.3.2: Complete initial Linear adapter in [crates/symphony-tracker-linear/TASKS.md](crates/symphony-tracker-linear/TASKS.md).
-- [x] Subtask C.3.3: Complete initial app-server protocol in [crates/symphony-agent-protocol/TASKS.md](crates/symphony-agent-protocol/TASKS.md).
+- [ ] Subtask C.3.2: Complete Linear adapter parity in [crates/symphony-tracker-linear/TASKS.md](crates/symphony-tracker-linear/TASKS.md).
+- [ ] Subtask C.3.3: Complete app-server protocol parity in [crates/symphony-agent-protocol/TASKS.md](crates/symphony-agent-protocol/TASKS.md).
 
 ### Task C.4: Operator and host surfaces
-- [x] Subtask C.4.1: Complete initial workspace lifecycle in [crates/symphony-workspace/TASKS.md](crates/symphony-workspace/TASKS.md).
-- [x] Subtask C.4.2: Complete initial observability model in [crates/symphony-observability/TASKS.md](crates/symphony-observability/TASKS.md).
-- [x] Subtask C.4.3: Complete initial HTTP surfaces in [crates/symphony-http/TASKS.md](crates/symphony-http/TASKS.md).
-- [x] Subtask C.4.4: Complete initial CLI entrypoint in [crates/symphony-cli/TASKS.md](crates/symphony-cli/TASKS.md).
-- [x] Subtask C.4.5: Complete initial reusable test fixtures in [crates/symphony-testkit/TASKS.md](crates/symphony-testkit/TASKS.md).
+- [ ] Subtask C.4.1: Complete workspace lifecycle parity in [crates/symphony-workspace/TASKS.md](crates/symphony-workspace/TASKS.md).
+- [ ] Subtask C.4.2: Complete observability model parity in [crates/symphony-observability/TASKS.md](crates/symphony-observability/TASKS.md).
+- [ ] Subtask C.4.3: Complete HTTP observability surfaces in [crates/symphony-http/TASKS.md](crates/symphony-http/TASKS.md).
+- [ ] Subtask C.4.4: Complete CLI and host lifecycle in [crates/symphony-cli/TASKS.md](crates/symphony-cli/TASKS.md).
+- [ ] Subtask C.4.5: Complete reusable test fixtures in [crates/symphony-testkit/TASKS.md](crates/symphony-testkit/TASKS.md).
 
 ## Epic D: Verification and Validation Program
 ### Task D.1: Spec conformance
-- [x] Subtask D.1.1: Build matrix tests from SPEC sections 17/18 in [tests/conformance/TASKS.md](tests/conformance/TASKS.md).
+- [ ] Subtask D.1.1: Build matrix tests from required SPEC sections 17 and 18 in [tests/conformance/TASKS.md](tests/conformance/TASKS.md).
 
 ### Task D.2: Concurrency safety
 - [ ] Subtask D.2.1: Implement race/interleaving harness in [tests/interleavings/TASKS.md](tests/interleavings/TASKS.md).
@@ -85,10 +87,11 @@ Deliver a production-grade Rust runtime for Symphony from first principles, with
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Program |
 | --- | --- | --- | --- |
-| Sec. 4, Sec. 7, Sec. 8, Sec. 16 core orchestration model | Implemented across domain/runtime with retry-ready revalidation and stale-dispatch release handling | Close the last restart/recovery edge branches and add algorithm-to-code traceability assertions | `C.1`, `D.1`, `D.2` |
-| Sec. 5 and Sec. 6 workflow and config contract | Implemented in workflow/config crates with port override precedence coverage | Close live-run reload drift and exhaustive override matrix coverage under fault scenarios | `C.2`, `D.1`, `F.2` |
-| Sec. 9 and Sec. 15 workspace and safety constraints | Implemented with path containment, hooks, and startup cleanup fault-drill coverage | Add real-integration filesystem anomaly drills beyond current hook-failure coverage | `C.4`, `D.3` |
-| Sec. 10, Sec. 11, Sec. 12 adapter and prompt pipeline | Mostly implemented across protocol/tracker/runtime with typed policy mapping, startup payload builders, handshake wiring, nested extractor compatibility, unsupported tool-call fallback responses, concrete `linear_graphql` handler support, current tracker normalization parity, live mocked tool-path coverage, and bounded Linear transport retries | Expand session/version compatibility coverage and remaining live API drills | `C.3`, `D.1` |
-| Sec. 13, Sec. 14 observability and recovery | Partially implemented with optional HTTP host wiring and cumulative token totals in state views | Finish dashboard parity, failure playbooks, and restart recovery contract docs/tests | `C.4`, `F.2` |
-| Sec. 17 and Sec. 18 validation and DoD gates | Conformance matrix, full workspace tests, and local Verus quick/full profiles are green | Expand interleaving/soak depth to target profiles and make branch-protection requirements explicit | `D.2`, `D.3`, `F.1` |
+| Sec. 4, Sec. 7, Sec. 8, Sec. 16 core orchestration model | Mostly implemented across domain/runtime | Reuse one app-server session across `max_turns`, drive reconciliation from real protocol activity, explicitly stop child processes on restart/shutdown, and restore the remaining spec backoff semantics | `C.1`, `D.1`, `D.2` |
+| Sec. 5 and Sec. 6 workflow and config contract | Implemented for baseline parsing and override precedence | Close retained-invalid reload handling, remove non-spec startup gates, and add dispatch-time config revalidation parity | `C.2`, `C.4`, `D.1` |
+| Sec. 9 and Sec. 15 workspace and safety constraints | Mostly implemented | Add transient workspace cleanup on reuse, richer hook failure taxonomy, and rollback coverage for cleanup failures | `C.4`, `D.1`, `D.3` |
+| Sec. 10, Sec. 11, Sec. 12 adapter and prompt pipeline | Mostly implemented across tracker/protocol/runtime | Expand app-server session/version compatibility, supported-tool hooks, and remaining live Linear API drills | `C.3`, `D.1` |
+| Sec. 13 and Sec. 14 observability and recovery | Mostly implemented for steady-state and degraded snapshot paths | Finish dashboard depth and restart/recovery parity | `C.4`, `D.1`, `F.2` |
+| Sec. 17 and Sec. 18 validation and DoD gates | Partially implemented | Finish required conformance for the remaining Sec. 17.6 payload-completeness cases, Sec. 17.7 refresh/logging lifecycle cases, and Sec. 18.1, then add real integration plus soak evidence | `D.1`, `D.2`, `D.3`, `F.1` |
+| Formal verification and operational rollout | Useful progress, but separate from core conformance percentage | Complete invariant-to-proof traceability, CI policy, runbooks, and cutover criteria without counting them as Sec. 17/18 completion | `E.1`, `F.2` |
 <!-- SPEC_GAP_MAP_END -->
