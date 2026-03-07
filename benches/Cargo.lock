@@ -2002,6 +2002,7 @@ dependencies = [
  "serde_json",
  "symphony-domain",
  "symphony-runtime",
+ "symphony-workspace",
  "tokio",
 ]
 

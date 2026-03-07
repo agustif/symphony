@@ -1,5 +1,4 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use std::collections::HashSet;
 use symphony_domain::{IssueId, OrchestratorState};
 
 fn benchmark_state_clone(c: &mut Criterion) {

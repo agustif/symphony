@@ -35,6 +35,7 @@ help with the setup:
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
 For a fair implementation comparison, see [docs/elixir-vs-rust.md](docs/elixir-vs-rust.md).
+For the latest measured benchmark write-up, see [docs/elixir-vs-rust-benchmark-2026-03-07.md](docs/elixir-vs-rust-benchmark-2026-03-07.md).
 
 ---
 

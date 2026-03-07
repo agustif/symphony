@@ -1,193 +1,214 @@
-#!/bin/bash
-# Symphony Performance Comparison Script
-# Compares Elixir vs Rust implementations fairly
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESULTS_DIR="${RESULTS_DIR:-/tmp/symphony-benchmark-results-$(date +%Y%m%d-%H%M%S)}"
+FAKE_LINEAR_PORT="${FAKE_LINEAR_PORT:-4010}"
+FAKE_LINEAR_URL="http://127.0.0.1:${FAKE_LINEAR_PORT}/graphql"
+WORKFLOW_PATH="${ROOT_DIR}/benchmarks/workflows/common-workflow.md"
+RUST_PORT="${RUST_PORT:-4301}"
+ELIXIR_PORT="${ELIXIR_PORT:-4302}"
+BENCH_ISSUE_COUNT="${BENCH_ISSUE_COUNT:-200}"
+STARTUP_SETTLE_SECONDS="${STARTUP_SETTLE_SECONDS:-2}"
+CURRENT_IMPL_PID=""
+FAKE_LINEAR_PID=""
 
-echo "==================================="
-echo "SYMPHONY PERFORMANCE COMPARISON"
-echo "Elixir vs Rust Implementation"
-echo "==================================="
-echo ""
+mkdir -p "${RESULTS_DIR}"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+cleanup() {
+  if [[ -n "${CURRENT_IMPL_PID}" ]] && kill -0 "${CURRENT_IMPL_PID}" 2>/dev/null; then
+    kill "${CURRENT_IMPL_PID}" 2>/dev/null || true
+    wait "${CURRENT_IMPL_PID}" 2>/dev/null || true
+  fi
 
-# Check prerequisites
-check_prerequisites() {
-    echo -e "${BLUE}Checking prerequisites...${NC}"
-    
-    if ! command -v cargo &> /dev/null; then
-        echo -e "${RED}ERROR: Rust/Cargo not found${NC}"
-        exit 1
-    fi
-    
-    if ! command -v mix &> /dev/null; then
-        echo -e "${YELLOW}WARNING: Elixir/Mix not found - Elixir tests will be skipped${NC}"
-        SKIP_ELIXIR=1
-    else
-        SKIP_ELIXIR=0
-    fi
-    
-    echo -e "${GREEN}✓ Prerequisites OK${NC}"
-    echo ""
+  if [[ -n "${FAKE_LINEAR_PID}" ]] && kill -0 "${FAKE_LINEAR_PID}" 2>/dev/null; then
+    kill "${FAKE_LINEAR_PID}" 2>/dev/null || true
+    wait "${FAKE_LINEAR_PID}" 2>/dev/null || true
+  fi
 }
 
-# Run Rust benchmarks
-run_rust_benchmarks() {
-    echo -e "${BLUE}=== RUST BENCHMARKS ===${NC}"
-    echo "Running comprehensive Rust benchmark suite..."
-    echo ""
-    
-    cd rust
-    
-    # Unit test count
-    echo "Test Count:"
-    cargo test --workspace 2>&1 | grep "test result" | awk '{sum+=$5} END {print "  Total tests:", sum}'
-    
-    echo ""
-    echo "Running Criterion.rs benchmarks..."
-    cd ../benches
-    cargo bench 2>&1 | tee /tmp/rust_benchmarks.txt
-    
-    echo ""
-    echo "Summary:"
-    grep "time:" /tmp/rust_benchmarks.txt | head -20
-    
-    cd ..
+trap cleanup EXIT INT TERM
+
+require_tool() {
+  local tool="$1"
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    echo "missing required tool: ${tool}" >&2
+    exit 1
+  fi
 }
 
-# Run Elixir benchmarks
-run_elixir_benchmarks() {
-    if [ "$SKIP_ELIXIR" -eq 1 ]; then
-        echo -e "${YELLOW}Skipping Elixir benchmarks (Elixir not installed)${NC}"
-        return
-    fi
-    
-    echo -e "${BLUE}=== ELIXIR BENCHMARKS ===${NC}"
-    echo "Running Elixir benchmark suite..."
-    echo ""
-    
-    cd elixir
-    
-    # Unit test count
-    echo "Test Count:"
-    mix test 2>&1 | grep -E "(passed|failed)" | tail -1
-    
-    echo ""
-    echo "Note: Elixir benchmarks require Benchee setup"
-    echo "To add benchmarks, install: {:benchee, \"~> 1.0\", only: :dev}"
-    
-    cd ..
+print_header() {
+  local label="$1"
+  printf '\n== %s ==\n' "${label}"
 }
 
-# Run load tests
-run_load_tests() {
-    echo ""
-    echo -e "${BLUE}=== LOAD TESTS ===${NC}"
-    
-    if ! command -v k6 &> /dev/null; then
-        echo -e "${YELLOW}WARNING: k6 not installed - load tests will be skipped${NC}"
-        echo "Install with: brew install k6 (macOS) or see https://k6.io/docs/get-started/installation/"
-        return
-    fi
-    
-    echo "Starting Symphony for load testing..."
-    
-    # Build and start Rust version
-    cd rust
-    cargo build --release --package symphony-cli
-    ./target/release/symphony-cli ../WORKFLOW.md --port 8080 &
-    RUST_PID=$!
-    
-    sleep 3
-    
-    echo ""
-    echo "Running k6 load test..."
-    cd ../load-tests
-    k6 run --summary-trend-stats="avg,min,med,max,p(95),p(99)" load-test.js 2>&1 | tee /tmp/load_test_results.txt
-    
-    # Cleanup
-    kill $RUST_PID 2>/dev/null || true
-    
-    echo ""
-    echo "Load Test Summary:"
-    grep -A 5 "http_req_duration" /tmp/load_test_results.txt || echo "See /tmp/load_test_results.txt for details"
+start_fake_linear_server() {
+  print_header "Starting fake Linear server"
+  python3 "${ROOT_DIR}/benchmarks/fake_linear_server.py" \
+    --host 127.0.0.1 \
+    --port "${FAKE_LINEAR_PORT}" \
+    --issue-count "${BENCH_ISSUE_COUNT}" \
+    >"${RESULTS_DIR}/fake-linear.log" 2>&1 &
+  FAKE_LINEAR_PID=$!
+
+  python3 "${ROOT_DIR}/benchmarks/startup_probe.py" \
+    --url "http://127.0.0.1:${FAKE_LINEAR_PORT}/health" \
+    --timeout-seconds 10
 }
 
-# Memory usage comparison
-memory_comparison() {
-    echo ""
-    echo -e "${BLUE}=== MEMORY USAGE ===${NC}"
-    echo "Binary sizes:"
-    
-    # Rust binary size
-    if [ -f "rust/target/release/symphony-cli" ]; then
-        RUST_SIZE=$(du -h rust/target/release/symphony-cli | cut -f1)
-        echo "  Rust binary: $RUST_SIZE"
-    fi
-    
-    # Elixir release size (if available)
-    if [ -d "elixir/_build" ]; then
-        ELIXIR_SIZE=$(du -sh elixir/_build 2>/dev/null | cut -f1)
-        echo "  Elixir build: $ELIXIR_SIZE"
-    fi
+capture_environment() {
+  print_header "Capturing benchmark environment"
+  {
+    echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "uname=$(uname -a)"
+    echo "cargo=$(cargo --version)"
+    echo "rustc=$(cargo rustc -- --version 2>/dev/null | tail -n 1 || true)"
+    echo "hyperfine=$(hyperfine --version)"
+    echo "k6=$(k6 version | head -n 1)"
+    echo "python3=$(python3 --version 2>&1)"
+    echo "mise=$(mise --version)"
+    echo "bench_issue_count=${BENCH_ISSUE_COUNT}"
+    echo "workflow_path=${WORKFLOW_PATH}"
+  } >"${RESULTS_DIR}/environment.txt"
 }
 
-# Generate report
-generate_report() {
-    echo ""
-    echo "==================================="
-    echo "COMPARISON REPORT"
-    echo "==================================="
-    echo ""
-    
-    echo "RUST RESULTS:"
-    echo "  - Test Suite: $(grep -c "test result" /tmp/rust_benchmarks.txt 2>/dev/null || echo "N/A") test files"
-    
-    if [ -f "/tmp/rust_benchmarks.txt" ]; then
-        echo "  - Reducer (1000 events): $(grep -A1 "reducer_claim/1000" /tmp/rust_benchmarks.txt | grep "time:" | awk '{print $2}')"
-        echo "  - State Clone (100 issues): $(grep -A1 "state_clone_100_issues" /tmp/rust_benchmarks.txt | grep "time:" | awk '{print $2}')"
-        echo "  - State Serialize: $(grep -A1 "state_serialize_100_issues" /tmp/rust_benchmarks.txt | grep "time:" | awk '{print $2}')"
-        echo "  - Workspace Sanitize: $(grep -A1 "sanitize_workspace_key" /tmp/rust_benchmarks.txt | grep "time:" | awk '{print $2}')"
-    fi
-    
-    echo ""
-    echo "ELIXIR RESULTS:"
-    if [ "$SKIP_ELIXIR" -eq 1 ]; then
-        echo "  - Skipped (Elixir not installed)"
-    else
-        echo "  - See elixir/test results above"
-    fi
-    
-    echo ""
-    echo "LOAD TEST:"
-    if [ -f "/tmp/load_test_results.txt" ]; then
-        grep "http_req_duration" /tmp/load_test_results.txt || echo "  - See /tmp/load_test_results.txt"
-    else
-        echo "  - Skipped (k6 not installed)"
-    fi
-    
-    echo ""
-    echo "==================================="
-    echo "Detailed results saved to:"
-    echo "  - /tmp/rust_benchmarks.txt"
-    echo "  - /tmp/load_test_results.txt"
-    echo "==================================="
+build_targets() {
+  print_header "Building benchmark targets"
+  cargo build --release --manifest-path "${ROOT_DIR}/rust/Cargo.toml" --package symphony-cli
+  (
+    cd "${ROOT_DIR}/elixir"
+    mise exec -- mix setup
+    mise exec -- make build
+  )
 }
 
-# Main execution
+run_rust_criterion() {
+  print_header "Running Rust Criterion benchmarks"
+  cargo bench --manifest-path "${ROOT_DIR}/benches/Cargo.toml" -- --noplot \
+    | tee "${RESULTS_DIR}/rust-criterion.txt"
+}
+
+run_startup_hyperfine() {
+  print_header "Running startup hyperfine comparison"
+  hyperfine \
+    --warmup 1 \
+    --runs 5 \
+    --export-json "${RESULTS_DIR}/startup-hyperfine.json" \
+    "${ROOT_DIR}/benchmarks/bin/run_rust_startup_probe.sh" \
+    "${ROOT_DIR}/benchmarks/bin/run_elixir_startup_probe.sh"
+}
+
+start_impl() {
+  local impl="$1"
+  local port="$2"
+  local log_path="${RESULTS_DIR}/${impl}-server.log"
+
+  if [[ "${impl}" == "rust" ]]; then
+    "${ROOT_DIR}/rust/target/release/symphony-cli" \
+      "${WORKFLOW_PATH}" \
+      --bind 127.0.0.1 \
+      --port "${port}" \
+      >"${log_path}" 2>&1 &
+  else
+    (
+      cd "${ROOT_DIR}/elixir"
+      mise exec -- ./bin/symphony \
+        --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+        "${WORKFLOW_PATH}" \
+        --port "${port}"
+    ) >"${log_path}" 2>&1 &
+  fi
+
+  CURRENT_IMPL_PID=$!
+  python3 "${ROOT_DIR}/benchmarks/startup_probe.py" \
+    --url "http://127.0.0.1:${port}/api/v1/state" \
+    --timeout-seconds 30
+  sleep "${STARTUP_SETTLE_SECONDS}"
+
+  local snapshot_path="${RESULTS_DIR}/${impl}-state-snapshot.json"
+  if [[ ! -f "${snapshot_path}" ]]; then
+    curl -fsS "http://127.0.0.1:${port}/api/v1/state" >"${snapshot_path}"
+  fi
+}
+
+stop_impl() {
+  if [[ -n "${CURRENT_IMPL_PID}" ]] && kill -0 "${CURRENT_IMPL_PID}" 2>/dev/null; then
+    kill "${CURRENT_IMPL_PID}" 2>/dev/null || true
+    wait "${CURRENT_IMPL_PID}" 2>/dev/null || true
+  fi
+  CURRENT_IMPL_PID=""
+}
+
+run_k6_profile() {
+  local impl="$1"
+  local port="$2"
+  local profile="$3"
+  local script="$4"
+  shift 4
+
+  print_header "Running ${profile} profile for ${impl}"
+  start_impl "${impl}" "${port}"
+
+  (
+    cd "${ROOT_DIR}/load-tests"
+    env \
+      BASE_URL="http://127.0.0.1:${port}" \
+      "$@" \
+      k6 run \
+        --summary-trend-stats="avg,min,med,max,p(90),p(95),p(99)" \
+        --summary-export "${RESULTS_DIR}/${impl}-${profile}.json" \
+        "${script}"
+  ) | tee "${RESULTS_DIR}/${impl}-${profile}.txt"
+
+  stop_impl
+}
+
+run_http_profiles() {
+  run_k6_profile rust "${RUST_PORT}" load load-test.js \
+    RATE=80 DURATION=20s PREALLOCATED_VUS=40 MAX_VUS=200
+  run_k6_profile elixir "${ELIXIR_PORT}" load load-test.js \
+    RATE=80 DURATION=20s PREALLOCATED_VUS=40 MAX_VUS=200
+
+  run_k6_profile rust "${RUST_PORT}" stress stress-test.js \
+    START_RATE=40 STAGE1_RATE=100 STAGE2_RATE=180 STAGE3_RATE=260 \
+    STAGE1_DURATION=15s STAGE2_DURATION=15s STAGE3_DURATION=15s RAMP_DOWN_DURATION=10s \
+    PREALLOCATED_VUS=80 MAX_VUS=400
+  run_k6_profile elixir "${ELIXIR_PORT}" stress stress-test.js \
+    START_RATE=40 STAGE1_RATE=100 STAGE2_RATE=180 STAGE3_RATE=260 \
+    STAGE1_DURATION=15s STAGE2_DURATION=15s STAGE3_DURATION=15s RAMP_DOWN_DURATION=10s \
+    PREALLOCATED_VUS=80 MAX_VUS=400
+
+  run_k6_profile rust "${RUST_PORT}" soak soak-test.js \
+    RATE=40 DURATION=45s PREALLOCATED_VUS=40 MAX_VUS=120
+  run_k6_profile elixir "${ELIXIR_PORT}" soak soak-test.js \
+    RATE=40 DURATION=45s PREALLOCATED_VUS=40 MAX_VUS=120
+
+  run_k6_profile rust "${RUST_PORT}" spike spike-test.js \
+    BASE_RATE=20 SPIKE_RATE=220 RECOVERY_RATE=20 \
+    BASE_DURATION=10s SPIKE_DURATION=10s RECOVERY_DURATION=10s \
+    PREALLOCATED_VUS=80 MAX_VUS=320
+  run_k6_profile elixir "${ELIXIR_PORT}" spike spike-test.js \
+    BASE_RATE=20 SPIKE_RATE=220 RECOVERY_RATE=20 \
+    BASE_DURATION=10s SPIKE_DURATION=10s RECOVERY_DURATION=10s \
+    PREALLOCATED_VUS=80 MAX_VUS=320
+}
+
 main() {
-    check_prerequisites
-    run_rust_benchmarks
-    run_elixir_benchmarks
-    memory_comparison
-    run_load_tests
-    generate_report
+  require_tool cargo
+  require_tool curl
+  require_tool hyperfine
+  require_tool k6
+  require_tool mise
+  require_tool python3
+
+  printf 'Benchmark results will be written to %s\n' "${RESULTS_DIR}"
+  capture_environment
+  build_targets
+  start_fake_linear_server
+  run_rust_criterion
+  run_startup_hyperfine
+  run_http_profiles
+  printf '\nCompleted benchmark suite. Raw results: %s\n' "${RESULTS_DIR}"
 }
 
 main "$@"

@@ -15,6 +15,9 @@ path = "../rust/crates/symphony-domain"
 [dependencies.symphony-runtime]
 path = "../rust/crates/symphony-runtime"
 
+[dependencies.symphony-workspace]
+path = "../rust/crates/symphony-workspace"
+
 [[bench]]
 name = "reducer"
 path = "benches/reducer.rs"

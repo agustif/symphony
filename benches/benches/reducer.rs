@@ -19,7 +19,7 @@ fn benchmark_reducer_claim(c: &mut Criterion) {
             b.iter(|| {
                 let mut state = OrchestratorState::default();
                 for event in &events {
-                    let (new_state, _) = reduce(black_box(state.clone()), black_box(event.clone()));
+                    let (new_state, _) = reduce(black_box(state), black_box(event.clone()));
                     state = new_state;
                 }
                 state
