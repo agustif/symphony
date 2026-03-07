@@ -39,6 +39,18 @@ pub fn ensure_within_root(root: &Path, candidate: &Path) -> Result<PathBuf, Work
     }
 }
 
+/// Lookup table for hex encoding (uppercase).
+const HEX_TABLE: &[u8; 16] = b"0123456789ABCDEF";
+
+/// Encode a byte as two uppercase hex characters without allocation.
+#[inline]
+fn byte_to_hex(byte: u8) -> [char; 2] {
+    [
+        HEX_TABLE[(byte >> 4) as usize] as char,
+        HEX_TABLE[(byte & 0x0F) as usize] as char,
+    ]
+}
+
 pub fn sanitize_workspace_key(issue_identifier: &str) -> String {
     let mut sanitized = String::with_capacity(issue_identifier.len().saturating_mul(4));
 
@@ -50,7 +62,9 @@ pub fn sanitize_workspace_key(issue_identifier: &str) -> String {
             b'_' => sanitized.push_str("__"),
             _ => {
                 sanitized.push('_');
-                sanitized.push_str(&format!("{byte:02X}"));
+                let hex = byte_to_hex(byte);
+                sanitized.push(hex[0]);
+                sanitized.push(hex[1]);
                 sanitized.push('_');
             }
         }

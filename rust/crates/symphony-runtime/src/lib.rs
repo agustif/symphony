@@ -94,8 +94,18 @@ impl RetryPolicy {
         }
     }
 
+    /// Calculate exponential backoff delay for failure retries.
+    ///
+    /// Uses capped exponential growth: delay = base * 2^(attempt-1), capped at max_failure_backoff.
+    ///
+    /// # Overflow Safety
+    /// The shift amount is capped at 127 (via `.min(127)`) to prevent overflow in `1_u128 << shift`.
+    /// This allows up to 128 bits of shift, which is the maximum for u128. For any attempt >= 128,
+    /// the multiplier becomes 2^127, which when multiplied by any reasonable base delay will hit
+    /// the max_failure_backoff cap immediately.
     fn failure_backoff(&self, attempt: u32) -> Duration {
         let normalized_attempt = attempt.max(1);
+        // Cap shift at 127 to prevent overflow: 1_u128 << 127 is the largest safe shift.
         let shift = normalized_attempt.saturating_sub(1).min(127);
         let multiplier = 1_u128 << shift;
         let base_ms = self.failure_base_delay.as_millis();

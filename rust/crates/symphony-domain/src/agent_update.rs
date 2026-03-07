@@ -6,14 +6,20 @@ pub(crate) fn apply_agent_update(
     state: &mut OrchestratorState,
     update: AgentUpdate,
 ) -> Result<(), TransitionRejection> {
-    if !state.running.contains_key(&update.issue_id) {
+    // First check if the issue is in the claimed set (invariant: running implies claimed)
+    if !state.claimed.contains(&update.issue_id) {
         return Err(TransitionRejection::MissingClaim);
+    }
+
+    // Then check if the issue is actually running
+    if !state.running.contains_key(&update.issue_id) {
+        return Err(TransitionRejection::RunningWithoutClaim);
     }
 
     let issue_id = update.issue_id.clone();
 
     let Some(entry) = state.running.get_mut(&issue_id) else {
-        return Err(TransitionRejection::MissingClaim);
+        return Err(TransitionRejection::RunningWithoutClaim);
     };
 
     apply_update_to_running_entry(entry, &update, &mut state.codex_totals);

@@ -320,12 +320,19 @@ fn validate_update_agent_contract(
     issue_id: &IssueId,
 ) -> Result<(), TraceValidationError> {
     if !previous_state.running.contains_key(issue_id) {
+        // UpdateAgent requires the issue to be running. If not claimed at all, it's MissingClaim.
+        // If claimed but not running (e.g., in retry queue), it's RunningWithoutClaim.
+        let expected_rejection = if previous_state.claimed.contains(issue_id) {
+            TransitionRejection::RunningWithoutClaim
+        } else {
+            TransitionRejection::MissingClaim
+        };
         return expect_rejection(
             step_index,
             previous_state,
             step,
             issue_id,
-            TransitionRejection::MissingClaim,
+            expected_rejection,
         );
     }
 

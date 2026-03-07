@@ -71,6 +71,10 @@ pub struct OrchestratorState {
     pub claimed: HashSet<IssueId>,
     pub running: HashMap<IssueId, RunningEntry>,
     pub retry_attempts: HashMap<IssueId, RetryEntry>,
+    /// Set of issue IDs that have completed processing (terminal state reached).
+    /// Populated when an issue transitions to a terminal tracker state.
+    /// Used for bookkeeping and observability only; not considered during dispatch eligibility.
+    pub completed: HashSet<IssueId>,
     pub codex_totals: CodexTotals,
     pub codex_rate_limits: Option<serde_json::Value>,
 }
@@ -124,6 +128,8 @@ pub enum TransitionRejection {
     MissingClaim,
     #[error("issue is already running")]
     AlreadyRunning,
+    #[error("issue is running without being claimed (invariant violation)")]
+    RunningWithoutClaim,
     #[error("invalid retry attempt")]
     InvalidRetryAttempt,
     #[error("retry attempt regression")]
@@ -144,6 +150,7 @@ impl TransitionRejection {
             Self::AlreadyClaimed => "already_claimed",
             Self::MissingClaim => "missing_claim",
             Self::AlreadyRunning => "already_running",
+            Self::RunningWithoutClaim => "running_without_claim",
             Self::InvalidRetryAttempt => "invalid_retry_attempt",
             Self::RetryAttemptRegression => "retry_attempt_regression",
         }
