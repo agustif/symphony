@@ -34,6 +34,8 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+For a fair implementation comparison, see [docs/elixir-vs-rust.md](docs/elixir-vs-rust.md).
+
 ---
 
 ## License

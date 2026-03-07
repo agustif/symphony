@@ -1,0 +1,1 @@
+{"rustc":7468874786222975348,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[857979250431893282,"build_script_build",false,4664711850772987098]],"local":[{"RerunIfChanged":{"output":"release/build/typenum-5fcc95fe3955d8c2/output","paths":["tests"]}}],"rustflags":["-C","link-arg=-fuse-ld=/usr/bin/ld"],"config":0,"compile_kind":0}

@@ -1,5 +1,4 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use std::path::Path;
 
 fn benchmark_sanitize_key(c: &mut Criterion) {
     let inputs = vec![
