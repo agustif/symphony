@@ -1,0 +1,25 @@
+apiVersion: v2
+name: symphony
+description: A Helm chart for Symphony - Autonomous agent orchestration service
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - symphony
+  - orchestration
+  - agents
+  - automation
+home: https://github.com/agustif/symphony
+sources:
+  - https://github.com/agustif/symphony
+maintainers:
+  - name: Symphony Team
+    email: maintainers@symphony.dev
+annotations:
+  category: Automation
+  licenses: MIT
+dependencies:
+  - name: postgresql
+    version: 16.x.x
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled

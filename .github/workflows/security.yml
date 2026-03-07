@@ -1,0 +1,185 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - 'Cargo.lock'
+      - 'Dockerfile*'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - 'Cargo.lock'
+      - 'Dockerfile*'
+  schedule:
+    - cron: '0 6 * * 1' # Weekly on Monday
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  cargo-audit:
+    name: Cargo Audit
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run cargo-audit
+        uses: rustsec/audit-check@v1.4.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: rust
+
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Check licenses and advisories
+        working-directory: rust
+        run: |
+          cat > deny.toml << 'EOF'
+          [graph]
+          targets = [
+            { triple = "x86_64-unknown-linux-gnu" },
+            { triple = "aarch64-unknown-linux-gnu" },
+            { triple = "x86_64-apple-darwin" },
+            { triple = "aarch64-apple-darwin" },
+          ]
+
+          [advisories]
+          version = 2
+          yanked = "deny"
+
+          [licenses]
+          version = 2
+          allow = [
+            "MIT",
+            "Apache-2.0",
+            "Apache-2.0 WITH LLVM-exception",
+            "BSD-2-Clause",
+            "BSD-3-Clause",
+            "ISC",
+            "Unicode-DFS-2016",
+            "MPL-2.0",
+          ]
+
+          [bans]
+          multiple-versions = "warn"
+          wildcards = "allow"
+          highlight = "all"
+
+          [sources]
+          unknown-registry = "deny"
+          unknown-git = "deny"
+          allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+          EOF
+          cargo deny check
+
+  trivy-fs:
+    name: Trivy FS Scan
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run Trivy vulnerability scanner (FS)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          skip-dirs: 'target,node_modules'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-fs-results.sarif'
+          category: 'trivy-fs'
+
+  trivy-image:
+    name: Trivy Image Scan
+    runs-on: ubuntu-24.04
+    needs: build-image
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build image
+        run: |
+          docker build -f Dockerfile.rust -t symphony-rust:scan .
+
+      - name: Run Trivy vulnerability scanner (Image)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'symphony-rust:scan'
+          format: 'sarif'
+          output: 'trivy-image-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-image-results.sarif'
+          category: 'trivy-image'
+
+  build-image:
+    name: Build Image for Scan
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: |
+          docker build -f Dockerfile.rust -t symphony-rust:scan .
+
+  codeql:
+    name: CodeQL Analysis
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: rust
+          queries: security-extended,security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+        with:
+          working-directory: rust
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:rust"

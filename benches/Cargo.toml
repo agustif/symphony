@@ -1,0 +1,30 @@
+[package]
+name = "symphony-benchmarks"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+[dependencies.symphony-domain]
+path = "../rust/crates/symphony-domain"
+
+[dependencies.symphony-runtime]
+path = "../rust/crates/symphony-runtime"
+
+[[bench]]
+name = "reducer"
+path = "benches/reducer.rs"
+harness = false
+
+[[bench]]
+name = "state_machine"
+path = "benches/state_machine.rs"
+harness = false
+
+[[bench]]
+name = "workspace"
+path = "benches/workspace.rs"
+harness = false
