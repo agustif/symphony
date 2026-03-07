@@ -20,7 +20,8 @@ use symphony_domain::{IssueId, Usage};
 use symphony_tracker::{TrackerClient, TrackerIssue, TrackerState};
 use symphony_workspace::{
     HookExecutor, HookRequest, HookResult, PreparedWorkspace, WorkspaceError, WorkspaceHooks,
-    prepare_workspace_with_hooks, run_after_run_hook, run_before_run_hook, workspace_path,
+    prepare_workspace_with_hooks, run_after_run_hook, run_before_run_hook, validate_worker_cwd,
+    workspace_path,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch};
@@ -189,6 +190,14 @@ impl WorkerLauncher for ShellWorkerLauncher {
             &hook_executor,
         )?;
         run_before_run_hook(&workspace, &ctx.hooks, &hook_executor)?;
+
+        // Verify workspace safety invariants before EVERY agent launch (SPEC Section 9.5)
+        // This ensures the workspace path is within the root and workspace is not the root itself
+        if let Err(error) = validate_worker_cwd(&ctx.root, &workspace.path, &workspace.path) {
+            return Err(WorkerError::LaunchFailed(format!(
+                "Workspace safety invariant violated before agent launch: {error}"
+            )));
+        }
 
         let launch_result = async {
             let prompt = render_prompt(&ctx)?;

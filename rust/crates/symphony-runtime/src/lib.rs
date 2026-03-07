@@ -514,6 +514,16 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let running_attempt = self.take_running_attempt(&issue_id);
         let mut state_guard = self.state.lock().await;
         let mut state = state_guard.clone();
+
+        // Accumulate runtime for completed sessions (SPEC Section 13.5)
+        if let Some(entry) = state.running.get(&issue_id) {
+            if let Some(started_at) = entry.started_at {
+                let session_runtime =
+                    current_unix_timestamp_secs().saturating_sub(started_at) as f64;
+                state.codex_totals.completed_seconds_running += session_runtime;
+            }
+        }
+
         let mut commands = Vec::new();
         let mut retry_schedule = None;
         let mut next_retry_metadata = match worker_exit {
@@ -1405,12 +1415,15 @@ fn build_retry_metadata(state: &OrchestratorState, issue_id: &IssueId) -> RetryM
 
 fn aggregate_running_seconds(state: &OrchestratorState) -> f64 {
     let now = current_unix_timestamp_secs();
-    state
+    let active_seconds: f64 = state
         .running
         .values()
         .filter_map(|entry| entry.started_at)
         .map(|started_at| now.saturating_sub(started_at) as f64)
-        .sum()
+        .sum();
+
+    // Add cumulative runtime from completed sessions (SPEC Section 13.5)
+    active_seconds + state.codex_totals.completed_seconds_running
 }
 
 fn runtime_activity_snapshot(telemetry: &RuntimeTelemetry) -> RuntimeActivitySnapshot {

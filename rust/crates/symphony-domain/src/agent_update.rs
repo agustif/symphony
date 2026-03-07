@@ -38,6 +38,10 @@ fn apply_update_to_running_entry(
 ) {
     if session_identity_changed(entry, update) {
         entry.usage = Usage::default();
+        // Reset last_reported baselines to avoid negative deltas on new session
+        entry.last_reported_input_tokens = 0;
+        entry.last_reported_output_tokens = 0;
+        entry.last_reported_total_tokens = 0;
     }
 
     if let Some(session_id) = &update.session_id {
@@ -75,9 +79,32 @@ fn apply_update_to_running_entry(
     }
 
     if let Some(next_usage) = &update.usage {
-        let delta = usage_delta(&entry.usage, next_usage);
+        // Calculate delta based on last_reported to avoid double-counting.
+        // This handles the case where the same absolute values are reported multiple times.
+        let delta = Usage {
+            input_tokens: next_usage
+                .input_tokens
+                .saturating_sub(entry.last_reported_input_tokens),
+            output_tokens: next_usage
+                .output_tokens
+                .saturating_sub(entry.last_reported_output_tokens),
+            total_tokens: next_usage
+                .total_tokens
+                .saturating_sub(entry.last_reported_total_tokens),
+        };
+
+        // Update last_reported baseline to current values
+        entry.last_reported_input_tokens = next_usage.input_tokens;
+        entry.last_reported_output_tokens = next_usage.output_tokens;
+        entry.last_reported_total_tokens = next_usage.total_tokens;
+
+        // Update current usage snapshot
         entry.usage = next_usage.clone();
-        accumulate_usage_totals(totals, &delta);
+
+        // Only accumulate positive deltas (ignore duplicate reports)
+        if delta.input_tokens > 0 || delta.output_tokens > 0 || delta.total_tokens > 0 {
+            accumulate_usage_totals(totals, &delta);
+        }
     }
 }
 

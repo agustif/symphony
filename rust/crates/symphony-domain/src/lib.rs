@@ -46,15 +46,25 @@ pub struct RunningEntry {
     pub last_codex_timestamp: Option<u64>,
     pub last_codex_message: Option<String>,
     pub usage: Usage,
+    /// Last reported token counts to avoid double-counting across updates.
+    /// These track the baseline values from the previous update.
+    pub last_reported_input_tokens: u64,
+    pub last_reported_output_tokens: u64,
+    pub last_reported_total_tokens: u64,
 }
 
 /// Workspace-wide aggregate Codex counters derived from absolute worker usage.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CodexTotals {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
+    /// Cumulative runtime in seconds from completed sessions.
+    /// Accumulated when a session ends (normal exit or cancellation/termination).
+    pub completed_seconds_running: f64,
 }
+
+impl Eq for CodexTotals {}
 
 /// Pending retry metadata for an issue that remains claimed but is not running.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
