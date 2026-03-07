@@ -1,4 +1,4 @@
-{{- if and .Values.monitoring.enabled .Values.monitoring.serviceMonitor.enabled }}
+{{- if and .Values.monitoring.enabled .Values.monitoring.serviceMonitor.enabled .Values.monitoring.serviceMonitor.port .Values.monitoring.serviceMonitor.path }}
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -13,8 +13,8 @@ spec:
     matchLabels:
       {{- include "symphony.selectorLabels" . | nindent 6 }}
   endpoints:
-    - port: http
+    - port: {{ .Values.monitoring.serviceMonitor.port }}
       interval: {{ .Values.monitoring.serviceMonitor.interval }}
       scrapeTimeout: {{ .Values.monitoring.serviceMonitor.scrapeTimeout }}
-      path: /api/v1/state
+      path: {{ .Values.monitoring.serviceMonitor.path }}
 {{- end }}

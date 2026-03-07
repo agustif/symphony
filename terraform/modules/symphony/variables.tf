@@ -22,6 +22,12 @@ variable "image_tag" {
   default     = "latest"
 }
 
+variable "service_port" {
+  description = "Port exposed by the Symphony service and HTTP listener"
+  type        = number
+  default     = 8080
+}
+
 variable "replica_count" {
   description = "Number of replicas"
   type        = number

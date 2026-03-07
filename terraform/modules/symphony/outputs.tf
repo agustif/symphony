@@ -10,17 +10,17 @@ output "namespace" {
 
 output "service_name" {
   description = "Name of the Kubernetes service"
-  value       = "${var.name}"
+  value       = local.release_fullname
 }
 
 output "service_port" {
   description = "Port of the Kubernetes service"
-  value       = 8080
+  value       = var.service_port
 }
 
 output "endpoint" {
   description = "Internal endpoint URL"
-  value       = "http://${var.name}.${var.namespace}.svc.cluster.local:8080"
+  value       = "http://${local.release_fullname}.${var.namespace}.svc.cluster.local:${var.service_port}"
 }
 
 output "ingress_host" {
@@ -30,7 +30,7 @@ output "ingress_host" {
 
 output "persistence_claim_name" {
   description = "Name of the PVC if persistence is enabled"
-  value       = var.persistence_enabled ? "${var.name}-workspaces" : null
+  value       = var.persistence_enabled ? "${local.release_fullname}-workspaces" : null
 }
 
 output "secret_name" {

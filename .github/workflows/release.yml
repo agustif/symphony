@@ -22,9 +22,55 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  prepare-release:
+    name: Prepare Release Metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      version_number: ${{ steps.resolve.outputs.version_number }}
+      major_minor: ${{ steps.resolve.outputs.major_minor }}
+      prerelease: ${{ steps.resolve.outputs.prerelease }}
+      publish_latest: ${{ steps.resolve.outputs.publish_latest }}
+    steps:
+      - name: Resolve release version
+        id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="$INPUT_VERSION"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+
+          if ! [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release version must match v<major>.<minor>.<patch>[-prerelease]. Got: $version" >&2
+            exit 1
+          fi
+
+          version_number="${version#v}"
+          major_minor="$(printf '%s' "$version_number" | awk -F. '{print $1 "." $2}')"
+
+          if [[ "$version_number" == *-* ]]; then
+            prerelease=true
+            publish_latest=false
+          else
+            prerelease=false
+            publish_latest=true
+          fi
+
+          {
+            echo "version=$version"
+            echo "version_number=$version_number"
+            echo "major_minor=$major_minor"
+            echo "prerelease=$prerelease"
+            echo "publish_latest=$publish_latest"
+          } >> "$GITHUB_OUTPUT"
+
   # Build binaries for multiple platforms
   build-binaries:
     name: Build ${{ matrix.target }}
+    needs: prepare-release
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -59,15 +105,22 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.os == 'ubuntu-24.04' && (matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'x86_64-unknown-linux-musl')
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          packages=()
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            packages+=(gcc-aarch64-linux-gnu)
+          fi
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            packages+=(musl-tools)
+          fi
+          sudo apt-get install -y "${packages[@]}"
 
       - name: Restore cache
         uses: Swatinem/rust-cache@v2
@@ -79,8 +132,12 @@ jobs:
         working-directory: rust
         run: |
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            export CC=aarch64-linux-gnu-gcc
-            export CXX=aarch64-linux-gnu-g++
+            export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            export CC_x86_64_unknown_linux_musl=musl-gcc
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
           fi
           cargo build --release --target ${{ matrix.target }} --package symphony-cli --locked
         shell: bash
@@ -97,11 +154,12 @@ jobs:
       - name: Package binary (Windows)
         if: matrix.os == 'windows-2022'
         working-directory: rust
+        shell: pwsh
         run: |
-          mkdir dist
-          copy target\${{ matrix.target }}\release\${{ matrix.binary }} dist\${{ matrix.name }}
-          cd dist
-          7z a ${{ matrix.name }}.zip ${{ matrix.name }}
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.name }}"
+          Set-Location dist
+          7z a "${{ matrix.name }}.zip" "${{ matrix.name }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -114,6 +172,7 @@ jobs:
   # Build multi-arch Docker images
   build-docker:
     name: Build Docker Images
+    needs: prepare-release
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -138,10 +197,11 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=,suffix=,format=short
+            type=raw,value=${{ needs.prepare-release.outputs.version }}
+            type=raw,value=${{ needs.prepare-release.outputs.version_number }}
+            type=raw,value=${{ needs.prepare-release.outputs.major_minor }},enable=${{ needs.prepare-release.outputs.publish_latest == 'true' }}
+            type=raw,value=latest,enable=${{ needs.prepare-release.outputs.publish_latest == 'true' }}
+            type=sha,prefix=sha-,format=short
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -162,18 +222,48 @@ jobs:
     name: Sign and Attest
     needs: [build-binaries, build-docker]
     runs-on: ubuntu-24.04
+    outputs:
+      linux_sha: ${{ steps.collect.outputs.linux_sha }}
+      darwin_amd64_sha: ${{ steps.collect.outputs.darwin_amd64_sha }}
+      darwin_arm64_sha: ${{ steps.collect.outputs.darwin_arm64_sha }}
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v7
         with:
           path: artifacts
           pattern: binaries-*
+          merge-multiple: true
 
       - name: Generate checksums
         run: |
           cd artifacts
           find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec sha256sum {} \; > checksums.txt
           cat checksums.txt
+
+      - name: Collect release checksums
+        id: collect
+        working-directory: artifacts
+        run: |
+          checksum_for() {
+            awk -v name="$1" 'index($2, name) { print $1; exit }' checksums.txt
+          }
+
+          linux_sha="$(checksum_for "symphony-linux-amd64-musl.tar.gz")"
+          darwin_amd64_sha="$(checksum_for "symphony-darwin-amd64.tar.gz")"
+          darwin_arm64_sha="$(checksum_for "symphony-darwin-arm64.tar.gz")"
+
+          for value_name in linux_sha darwin_amd64_sha darwin_arm64_sha; do
+            if [ -z "${!value_name}" ]; then
+              echo "Missing checksum for ${value_name}" >&2
+              exit 1
+            fi
+          done
+
+          {
+            echo "linux_sha=$linux_sha"
+            echo "darwin_amd64_sha=$darwin_amd64_sha"
+            echo "darwin_arm64_sha=$darwin_arm64_sha"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload checksums
         uses: actions/upload-artifact@v7
@@ -189,7 +279,7 @@ jobs:
   # Create GitHub Release
   release:
     name: Create Release
-    needs: [build-binaries, build-docker, sign-and-attest]
+    needs: [prepare-release, build-binaries, build-docker, sign-and-attest]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -211,16 +301,19 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Release ${{ github.ref_name || inputs.version }}
+          tag_name: ${{ needs.prepare-release.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Release ${{ needs.prepare-release.outputs.version }}
           draft: false
-          prerelease: ${{ contains(github.ref_name || inputs.version, '-') }}
+          prerelease: ${{ needs.prepare-release.outputs.prerelease == 'true' }}
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
             artifacts/checksums.txt
+          fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
-            ## Symphony ${{ github.ref_name || inputs.version }}
+            ## Symphony ${{ needs.prepare-release.outputs.version }}
 
             ### Binaries
             - Linux (AMD64, ARM64)
@@ -229,7 +322,7 @@ jobs:
 
             ### Docker Images
             ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name || inputs.version }}
+            docker pull ghcr.io/${{ github.repository }}:${{ needs.prepare-release.outputs.version }}
             ```
 
             ### Installation
@@ -247,19 +340,29 @@ jobs:
   # Update Homebrew tap (if applicable)
   homebrew:
     name: Update Homebrew Tap
-    needs: release
+    needs: [prepare-release, sign-and-attest, release]
     runs-on: ubuntu-24.04
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    if: needs.prepare-release.outputs.publish_latest == 'true'
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
+      - name: Skip when Homebrew token is not configured
+        if: env.HOMEBREW_TAP_TOKEN == ''
+        run: echo "HOMEBREW_TAP_TOKEN is not configured; skipping Homebrew tap dispatch."
+
       - name: Trigger Homebrew update
+        if: env.HOMEBREW_TAP_TOKEN != ''
         uses: peter-evans/repository-dispatch@v3
         with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           repository: ${{ github.repository_owner }}/homebrew-symphony
           event-type: update-formula
           client-payload: |
             {
-              "version": "${{ github.ref_name }}",
-              "sha256_linux": "${{ needs.build-binaries.outputs.linux_sha }}",
-              "sha256_macos": "${{ needs.build-binaries.outputs.macos_sha }}"
+              "version": "${{ needs.prepare-release.outputs.version }}",
+              "tag": "${{ needs.prepare-release.outputs.version }}",
+              "sha256_linux": "${{ needs.sign-and-attest.outputs.linux_sha }}",
+              "sha256_linux_amd64_musl": "${{ needs.sign-and-attest.outputs.linux_sha }}",
+              "sha256_darwin_amd64": "${{ needs.sign-and-attest.outputs.darwin_amd64_sha }}",
+              "sha256_darwin_arm64": "${{ needs.sign-and-attest.outputs.darwin_arm64_sha }}"
             }
-        continue-on-error: true

@@ -1,4 +1,4 @@
-{{- if and .Values.monitoring.enabled .Values.monitoring.prometheusRule.enabled }}
+{{- if and .Values.monitoring.enabled .Values.monitoring.prometheusRule.enabled .Values.monitoring.prometheusRule.rules }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -12,27 +12,6 @@ spec:
   groups:
     - name: {{ include "symphony.fullname" . }}
       rules:
-        - alert: SymphonyDown
-          expr: up{job="{{ include "symphony.fullname" . }}"} == 0
-          for: 5m
-          labels:
-            severity: critical
-          annotations:
-            summary: "Symphony instance is down"
-            description: "Symphony instance {{ `{{` }} $labels.instance {{ `}}` }} has been down for more than 5 minutes."
-        - alert: SymphonyHighErrorRate
-          expr: |
-            (
-              sum(rate(symphony_errors_total[5m]))
-              /
-              sum(rate(symphony_requests_total[5m]))
-            ) > 0.1
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: "Symphony high error rate"
-            description: "Error rate is above 10% for more than 5 minutes."
         {{- with .Values.monitoring.prometheusRule.rules }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

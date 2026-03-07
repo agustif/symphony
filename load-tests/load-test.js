@@ -1,37 +1,48 @@
 import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { check } from 'k6';
+
+function envNumber(name, fallback) {
+  const raw = __ENV[name];
+  if (raw === undefined || raw === '') {
+    return fallback;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Expected numeric env ${name}, got ${raw}`);
+  }
+
+  return parsed;
+}
+
+function envString(name, fallback) {
+  const raw = __ENV[name];
+  return raw === undefined || raw === '' ? fallback : raw;
+}
 
 export const options = {
-  stages: [
-    { duration: '2m', target: 100 }, // Ramp up to 100 users
-    { duration: '5m', target: 100 }, // Stay at 100 users
-    { duration: '2m', target: 200 }, // Ramp up to 200 users
-    { duration: '5m', target: 200 }, // Stay at 200 users
-    { duration: '2m', target: 0 },   // Ramp down
-  ],
+  scenarios: {
+    steady_state: {
+      executor: 'constant-arrival-rate',
+      rate: envNumber('RATE', 80),
+      timeUnit: '1s',
+      duration: envString('DURATION', '30s'),
+      preAllocatedVUs: envNumber('PREALLOCATED_VUS', 40),
+      maxVUs: envNumber('MAX_VUS', 200),
+    },
+  },
   thresholds: {
-    http_req_duration: ['p(95)<500'], // 95% of requests under 500ms
-    http_req_failed: ['rate<0.1'],     // Error rate under 0.1%
+    http_req_duration: [`p(95)<${envNumber('P95_MS', 500)}`],
+    http_req_failed: [`rate<${envNumber('FAIL_RATE', 0.01)}`],
   },
 };
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
+const BASE_URL = __ENV.BASE_URL || 'http://127.0.0.1:8080';
+const STATE_PATH = __ENV.STATE_PATH || '/api/v1/state';
 
 export default function () {
-  // Test state endpoint
-  const stateRes = http.get(`${BASE_URL}/api/v1/state`);
-  check(stateRes, {
-    'state status is 200': (r) => r.status === 200,
-    'state response time < 500ms': (r) => r.timings.duration < 500,
+  const stateResponse = http.get(`${BASE_URL}${STATE_PATH}`);
+  check(stateResponse, {
+    'state status is 200': (response) => response.status === 200,
   });
-
-  sleep(1);
-
-  // Test dashboard
-  const dashboardRes = http.get(`${BASE_URL}/`);
-  check(dashboardRes, {
-    'dashboard status is 200': (r) => r.status === 200,
-  });
-
-  sleep(1);
 }

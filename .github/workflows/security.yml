@@ -4,15 +4,15 @@ on:
   push:
     branches: [main]
     paths:
+      - '.github/workflows/**'
       - 'rust/**'
-      - 'Cargo.lock'
-      - 'Dockerfile*'
+      - 'Dockerfile.rust'
   pull_request:
     branches: [main]
     paths:
+      - '.github/workflows/**'
       - 'rust/**'
-      - 'Cargo.lock'
-      - 'Dockerfile*'
+      - 'Dockerfile.rust'
   schedule:
     - cron: '0 6 * * 1' # Weekly on Monday
   workflow_dispatch:
@@ -29,11 +29,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Run cargo-audit
-        uses: rustsec/audit-check@v1.4.1
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: rust
+          tool: cargo-audit
+
+      - name: Run cargo-audit
+        working-directory: rust
+        run: cargo audit --deny warnings
 
   cargo-deny:
     name: Cargo Deny
@@ -43,7 +49,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
@@ -99,7 +105,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Run Trivy vulnerability scanner (FS)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: 'fs'
           scan-ref: '.'
@@ -129,7 +135,7 @@ jobs:
           docker build -f Dockerfile.rust -t symphony-rust:scan .
 
       - name: Run Trivy vulnerability scanner (Image)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.33.1
         with:
           image-ref: 'symphony-rust:scan'
           format: 'sarif'
@@ -146,6 +152,7 @@ jobs:
   build-image:
     name: Build Image for Scan
     runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -174,10 +181,12 @@ jobs:
           languages: rust
           queries: security-extended,security-and-quality
 
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
-        with:
-          working-directory: rust
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Build workspace for CodeQL
+        working-directory: rust
+        run: cargo build --workspace --locked
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3

@@ -96,8 +96,12 @@ monitoring:
   enabled: true
   serviceMonitor:
     enabled: true
+    port: metrics
+    path: /metrics
     interval: 30s
 ```
+
+Only enable `serviceMonitor` when Symphony or a colocated sidecar exposes a Prometheus-compatible endpoint on the configured port and path.
 
 ### PrometheusRule (Alerts)
 
@@ -107,7 +111,17 @@ Enable default alerts:
 monitoring:
   prometheusRule:
     enabled: true
+    rules:
+      - alert: SymphonyDown
+        expr: up{job="symphony"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Symphony instance is down"
 ```
+
+The chart does not ship opinionated Prometheus expressions by default because the metrics surface depends on your deployment topology.
 
 ## Autoscaling
 
