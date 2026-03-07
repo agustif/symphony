@@ -516,12 +516,12 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let mut state = state_guard.clone();
 
         // Accumulate runtime for completed sessions (SPEC Section 13.5)
-        if let Some(entry) = state.running.get(&issue_id) {
-            if let Some(started_at) = entry.started_at {
-                let session_runtime =
-                    current_unix_timestamp_secs().saturating_sub(started_at) as f64;
-                state.codex_totals.completed_seconds_running += session_runtime;
-            }
+        if let Some(entry) = state.running.get(&issue_id)
+            && let Some(started_at) = entry.started_at
+        {
+            let session_runtime =
+                current_unix_timestamp_secs().saturating_sub(started_at) as f64;
+            state.codex_totals.completed_seconds_running += session_runtime;
         }
 
         let mut commands = Vec::new();

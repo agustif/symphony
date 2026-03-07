@@ -121,14 +121,6 @@ fn session_identity_changed(entry: &RunningEntry, update: &AgentUpdate) -> bool 
     session_changed || thread_changed
 }
 
-fn usage_delta(previous: &Usage, next: &Usage) -> Usage {
-    Usage {
-        input_tokens: next.input_tokens.saturating_sub(previous.input_tokens),
-        output_tokens: next.output_tokens.saturating_sub(previous.output_tokens),
-        total_tokens: next.total_tokens.saturating_sub(previous.total_tokens),
-    }
-}
-
 fn accumulate_usage_totals(totals: &mut CodexTotals, delta: &Usage) {
     totals.input_tokens += delta.input_tokens;
     totals.output_tokens += delta.output_tokens;
