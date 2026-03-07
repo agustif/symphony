@@ -1,0 +1,22 @@
+{
+  "name": "symphony-e2e",
+  "version": "1.0.0",
+  "description": "E2E tests for Symphony using Vitest and Testcontainers",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui"
+  },
+  "devDependencies": {
+    "@testcontainers/postgresql": "^10.16.0",
+    "@types/node": "^22.13.9",
+    "testcontainers": "^10.16.0",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.7",
+    "zod": "^3.24.2"
+  },
+  "keywords": ["e2e", "testcontainers", "vitest"],
+  "author": "",
+  "license": "MIT"
+}
