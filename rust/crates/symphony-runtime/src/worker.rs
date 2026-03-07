@@ -1,9 +1,12 @@
-use std::borrow::Cow;
+use reqwest_middleware::ClientBuilder;
+use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
+use serde_json::json;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use minijinja::{Environment, UndefinedBehavior};
 use serde_json::Value as JsonValue;
 use symphony_agent_protocol::{
     LineOrigin, ProtocolMethodKind, ProtocolPolicyOutcome, StreamLineParser, SupportedToolSpec,
@@ -245,66 +248,38 @@ fn run_after_run_hook_best_effort(
     }
 }
 
-/// Render prompt template with issue context using strict placeholder resolution.
+/// Render prompt template with issue context using MiniJinja (Jinja2-compatible).
 pub fn render_prompt(ctx: &WorkerContext) -> Result<String, WorkerError> {
-    let mut rendered = String::with_capacity(ctx.prompt_template.len());
-    let mut cursor = 0;
-    let template = ctx.prompt_template.as_str();
+    let mut env = Environment::new();
+    env.set_undefined_behavior(UndefinedBehavior::Strict);
+    env.add_template("prompt", &ctx.prompt_template)
+        .map_err(|e| {
+            tracing::warn!(issue_id = %ctx.issue.id.0, error = %e, "failed to parse prompt template");
+            WorkerError::PromptError
+        })?;
 
-    while let Some(start_offset) = template[cursor..].find("{{") {
-        let start = cursor + start_offset;
-        rendered.push_str(&template[cursor..start]);
+    let template = env
+        .get_template("prompt")
+        .map_err(|_| WorkerError::PromptError)?;
 
-        let placeholder_start = start + 2;
-        let Some(end_offset) = template[placeholder_start..].find("}}") else {
-            tracing::warn!(
-                issue_id = %ctx.issue.id.0,
-                "prompt rendering failed: unclosed placeholder"
-            );
-            return Err(WorkerError::PromptError);
-        };
+    let context = json!({
+        "issue": {
+            "id": ctx.issue.id.0,
+            "identifier": ctx.issue.identifier,
+            "title": ctx.issue.title,
+            "description": ctx.issue.description.as_deref().unwrap_or(""),
+        },
+        "issue_id": ctx.issue.id.0,
+        "issue_identifier": ctx.issue.identifier,
+        "issue_title": ctx.issue.title,
+        "issue_description": ctx.issue.description.as_deref().unwrap_or(""),
+        "attempt": ctx.attempt,
+    });
 
-        let placeholder_end = placeholder_start + end_offset;
-        let placeholder = template[placeholder_start..placeholder_end].trim();
-        let Some(value) = render_prompt_placeholder(ctx, placeholder) else {
-            tracing::warn!(
-                issue_id = %ctx.issue.id.0,
-                placeholder,
-                "prompt rendering failed: unsupported placeholder"
-            );
-            return Err(WorkerError::PromptError);
-        };
-
-        rendered.push_str(value.as_ref());
-        cursor = placeholder_end + 2;
-    }
-
-    if template[cursor..].contains("}}") {
-        tracing::warn!(
-            issue_id = %ctx.issue.id.0,
-            "prompt rendering failed: unmatched closing delimiter"
-        );
-        return Err(WorkerError::PromptError);
-    }
-
-    rendered.push_str(&template[cursor..]);
-    Ok(rendered)
-}
-
-fn render_prompt_placeholder<'a>(
-    ctx: &'a WorkerContext,
-    placeholder: &str,
-) -> Option<Cow<'a, str>> {
-    match placeholder {
-        "issue.id" | "issue_id" => Some(Cow::Borrowed(&ctx.issue.id.0)),
-        "issue.identifier" | "issue_identifier" => Some(Cow::Borrowed(&ctx.issue.identifier)),
-        "issue.title" | "issue_title" => Some(Cow::Borrowed(&ctx.issue.title)),
-        "issue.description" | "issue_description" => Some(Cow::Borrowed(
-            ctx.issue.description.as_deref().unwrap_or(""),
-        )),
-        "attempt" => Some(Cow::Owned(ctx.attempt.to_string())),
-        _ => None,
-    }
+    template.render(context).map_err(|e| {
+        tracing::warn!(issue_id = %ctx.issue.id.0, error = %e, "failed to render prompt template");
+        WorkerError::PromptError
+    })
 }
 
 #[derive(Clone)]
@@ -1279,7 +1254,12 @@ async fn execute_linear_graphql_tool(
         "variables": variables,
     });
 
-    let client = match reqwest::Client::builder()
+    let retry_policy = ExponentialBackoff::builder()
+        .base(2)
+        .retry_bounds(Duration::from_millis(100), Duration::from_secs(10))
+        .build_with_max_retries(3);
+
+    let base_client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(LINEAR_TOOL_TIMEOUT_SECS))
         .build()
     {
@@ -1292,10 +1272,25 @@ async fn execute_linear_graphql_tool(
             });
         }
     };
+
+    let client = ClientBuilder::new(base_client)
+        .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+        .build();
+    let request_body = match serde_json::to_vec(&request_body) {
+        Ok(body) => body,
+        Err(error) => {
+            return serde_json::json!({
+                "success": false,
+                "error": "invalid_tool_input",
+                "output": {"message": format!("failed to serialize request body: {error}")},
+            });
+        }
+    };
     let response = match client
         .post(&tool_context.tracker_endpoint)
         .bearer_auth(api_key)
-        .json(&request_body)
+        .header("Content-Type", "application/json")
+        .body(request_body)
         .send()
         .await
     {
@@ -1398,27 +1393,136 @@ fn extract_tool_arguments(
         .or_else(|| params.get("call").and_then(|call| call.get("arguments")))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TopLevelGraphqlConstruct {
+    Operation,
+    Fragment,
+}
+
 fn contains_exactly_one_graphql_operation(query: &str) -> bool {
-    let trimmed = query.trim();
-    if trimmed.is_empty() {
+    let bytes = query.as_bytes();
+    if bytes.iter().all(u8::is_ascii_whitespace) {
         return false;
     }
 
-    if trimmed.starts_with('{') {
-        return true;
+    let mut index = 0_usize;
+    let mut operation_count = 0_u8;
+    let mut brace_depth = 0_u32;
+    let mut paren_depth = 0_u32;
+    let mut bracket_depth = 0_u32;
+    let mut top_level_construct = None;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\n' | b'\r' | b'\t' | b',' => {
+                index += 1;
+            }
+            b'#' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'"' if bytes.get(index + 1) == Some(&b'"') && bytes.get(index + 2) == Some(&b'"') => {
+                index += 3;
+                while index + 2 < bytes.len() {
+                    if bytes[index] == b'"' && bytes[index + 1] == b'"' && bytes[index + 2] == b'"'
+                    {
+                        index += 3;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            b'"' => {
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => {
+                            index = index.saturating_add(2);
+                        }
+                        b'"' => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b'{' => {
+                if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                    if top_level_construct.is_none() {
+                        operation_count = operation_count.saturating_add(1);
+                        if operation_count > 1 {
+                            return false;
+                        }
+                    }
+                    top_level_construct = None;
+                }
+                brace_depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                if brace_depth == 0 {
+                    return false;
+                }
+                brace_depth -= 1;
+                index += 1;
+            }
+            b'(' => {
+                paren_depth += 1;
+                index += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                index += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                index += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                index += 1;
+            }
+            byte if is_graphql_name_start(byte) => {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && is_graphql_name_continue(bytes[index]) {
+                    index += 1;
+                }
+
+                if brace_depth == 0 && paren_depth == 0 && bracket_depth == 0 {
+                    let token = &query[start..index];
+                    if token.eq_ignore_ascii_case("query")
+                        || token.eq_ignore_ascii_case("mutation")
+                        || token.eq_ignore_ascii_case("subscription")
+                    {
+                        operation_count = operation_count.saturating_add(1);
+                        if operation_count > 1 {
+                            return false;
+                        }
+                        top_level_construct = Some(TopLevelGraphqlConstruct::Operation);
+                    } else if token.eq_ignore_ascii_case("fragment") {
+                        top_level_construct = Some(TopLevelGraphqlConstruct::Fragment);
+                    }
+                }
+            }
+            _ => {
+                index += 1;
+            }
+        }
     }
 
-    let operation_markers = trimmed
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .filter(|token| !token.is_empty())
-        .filter(|token| {
-            token.eq_ignore_ascii_case("query")
-                || token.eq_ignore_ascii_case("mutation")
-                || token.eq_ignore_ascii_case("subscription")
-        })
-        .count();
+    operation_count == 1
+}
 
-    operation_markers == 1
+const fn is_graphql_name_start(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+const fn is_graphql_name_continue(byte: u8) -> bool {
+    is_graphql_name_start(byte) || byte.is_ascii_digit()
 }
 
 fn map_policy_outcome_to_worker_outcome(policy_outcome: ProtocolPolicyOutcome) -> WorkerOutcome {
@@ -1723,9 +1827,42 @@ mod tests {
     }
 
     #[test]
+    fn render_prompt_supports_if_else_blocks() {
+        let mut ctx = create_test_context();
+        ctx.prompt_template = concat!(
+            "{% if attempt %}Retry #{{attempt}}{% else %}Initial run{% endif %}\n",
+            "{% if issue.description %}{{issue.description}}{% else %}No description{% endif %}"
+        )
+        .to_owned();
+
+        let prompt = render_prompt(&ctx).expect("Failed to render prompt");
+        assert!(prompt.contains("Retry #1"));
+        assert!(prompt.contains("Test description"));
+
+        ctx.attempt = 0;
+        ctx.issue.description = None;
+
+        let initial_prompt = render_prompt(&ctx).expect("Failed to render prompt");
+        assert!(initial_prompt.contains("Initial run"));
+        assert!(initial_prompt.contains("No description"));
+        assert!(!initial_prompt.contains("Retry #"));
+        assert!(!initial_prompt.contains("{%"));
+    }
+
+    #[test]
     fn render_prompt_rejects_unknown_placeholders() {
         let mut ctx = create_test_context();
         ctx.prompt_template = "Issue {{issue.missing_field}}".to_owned();
+
+        let result = render_prompt(&ctx);
+
+        assert!(matches!(result, Err(WorkerError::PromptError)));
+    }
+
+    #[test]
+    fn render_prompt_rejects_unknown_directives() {
+        let mut ctx = create_test_context();
+        ctx.prompt_template = "{% for issue in issues %}{{issue.id}}{% endfor %}".to_owned();
 
         let result = render_prompt(&ctx);
 
@@ -1967,8 +2104,17 @@ mod tests {
         assert!(contains_exactly_one_graphql_operation(
             "query Viewer { viewer { id } }"
         ));
+        assert!(contains_exactly_one_graphql_operation(
+            r#"query Viewer($text: String = "query still inside a string") { viewer { id } }"#,
+        ));
+        assert!(contains_exactly_one_graphql_operation(
+            r#"fragment ViewerFields on User { id } query Viewer { viewer { ...ViewerFields } }"#,
+        ));
         assert!(!contains_exactly_one_graphql_operation(
             "query A { viewer { id } } query B { teams { id } }"
+        ));
+        assert!(!contains_exactly_one_graphql_operation(
+            "{ viewer { id } } { teams { id } }"
         ));
     }
 

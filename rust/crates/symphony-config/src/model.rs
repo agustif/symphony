@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr},
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -148,9 +152,19 @@ impl Default for LogLevelConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
+    pub host: IpAddr,
     pub port: Option<u16>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -226,6 +240,8 @@ pub struct CliOverrides {
     pub tracker_api_key: Option<String>,
     /// Override tracker project slug
     pub tracker_project_slug: Option<String>,
+    /// Override HTTP server bind address
+    pub server_host: Option<IpAddr>,
     /// Override optional HTTP server port (`0` allows ephemeral local bind)
     pub server_port: Option<u16>,
 }
@@ -247,6 +263,7 @@ impl CliOverrides {
             && self.tracker_endpoint.is_none()
             && self.tracker_api_key.is_none()
             && self.tracker_project_slug.is_none()
+            && self.server_host.is_none()
             && self.server_port.is_none()
     }
 }

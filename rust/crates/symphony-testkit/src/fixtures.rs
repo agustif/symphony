@@ -85,8 +85,12 @@ pub fn load_fixture_with_vars<P: AsRef<Path>>(
 pub fn load_json_fixture<P: AsRef<Path>, T: serde::de::DeserializeOwned>(
     relative_path: P,
 ) -> Result<T, FixtureError> {
-    let content = load_fixture(relative_path)?;
-    serde_json::from_str(&content).map_err(FixtureError::JsonError)
+    let path = resolve_fixture_path(relative_path)?;
+    let content = fs::read_to_string(&path).map_err(|source| FixtureError::IoError {
+        path: path.clone(),
+        source,
+    })?;
+    parse_json_fixture(&path, &content)
 }
 
 /// Load JSON fixture with variable substitution
@@ -94,8 +98,37 @@ pub fn load_json_fixture_with_vars<P: AsRef<Path>, T: serde::de::DeserializeOwne
     relative_path: P,
     variables: &HashMap<String, String>,
 ) -> Result<T, FixtureError> {
-    let content = load_fixture_with_vars(relative_path, variables)?;
-    serde_json::from_str(&content).map_err(FixtureError::JsonError)
+    let path = resolve_fixture_path(relative_path)?;
+    let content = fs::read_to_string(&path).map_err(|source| FixtureError::IoError {
+        path: path.clone(),
+        source,
+    })?;
+    let mut substituted = content;
+
+    for (key, value) in variables {
+        substituted = substituted.replace(&format!("{{{{{key}}}}}"), value);
+    }
+
+    parse_json_fixture(&path, &substituted)
+}
+
+fn parse_json_fixture<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    content: &str,
+) -> Result<T, FixtureError> {
+    let mut deserializer = serde_json::Deserializer::from_str(content);
+    serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+        let field_path = error.path().to_string();
+        let message = if field_path.is_empty() {
+            error.inner().to_string()
+        } else {
+            format!("{field_path}: {}", error.inner())
+        };
+        FixtureError::JsonError {
+            path: path.to_path_buf(),
+            message,
+        }
+    })
 }
 
 /// Resolve a fixture path relative to the fixtures directory
@@ -253,8 +286,8 @@ pub enum FixtureError {
         source: std::io::Error,
     },
 
-    #[error("JSON error parsing fixture: {0}")]
-    JsonError(#[from] serde_json::Error),
+    #[error("JSON error parsing fixture at {path}: {message}")]
+    JsonError { path: PathBuf, message: String },
 
     #[error("Variable substitution error: {0}")]
     SubstitutionError(String),
@@ -374,5 +407,39 @@ mod tests {
         // Test that variables are stored correctly
         assert_eq!(builder.variables.get("ID"), Some(&"SYM-123".to_string()));
         assert_eq!(builder.variables.get("STATE"), Some(&"Running".to_string()));
+    }
+
+    #[test]
+    fn fixture_json_errors_report_nested_field_paths() {
+        #[derive(serde::Deserialize)]
+        #[expect(
+            dead_code,
+            reason = "deserialization-only fixture shape for nested path assertions"
+        )]
+        struct NestedFixture {
+            outer: InnerFixture,
+        }
+
+        #[derive(serde::Deserialize)]
+        #[expect(
+            dead_code,
+            reason = "deserialization-only fixture shape for nested path assertions"
+        )]
+        struct InnerFixture {
+            inner: u32,
+        }
+
+        let error = load_json_fixture::<_, NestedFixture>("invalid_nested.json")
+            .err()
+            .expect("fixture should fail to deserialize");
+
+        match error {
+            FixtureError::JsonError { path, message } => {
+                assert!(path.ends_with("invalid_nested.json"));
+                assert!(message.contains("outer.inner"));
+                assert!(message.contains("invalid type"));
+            }
+            other => panic!("expected JSON error, got {other:?}"),
+        }
     }
 }

@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::{Child, Command, Stdio};
 #[cfg(unix)]
+use std::sync::{Mutex, OnceLock};
+#[cfg(unix)]
 use std::thread;
 #[cfg(unix)]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -184,6 +186,32 @@ Run tests.
 }
 
 #[test]
+fn cli_bind_override_takes_precedence_over_workflow_server_host() {
+    let config = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+server:
+  host: 127.0.0.1
+---
+Run tests.
+"#,
+        &TestEnv::default(),
+    );
+    let overrides = CliOverrides {
+        server_host: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+        ..Default::default()
+    };
+
+    let applied = apply_cli_overrides(config, &overrides).expect("overrides should apply");
+    assert_eq!(
+        applied.server.host,
+        std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    );
+}
+
+#[test]
 fn workflow_reload_classifies_server_port_changes_as_restart_required() {
     let current = config_from_workflow(
         r#"---
@@ -219,6 +247,41 @@ Run tests.
 }
 
 #[test]
+fn workflow_reload_classifies_server_host_changes_as_restart_required() {
+    let current = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+server:
+  host: 127.0.0.1
+---
+Run tests.
+"#,
+        &TestEnv::default(),
+    );
+    let next = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+server:
+  host: 0.0.0.0
+---
+Run tests.
+"#,
+        &TestEnv::default(),
+    );
+
+    assert_eq!(
+        classify_workflow_reload(&current, &next),
+        WorkflowReloadDisposition::RestartRequired {
+            reasons: vec![HostOwnedConfigChange::ServerHost],
+        }
+    );
+}
+
+#[test]
 fn workflow_reload_classifies_tracker_changes_as_restart_required() {
     let current = config_from_workflow(
         r#"---
@@ -247,18 +310,55 @@ Run tests.
 "#,
         &TestEnv::from_entries(&[("LINEAR_API_KEY", "next-token")]),
     );
+    next.tracker.kind = "mock-tracker".to_owned();
     next.log_level.level = "debug".to_owned();
 
     assert_eq!(
         classify_workflow_reload(&current, &next),
         WorkflowReloadDisposition::RestartRequired {
             reasons: vec![
+                HostOwnedConfigChange::TrackerKind,
                 HostOwnedConfigChange::TrackerEndpoint,
                 HostOwnedConfigChange::TrackerApiKey,
                 HostOwnedConfigChange::TrackerProjectSlug,
                 HostOwnedConfigChange::TrackerActiveStates,
                 HostOwnedConfigChange::LogLevel,
             ],
+        }
+    );
+}
+
+#[test]
+fn workflow_reload_classifies_workspace_root_changes_as_restart_required() {
+    let current = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+workspace:
+  root: /tmp/symphony-current
+---
+Run tests.
+"#,
+        &TestEnv::default(),
+    );
+    let next = config_from_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: env-project
+workspace:
+  root: /tmp/symphony-next
+---
+Run tests.
+"#,
+        &TestEnv::default(),
+    );
+
+    assert_eq!(
+        classify_workflow_reload(&current, &next),
+        WorkflowReloadDisposition::RestartRequired {
+            reasons: vec![HostOwnedConfigChange::WorkspaceRoot],
         }
     );
 }
@@ -303,10 +403,13 @@ Run tests.
 #[test]
 fn workflow_reload_restart_reasons_report_stable_field_paths() {
     let reasons = [
+        HostOwnedConfigChange::TrackerKind,
         HostOwnedConfigChange::TrackerEndpoint,
         HostOwnedConfigChange::TrackerApiKey,
         HostOwnedConfigChange::TrackerProjectSlug,
         HostOwnedConfigChange::TrackerActiveStates,
+        HostOwnedConfigChange::WorkspaceRoot,
+        HostOwnedConfigChange::ServerHost,
         HostOwnedConfigChange::ServerPort,
         HostOwnedConfigChange::LogLevel,
     ];
@@ -314,10 +417,13 @@ fn workflow_reload_restart_reasons_report_stable_field_paths() {
     assert_eq!(
         reasons.map(HostOwnedConfigChange::field_path),
         [
+            "tracker.kind",
             "tracker.endpoint",
             "tracker.api_key",
             "tracker.project_slug",
             "tracker.active_states",
+            "workspace.root",
+            "server.host",
             "server.port",
             "log_level.level",
         ]
@@ -342,6 +448,10 @@ impl HostProcess {
     fn wait(&mut self) -> std::process::ExitStatus {
         self.child.wait().expect("child wait should succeed")
     }
+
+    fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.stderr.take()
+    }
 }
 
 #[cfg(unix)]
@@ -357,6 +467,9 @@ impl Drop for HostProcess {
 #[cfg(unix)]
 #[test]
 fn cli_host_initializes_logs_root_and_shuts_down_cleanly_with_http_enabled() {
+    let _guard = host_test_guard()
+        .lock()
+        .expect("host test mutex should lock");
     let Some(binary_path) = cli_binary_path() else {
         return;
     };
@@ -394,7 +507,45 @@ fn cli_host_initializes_logs_root_and_shuts_down_cleanly_with_http_enabled() {
 
 #[cfg(unix)]
 #[test]
+fn cli_host_runs_without_http_and_shuts_down_cleanly() {
+    let _guard = host_test_guard()
+        .lock()
+        .expect("host test mutex should lock");
+    let Some(binary_path) = cli_binary_path() else {
+        return;
+    };
+    let root = host_temp_dir("cli_host_runs_without_http_and_shuts_down_cleanly");
+    let workflow_path = root.join("WORKFLOW.md");
+    let logs_root = root.join("logs");
+    let log_path = logs_root.join("symphony.log");
+    write_host_workflow(&workflow_path, None, "Prompt body.");
+
+    let mut host = spawn_cli_host(&binary_path, &workflow_path, &logs_root);
+
+    wait_for(
+        Duration::from_secs(5),
+        || log_path.exists() && log_contains(&log_path, "Starting poll loop"),
+        "CLI host should initialize logs root and poll loop without HTTP",
+    );
+    send_signal(host.id(), "TERM");
+    let status = wait_for_exit(
+        &mut host,
+        Duration::from_secs(5),
+        "CLI host should terminate after SIGTERM without HTTP enabled",
+    );
+
+    assert!(status.success(), "expected clean shutdown, got {status}");
+    let log_contents = fs::read_to_string(&log_path).expect("log file should be readable");
+    assert!(log_contents.contains("Starting poll loop"));
+    assert!(!log_contents.contains("HTTP server started"));
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_host_restart_required_reload_exits_and_releases_http_port() {
+    let _guard = host_test_guard()
+        .lock()
+        .expect("host test mutex should lock");
     let Some(binary_path) = cli_binary_path() else {
         return;
     };
@@ -439,6 +590,9 @@ fn cli_host_restart_required_reload_exits_and_releases_http_port() {
 #[cfg(unix)]
 #[test]
 fn cli_host_logs_retained_invalid_reload_and_keeps_serving_previous_http_state() {
+    let _guard = host_test_guard()
+        .lock()
+        .expect("host test mutex should lock");
     let Some(binary_path) = cli_binary_path() else {
         return;
     };
@@ -496,6 +650,151 @@ Broken prompt body.
 }
 
 #[cfg(unix)]
+#[test]
+fn cli_host_runtime_safe_reload_applies_live_and_keeps_refresh_available() {
+    let _guard = host_test_guard()
+        .lock()
+        .expect("host test mutex should lock");
+    let Some(binary_path) = cli_binary_path() else {
+        return;
+    };
+    let root =
+        host_temp_dir("cli_host_runtime_safe_reload_applies_live_and_keeps_refresh_available");
+    let workflow_path = root.join("WORKFLOW.md");
+    let logs_root = root.join("logs");
+    let log_path = logs_root.join("symphony.log");
+    let port = reserve_local_port();
+    write_host_workflow(&workflow_path, Some(port), "Prompt body.");
+
+    let mut host = spawn_cli_host(&binary_path, &workflow_path, &logs_root);
+
+    wait_for(
+        Duration::from_secs(5),
+        || http_get(port, "/api/v1/state").is_some(),
+        "CLI host should start HTTP server before runtime-safe reload",
+    );
+
+    write_host_workflow_with_config(
+        &workflow_path,
+        Some(port),
+        "http://127.0.0.1:9/graphql",
+        500,
+        "Updated prompt body.",
+    );
+
+    wait_for(
+        Duration::from_secs(8),
+        || {
+            log_contains(&log_path, "workflow reload applied")
+                && (log_contains(&log_path, "refresh signal queued")
+                    || log_contains(&log_path, "refresh signal coalesced"))
+        },
+        "CLI host should apply runtime-safe reload and enqueue a refresh",
+    );
+
+    assert!(
+        host.try_wait().is_none(),
+        "host should remain running after runtime-safe reload"
+    );
+    assert!(
+        http_get(port, "/api/v1/state").is_some(),
+        "HTTP state route should remain available after runtime-safe reload"
+    );
+    let refresh_response = http_request("POST", port, "/api/v1/refresh")
+        .expect("refresh route should remain available after runtime-safe reload");
+    assert!(
+        refresh_response.starts_with("HTTP/1.1 202"),
+        "expected accepted refresh response, got {refresh_response}"
+    );
+
+    send_signal(host.id(), "TERM");
+    let status = wait_for_exit(
+        &mut host,
+        Duration::from_secs(5),
+        "CLI host should terminate cleanly after runtime-safe reload",
+    );
+
+    assert!(status.success(), "expected clean shutdown, got {status}");
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_host_exits_with_http_bind_failure_code_and_message() {
+    let _guard = host_test_guard()
+        .lock()
+        .expect("host test mutex should lock");
+    let Some(binary_path) = cli_binary_path() else {
+        return;
+    };
+    let root = host_temp_dir("cli_host_exits_with_http_bind_failure_code_and_message");
+    let workflow_path = root.join("WORKFLOW.md");
+    let logs_root = root.join("logs");
+    let log_path = logs_root.join("symphony.log");
+    let occupied_listener =
+        TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("occupied listener should bind");
+    let port = occupied_listener
+        .local_addr()
+        .expect("occupied listener addr should resolve")
+        .port();
+    write_host_workflow(&workflow_path, Some(port), "Prompt body.");
+
+    let mut host = spawn_cli_host_with_stderr(&binary_path, &workflow_path, &logs_root);
+    let status = wait_for_exit(
+        &mut host,
+        Duration::from_secs(5),
+        "CLI host should fail fast when HTTP bind fails",
+    );
+
+    assert_eq!(status.code(), Some(12));
+    let mut stderr = String::new();
+    host.take_stderr()
+        .expect("stderr should be piped for bind-failure test")
+        .read_to_string(&mut stderr)
+        .expect("stderr should be readable");
+    assert!(stderr.contains("HTTP server task failed"));
+    assert!(stderr.contains("failed to bind HTTP listener"));
+    assert!(
+        log_path.exists(),
+        "logs root should still initialize before bind failure"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_host_exits_with_missing_workflow_error_code_and_message() {
+    let _guard = host_test_guard()
+        .lock()
+        .expect("host test mutex should lock");
+    let Some(binary_path) = cli_binary_path() else {
+        return;
+    };
+    let root = host_temp_dir("cli_host_exits_with_missing_workflow_error_code_and_message");
+    let workflow_path = root.join("missing-WORKFLOW.md");
+    let logs_root = root.join("logs");
+    let log_path = logs_root.join("symphony.log");
+
+    let mut host = spawn_cli_host_with_stderr(&binary_path, &workflow_path, &logs_root);
+    let status = wait_for_exit(
+        &mut host,
+        Duration::from_secs(5),
+        "CLI host should fail fast when the workflow path is missing",
+    );
+
+    assert_eq!(status.code(), Some(1));
+    let mut stderr = String::new();
+    host.take_stderr()
+        .expect("stderr should be piped for missing-workflow test")
+        .read_to_string(&mut stderr)
+        .expect("stderr should be readable");
+    assert!(stderr.contains("startup validation failed"));
+    assert!(stderr.contains("workflow file does not exist"));
+    assert!(
+        !log_path.exists(),
+        "logging should not initialize before workflow startup validation passes"
+    );
+}
+
+#[cfg(unix)]
 fn cli_binary_path() -> Option<PathBuf> {
     std::env::var_os("CARGO_BIN_EXE_symphony-cli").map(PathBuf::from)
 }
@@ -521,13 +820,38 @@ fn reserve_local_port() -> u16 {
 }
 
 #[cfg(unix)]
+fn host_test_guard() -> &'static Mutex<()> {
+    static HOST_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    HOST_TEST_MUTEX.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(unix)]
 fn spawn_cli_host(binary_path: &Path, workflow_path: &Path, logs_root: &Path) -> HostProcess {
+    spawn_cli_host_with(binary_path, workflow_path, logs_root, Stdio::null())
+}
+
+#[cfg(unix)]
+fn spawn_cli_host_with_stderr(
+    binary_path: &Path,
+    workflow_path: &Path,
+    logs_root: &Path,
+) -> HostProcess {
+    spawn_cli_host_with(binary_path, workflow_path, logs_root, Stdio::piped())
+}
+
+#[cfg(unix)]
+fn spawn_cli_host_with(
+    binary_path: &Path,
+    workflow_path: &Path,
+    logs_root: &Path,
+    stderr: Stdio,
+) -> HostProcess {
     let child = Command::new(binary_path)
         .arg(workflow_path)
         .arg("--logs-root")
         .arg(logs_root)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(stderr)
         .spawn()
         .expect("CLI host should spawn");
     HostProcess { child }
@@ -535,10 +859,11 @@ fn spawn_cli_host(binary_path: &Path, workflow_path: &Path, logs_root: &Path) ->
 
 #[cfg(unix)]
 fn write_host_workflow(workflow_path: &Path, port: Option<u16>, prompt_body: &str) {
-    write_host_workflow_with_endpoint(
+    write_host_workflow_with_config(
         workflow_path,
         port,
         "http://127.0.0.1:9/graphql",
+        250,
         prompt_body,
     );
 }
@@ -548,6 +873,17 @@ fn write_host_workflow_with_endpoint(
     workflow_path: &Path,
     port: Option<u16>,
     endpoint: &str,
+    prompt_body: &str,
+) {
+    write_host_workflow_with_config(workflow_path, port, endpoint, 250, prompt_body);
+}
+
+#[cfg(unix)]
+fn write_host_workflow_with_config(
+    workflow_path: &Path,
+    port: Option<u16>,
+    endpoint: &str,
+    polling_interval_ms: u64,
     prompt_body: &str,
 ) {
     let server_section = port
@@ -563,7 +899,7 @@ tracker:
   api_key: token
   project_slug: SYM
 polling:
-  interval_ms: 250
+  interval_ms: {polling_interval_ms}
 {server_section}---
 {prompt_body}
 "#
@@ -574,6 +910,11 @@ polling:
 
 #[cfg(unix)]
 fn http_get(port: u16, path: &str) -> Option<String> {
+    http_request("GET", port, path)
+}
+
+#[cfg(unix)]
+fn http_request(method: &str, port: u16, path: &str) -> Option<String> {
     let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).ok()?;
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
@@ -583,12 +924,15 @@ fn http_get(port: u16, path: &str) -> Option<String> {
         .expect("write timeout should be configurable");
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
     )
     .ok()?;
     let mut response = String::new();
     stream.read_to_string(&mut response).ok()?;
-    if response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.1 404") {
+    if response.starts_with("HTTP/1.1 200")
+        || response.starts_with("HTTP/1.1 202")
+        || response.starts_with("HTTP/1.1 404")
+    {
         Some(response)
     } else {
         None

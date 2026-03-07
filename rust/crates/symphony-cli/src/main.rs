@@ -8,7 +8,7 @@ use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use std::future::Future;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -275,6 +275,7 @@ async fn run() -> Result<(), ExitError> {
     });
 
     let http_handle = if let Some(port) = initial_config.server.port {
+        let host = initial_config.server.host;
         let http_shutdown = shutdown_tx.subscribe();
         let http_state = HttpServerState {
             runtime: runtime.clone(),
@@ -284,7 +285,7 @@ async fn run() -> Result<(), ExitError> {
         };
         let task_exit_tx_http = task_exit_tx.clone();
         Some(tokio::spawn(async move {
-            let result = run_http_server(http_state, port, http_shutdown).await;
+            let result = run_http_server(http_state, host, port, http_shutdown).await;
             let _ = task_exit_tx_http
                 .send(BackgroundTaskSignal::Exited(BackgroundTaskKind::HttpServer));
             result
@@ -394,13 +395,14 @@ struct HttpServerState {
 
 async fn run_http_server(
     state: HttpServerState,
+    host: IpAddr,
     port: u16,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> anyhow::Result<()> {
     let app = Router::new().fallback(any(http_fallback)).with_state(state);
-    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+    let listener = tokio::net::TcpListener::bind((host, port))
         .await
-        .with_context(|| format!("failed to bind HTTP listener on 127.0.0.1:{port}"))?;
+        .with_context(|| format!("failed to bind HTTP listener on {host}:{port}"))?;
     let listen_addr = listener
         .local_addr()
         .context("failed to resolve bound HTTP listener address")?;
@@ -956,6 +958,7 @@ mod tests {
     use super::*;
     use symphony_http::issue_route;
     use symphony_testkit::{issue_snapshot, runtime_snapshot, state_snapshot};
+    use symphony_workspace::workspace_path;
 
     #[test]
     fn startup_effective_config_uses_cli_overrides_over_front_matter() {
@@ -1136,8 +1139,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn await_background_tasks_maps_watcher_task_failure_to_exit_code() {
+        let poll_handle = tokio::spawn(async {});
+        let watcher_handle = tokio::spawn(async move {
+            panic!("watcher failed");
+        });
+
+        let error = await_background_tasks(poll_handle, watcher_handle, None, None)
+            .await
+            .expect_err("watcher task failure should surface");
+
+        assert_eq!(error.code, EXIT_WATCHER_TASK);
+        assert!(error.message.contains("workflow watcher task failed"));
+    }
+
+    #[tokio::test]
     async fn run_http_server_returns_error_when_port_is_already_bound() {
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .expect("port should bind");
         let port = listener
@@ -1160,9 +1178,14 @@ mod tests {
             last_snapshot: Arc::new(RwLock::new(None)),
         };
 
-        let error = run_http_server(state, port, shutdown_rx)
-            .await
-            .expect_err("bind conflict should fail startup");
+        let error = run_http_server(
+            state,
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            port,
+            shutdown_rx,
+        )
+        .await
+        .expect_err("bind conflict should fail startup");
 
         assert!(error.to_string().contains("failed to bind HTTP listener"));
     }
@@ -1272,6 +1295,80 @@ mod tests {
 
         poll_handle.abort();
         watcher_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn wait_for_host_lifecycle_event_detects_early_http_exit() {
+        let poll_handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let watcher_handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let http_handle = tokio::spawn(async { Err(anyhow::anyhow!("bind failed")) });
+        let (_task_exit_tx, mut task_exit_rx) = mpsc::unbounded_channel();
+
+        let event = wait_for_host_lifecycle_event(
+            &poll_handle,
+            &watcher_handle,
+            Some(&http_handle),
+            &mut task_exit_rx,
+            std::future::pending::<anyhow::Result<()>>(),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect("HTTP task exit should be detected");
+
+        assert_eq!(
+            event,
+            HostLifecycleEvent::BackgroundTaskExited(BackgroundTaskKind::HttpServer)
+        );
+
+        poll_handle.abort();
+        watcher_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn wait_for_host_lifecycle_event_uses_task_exit_notifications_for_http_without_probe_delay()
+     {
+        let poll_handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let watcher_handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        let http_handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(())
+        });
+        let (task_exit_tx, mut task_exit_rx) = mpsc::unbounded_channel();
+        task_exit_tx
+            .send(BackgroundTaskSignal::Exited(BackgroundTaskKind::HttpServer))
+            .expect("task exit signal should be queued");
+
+        let event = tokio::time::timeout(
+            Duration::from_millis(50),
+            wait_for_host_lifecycle_event(
+                &poll_handle,
+                &watcher_handle,
+                Some(&http_handle),
+                &mut task_exit_rx,
+                std::future::pending::<anyhow::Result<()>>(),
+                Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("HTTP task exit notification should bypass long probe interval")
+        .expect("HTTP background task exit should be detected");
+
+        assert_eq!(
+            event,
+            HostLifecycleEvent::BackgroundTaskExited(BackgroundTaskKind::HttpServer)
+        );
+
+        poll_handle.abort();
+        watcher_handle.abort();
+        http_handle.abort();
     }
 
     #[tokio::test]
@@ -1532,10 +1629,12 @@ mod tests {
 
         let route = issue_route("SYM-9");
         let response = get_http_get_response(&route, &snapshot, &config).await;
+        let expected = workspace_path(&reloaded_root, "SYM-9")
+            .expect("workspace path should resolve for reloaded root");
 
         assert_eq!(
             response.body["workspace"]["path"],
-            reloaded_root.join("SYM-9").to_string_lossy().as_ref()
+            expected.to_string_lossy().as_ref()
         );
     }
 
@@ -1635,19 +1734,25 @@ mod tests {
                 modified_unix_ms: Some(200),
             },
             &[
+                HostOwnedConfigChange::TrackerKind,
                 HostOwnedConfigChange::TrackerEndpoint,
                 HostOwnedConfigChange::TrackerApiKey,
                 HostOwnedConfigChange::TrackerProjectSlug,
                 HostOwnedConfigChange::TrackerActiveStates,
+                HostOwnedConfigChange::WorkspaceRoot,
+                HostOwnedConfigChange::ServerHost,
                 HostOwnedConfigChange::ServerPort,
                 HostOwnedConfigChange::LogLevel,
             ],
         );
 
+        assert!(message.contains("tracker.kind"));
         assert!(message.contains("tracker.endpoint"));
         assert!(message.contains("tracker.api_key"));
         assert!(message.contains("tracker.project_slug"));
         assert!(message.contains("tracker.active_states"));
+        assert!(message.contains("workspace.root"));
+        assert!(message.contains("server.host"));
         assert!(message.contains("server.port"));
         assert!(message.contains("log_level.level"));
     }
@@ -1720,6 +1825,73 @@ Prompt body.
     }
 
     #[tokio::test]
+    async fn apply_workflow_reload_requests_restart_when_server_host_changes() {
+        let root = temp_dir("apply_workflow_reload_requests_restart_when_server_host_changes");
+        let workflow_path = root.join("WORKFLOW.md");
+        write_raw_workflow(
+            &workflow_path,
+            r#"---
+tracker:
+  kind: linear
+  endpoint: https://api.linear.app/graphql
+  api_key: token-one
+  project_slug: SYM
+server:
+  host: 127.0.0.1
+  port: 4000
+---
+Prompt body.
+"#,
+        );
+
+        let mut reloader = WorkflowReloader::load_from_path(&workflow_path)
+            .expect("workflow should load for startup");
+        let initial_config = effective_runtime_config(reloader.current(), &CliOverrides::default())
+            .expect("initial config should build");
+        let initial_prompt = reloader.current().document.prompt_body.clone();
+        let initial_stamp = reloader.current().change_stamp.clone();
+        let config = Arc::new(RwLock::new(initial_config.clone()));
+        let runtime = Arc::new(Runtime::new(Arc::new(test_tracker())));
+        let (refresh_tx, mut refresh_rx) = mpsc::channel(1);
+
+        write_raw_workflow(
+            &workflow_path,
+            r#"---
+tracker:
+  kind: linear
+  endpoint: https://api.linear.app/graphql
+  api_key: token-one
+  project_slug: SYM
+server:
+  host: 0.0.0.0
+  port: 4000
+---
+Prompt body.
+"#,
+        );
+
+        let action = apply_workflow_reload(
+            &mut reloader,
+            &config,
+            &runtime,
+            &CliOverrides::default(),
+            &refresh_tx,
+        )
+        .await;
+
+        match action {
+            WorkflowReloadAction::RestartRequired(message) => {
+                assert!(message.contains("server.host"));
+            }
+            other => panic!("expected restart-required action, got {other:?}"),
+        }
+        assert_eq!(config.read().await.server.host, initial_config.server.host);
+        assert_eq!(reloader.current().document.prompt_body, initial_prompt);
+        assert_eq!(reloader.current().change_stamp, initial_stamp);
+        assert!(refresh_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn apply_workflow_reload_requests_restart_when_tracker_settings_change() {
         let root = temp_dir("apply_workflow_reload_requests_restart_when_tracker_settings_change");
         let workflow_path = root.join("WORKFLOW.md");
@@ -1786,6 +1958,82 @@ Prompt body.
         assert_eq!(
             config.read().await.tracker.endpoint,
             initial_config.tracker.endpoint
+        );
+        assert_eq!(reloader.current().document.prompt_body, initial_prompt);
+        assert_eq!(reloader.current().change_stamp, initial_stamp);
+        assert!(refresh_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn apply_workflow_reload_requests_restart_when_workspace_root_changes() {
+        let root = temp_dir("apply_workflow_reload_requests_restart_when_workspace_root_changes");
+        let workflow_path = root.join("WORKFLOW.md");
+        let initial_workspace_root = root.join("workspaces-a");
+        let next_workspace_root = root.join("workspaces-b");
+        write_raw_workflow(
+            &workflow_path,
+            &format!(
+                r#"---
+tracker:
+  kind: linear
+  endpoint: https://api.linear.app/graphql
+  api_key: token-one
+  project_slug: SYM
+workspace:
+  root: {}
+---
+Prompt body.
+"#,
+                initial_workspace_root.display()
+            ),
+        );
+
+        let mut reloader = WorkflowReloader::load_from_path(&workflow_path)
+            .expect("workflow should load for startup");
+        let initial_config = effective_runtime_config(reloader.current(), &CliOverrides::default())
+            .expect("initial config should build");
+        let initial_prompt = reloader.current().document.prompt_body.clone();
+        let initial_stamp = reloader.current().change_stamp.clone();
+        let config = Arc::new(RwLock::new(initial_config.clone()));
+        let runtime = Arc::new(Runtime::new(Arc::new(test_tracker())));
+        let (refresh_tx, mut refresh_rx) = mpsc::channel(1);
+
+        write_raw_workflow(
+            &workflow_path,
+            &format!(
+                r#"---
+tracker:
+  kind: linear
+  endpoint: https://api.linear.app/graphql
+  api_key: token-one
+  project_slug: SYM
+workspace:
+  root: {}
+---
+Prompt body.
+"#,
+                next_workspace_root.display()
+            ),
+        );
+
+        let action = apply_workflow_reload(
+            &mut reloader,
+            &config,
+            &runtime,
+            &CliOverrides::default(),
+            &refresh_tx,
+        )
+        .await;
+
+        match action {
+            WorkflowReloadAction::RestartRequired(message) => {
+                assert!(message.contains("workspace.root"));
+            }
+            other => panic!("expected restart-required action, got {other:?}"),
+        }
+        assert_eq!(
+            config.read().await.workspace.root,
+            initial_config.workspace.root
         );
         assert_eq!(reloader.current().document.prompt_body, initial_prompt);
         assert_eq!(reloader.current().change_stamp, initial_stamp);

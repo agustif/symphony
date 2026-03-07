@@ -28,6 +28,7 @@ mod tests {
         StateSnapshotEnvelope, ThroughputSnapshot,
     };
     use symphony_testkit::{issue_snapshot, runtime_snapshot, state_snapshot};
+    use symphony_workspace::workspace_path;
 
     #[test]
     fn serves_dashboard_route_with_html_document() {
@@ -173,6 +174,53 @@ mod tests {
     }
 
     #[test]
+    fn issue_routes_round_trip_percent_encoded_identifiers() {
+        let identifier = "SYM/1 ?#%";
+        let snapshot = state_snapshot(
+            runtime_snapshot(1, 0),
+            vec![issue_snapshot(identifier, identifier, "Running", 0)],
+        );
+
+        let response = handle_get(&issue_route(identifier), &snapshot);
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["issue_id"], identifier);
+        assert_eq!(response.body["issue_identifier"], identifier);
+    }
+
+    #[test]
+    fn dashboard_links_percent_encode_issue_identifiers() {
+        let identifier = "SYM/1 ?#%";
+        let snapshot = state_snapshot(
+            runtime_snapshot(1, 0),
+            vec![issue_snapshot(identifier, identifier, "Running", 0)],
+        );
+
+        let html = dashboard_to_html(&snapshot);
+
+        assert!(html.contains(&issue_route(identifier)));
+    }
+
+    #[test]
+    fn issue_detail_workspace_fallback_uses_sanitized_workspace_path() {
+        let identifier = "SYM/1";
+        let snapshot = state_snapshot(
+            runtime_snapshot(1, 0),
+            vec![issue_snapshot(identifier, identifier, "Running", 0)],
+        );
+        let root = std::env::temp_dir().join("symphony-http-tests");
+
+        let response = handle_get_with_workspace(&issue_route(identifier), &snapshot, Some(&root));
+        let expected = workspace_path(&root, identifier)
+            .expect("workspace path should sanitize identifier")
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body["workspace"]["path"], expected);
+    }
+
+    #[test]
     fn refresh_endpoint_accepts_post() {
         let response = handle_post(
             REFRESH_ROUTE,
@@ -310,6 +358,12 @@ mod tests {
         assert!(response.rendered_body.contains("Snapshot unavailable"));
         assert!(response.rendered_body.contains("snapshot_unavailable"));
         assert!(response.rendered_body.contains("offline"));
+        assert!(
+            response
+                .rendered_body
+                .contains("tracker totals are unavailable")
+        );
+        assert!(response.rendered_body.contains(">n/a<"));
     }
 
     #[test]

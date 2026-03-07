@@ -126,11 +126,40 @@ fn protocol_stream_finishes_interrupted_stdout_and_stderr_without_newlines() {
 }
 
 #[test]
+fn protocol_stream_finish_surfaces_invalid_interrupted_stdout_tail() {
+    let mut parser = StreamLineParser::default();
+    assert!(
+        parser
+            .push_chunk(LineOrigin::Stdout, r#"{"method":"turn.start""#)
+            .is_empty()
+    );
+
+    let trailing = parser.finish();
+    assert_eq!(trailing.len(), 1);
+    assert!(matches!(
+        &trailing[0],
+        Err(ProtocolError::InvalidStdoutLine(_))
+    ));
+}
+
+#[test]
 fn protocol_handshake_sequence_accepts_startup_then_turn_lifecycle() {
     let methods = [
         "initialize",
         "initialized",
         "session/new",
+        "turn/start",
+        "turn/completed",
+    ];
+    assert!(validate_startup_turn_sequence(methods).is_ok());
+}
+
+#[test]
+fn protocol_handshake_sequence_accepts_thread_start_compatibility_branch() {
+    let methods = [
+        "initialize",
+        "initialized",
+        "thread/start",
         "turn/start",
         "turn/completed",
     ];
@@ -163,6 +192,18 @@ fn protocol_policy_maps_input_required_to_permanent_failure() {
 }
 
 #[test]
+fn protocol_policy_maps_approval_required_to_permanent_failure() {
+    let event = decode_stdout_line(r#"{"method":"approval/requested","params":{}}"#)
+        .expect("approval-required event should decode");
+    assert_eq!(
+        classify_policy_outcome(&event),
+        Some(ProtocolPolicyOutcome::PermanentFailure(
+            ProtocolFailureReason::ApprovalRequired
+        ))
+    );
+}
+
+#[test]
 fn protocol_policy_maps_turn_timeout_to_retryable_failure() {
     let event = decode_stdout_line(
         r#"{"method":"turn/failed","error":{"code":"turn_timeout","message":"timed out"}}"#,
@@ -181,6 +222,31 @@ fn protocol_policy_does_not_hard_fail_unsupported_tool_call_marker_event() {
     let event = decode_stdout_line(r#"{"method":"unsupported_tool_call","params":{}}"#)
         .expect("unsupported-tool event should decode");
     assert_eq!(classify_policy_outcome(&event), None);
+}
+
+#[test]
+fn protocol_policy_maps_codex_not_found_to_permanent_failure() {
+    let event =
+        decode_stdout_line(r#"{"method":"startup/failed","error":{"code":"codex_not_found"}}"#)
+            .expect("codex-not-found event should decode");
+    assert_eq!(
+        classify_policy_outcome(&event),
+        Some(ProtocolPolicyOutcome::PermanentFailure(
+            ProtocolFailureReason::CodexNotFound
+        ))
+    );
+}
+
+#[test]
+fn protocol_policy_maps_port_exit_to_retryable_failure() {
+    let event = decode_stdout_line(r#"{"method":"startup/failed","error":{"code":"port_exit"}}"#)
+        .expect("port-exit event should decode");
+    assert_eq!(
+        classify_policy_outcome(&event),
+        Some(ProtocolPolicyOutcome::RetryableFailure(
+            ProtocolFailureReason::PortExit
+        ))
+    );
 }
 
 #[test]
@@ -204,6 +270,30 @@ fn protocol_policy_maps_methodless_error_timeout_envelope_to_retryable_failure()
         classify_policy_outcome(&event),
         Some(ProtocolPolicyOutcome::RetryableFailure(
             ProtocolFailureReason::ResponseTimeout
+        ))
+    );
+}
+
+#[test]
+fn protocol_policy_maps_startup_read_timeout_alias_to_retryable_failure() {
+    let event = decode_stdout_line(r#"{"id":4,"error":{"code":"startup/read_timeout"}}"#)
+        .expect("startup/read-timeout envelope should decode");
+    assert_eq!(
+        classify_policy_outcome(&event),
+        Some(ProtocolPolicyOutcome::RetryableFailure(
+            ProtocolFailureReason::ResponseTimeout
+        ))
+    );
+}
+
+#[test]
+fn protocol_policy_maps_response_error_to_retryable_failure() {
+    let event = decode_stdout_line(r#"{"id":7,"error":{"code":"response_error"}}"#)
+        .expect("response-error envelope should decode");
+    assert_eq!(
+        classify_policy_outcome(&event),
+        Some(ProtocolPolicyOutcome::RetryableFailure(
+            ProtocolFailureReason::ResponseError
         ))
     );
 }
@@ -273,6 +363,22 @@ fn protocol_extractors_read_nested_session_metadata_variants() {
 }
 
 #[test]
+fn protocol_methodless_result_envelope_supports_flat_handshake_metadata() {
+    let event =
+        decode_stdout_line(r#"{"id":2,"result":{"threadId":"thread-flat","turnId":"turn-flat"}}"#)
+            .expect("methodless result envelope should decode");
+    let thread_id = extract_thread_id(&event);
+    let turn_id = extract_turn_id(&event);
+
+    assert_eq!(thread_id.as_deref(), Some("thread-flat"));
+    assert_eq!(turn_id.as_deref(), Some("turn-flat"));
+    assert_eq!(
+        build_session_id(thread_id.as_deref(), turn_id.as_deref()),
+        Some("thread-flat-turn-flat".to_owned())
+    );
+}
+
+#[test]
 fn protocol_usage_extractor_accepts_usage_shape_variants() {
     let event = decode_stdout_line(
         r#"{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":120,"completionTokens":30}}}}"#,
@@ -310,6 +416,23 @@ fn protocol_extracts_rate_limits_from_wrapper_and_bucket_variants() {
                 "remaining": 3,
                 "limit": 9,
                 "resetAt": "2026-03-06T18:00:00Z"
+            }
+        }))
+    );
+}
+
+#[test]
+fn protocol_extracts_rate_limits_from_error_payload_variants() {
+    let event = decode_stdout_line(
+        r#"{"method":"turn/failed","error":{"meta":{"limits":{"primary":{"remaining":0,"resetAt":"2026-03-06T19:00:00Z"}}}}}"#,
+    )
+    .expect("error rate-limit payload should decode");
+    assert_eq!(
+        extract_rate_limits(&event),
+        Some(serde_json::json!({
+            "primary": {
+                "remaining": 0,
+                "resetAt": "2026-03-06T19:00:00Z"
             }
         }))
     );

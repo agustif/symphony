@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     IssueSnapshot, IssueTaskMapKind, RuntimeSnapshot, RuntimeSpecView, sanitize_event_text,
-    sanitize_message_text, strip_control_bytes,
+    sanitize_message_text, sanitize_summary_text, strip_control_bytes,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,9 +47,10 @@ pub struct SnapshotErrorView {
 impl SnapshotErrorView {
     #[must_use]
     pub fn new(code: SnapshotErrorCode, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
             code,
-            message: message.into(),
+            message: sanitize_summary_text(&message),
         }
     }
 
@@ -196,8 +197,8 @@ impl StateSnapshot {
             issue.workspace_path = issue.workspace_path.as_deref().map(strip_control_bytes);
             issue.session_id = issue.session_id.as_deref().map(sanitize_message_text);
             issue.last_event = issue.last_event.as_deref().map(sanitize_event_text);
-            issue.last_message = issue.last_message.as_deref().map(sanitize_message_text);
-            issue.retry_error = issue.retry_error.as_deref().map(sanitize_message_text);
+            issue.last_message = issue.last_message.as_deref().map(sanitize_summary_text);
+            issue.retry_error = issue.retry_error.as_deref().map(sanitize_summary_text);
         }
         issues.sort_by(|left, right| {
             left.identifier
@@ -695,6 +696,60 @@ mod tests {
         assert_eq!(
             sanitized.issues[1].retry_error.as_deref(),
             Some("cookie=[REDACTED]")
+        );
+    }
+
+    #[test]
+    fn sanitized_state_snapshot_formats_json_operator_fields_deterministically() {
+        let snapshot = StateSnapshot {
+            runtime: RuntimeSnapshot::default(),
+            issues: vec![IssueSnapshot {
+                id: IssueId("issue-json".to_owned()),
+                identifier: "SYM-JSON".to_owned(),
+                state: "Running".to_owned(),
+                retry_attempts: 1,
+                workspace_path: None,
+                session_id: None,
+                turn_count: 0,
+                last_event: Some("notification".to_owned()),
+                last_message: Some(
+                    r#"{"zeta":1,"authorization":"Bearer abc","alpha":{"token":"xyz","ok":"yes"}}"#
+                        .to_owned(),
+                ),
+                started_at: None,
+                last_event_at: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                retry_due_at: None,
+                retry_error: Some(r#"{"token":"abc","a":"ok"}"#.to_owned()),
+            }],
+        };
+
+        let sanitized = snapshot.sanitized();
+        assert_eq!(
+            sanitized.issues[0].last_message.as_deref(),
+            Some(
+                r#"{"alpha":{"ok":"yes","token":"[REDACTED]"},"authorization":"[REDACTED]","zeta":1}"#
+            )
+        );
+        assert_eq!(
+            sanitized.issues[0].retry_error.as_deref(),
+            Some(r#"{"a":"ok","token":"[REDACTED]"}"#)
+        );
+    }
+
+    #[test]
+    fn snapshot_error_view_redacts_structured_messages() {
+        let error = SnapshotErrorView::new(
+            SnapshotErrorCode::Unavailable,
+            r#"{"token":"abc","message":"backend unavailable"}"#,
+        );
+
+        assert_eq!(error.code, SnapshotErrorCode::Unavailable);
+        assert_eq!(
+            error.message,
+            r#"{"message":"backend unavailable","token":"[REDACTED]"}"#
         );
     }
 }

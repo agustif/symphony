@@ -1,10 +1,10 @@
 # Documentation Program
 
-## Status Snapshot (2026-03-06)
-- Completion: 88%
-- Done: docs index, current port-status assessment, refreshed architecture overview, crate dependency map, operational runbook, cutover checklist, and the missing secret-handling and cutover-policy ADRs are merged.
-- In Progress: implementation-synchronized protocol/config examples and final drift cleanup across docs.
-- Remaining: the last reference examples and ongoing synchronization as parity work closes.
+## Status Snapshot (2026-03-07)
+- Completion: 95%
+- Done: docs index, current port-status assessment, refreshed architecture overview, crate dependency map, operational runbook, cutover checklist, protocol examples, config examples, and the missing secret-handling and cutover-policy ADRs are merged.
+- In Progress: final drift cleanup across docs.
+- Remaining: ongoing synchronization as parity work closes.
 
 ## Scope
 Deliver complete, non-duplicative documentation for architecture, decisions, and operations.
@@ -26,8 +26,8 @@ Deliver complete, non-duplicative documentation for architecture, decisions, and
 
 ### Task D1.2: Reference quality bar
 - [x] Subtask D1.2.1: Add explicit invariants section references to domain/runtime docs.
-- [ ] Subtask D1.2.2: Add protocol examples aligned with app-server contract.
-- [ ] Subtask D1.2.3: Add configuration field examples aligned with parser behavior.
+- [x] Subtask D1.2.2: Add protocol examples aligned with app-server contract.
+- [x] Subtask D1.2.3: Add configuration field examples aligned with parser behavior.
 
 ## Epic D2: Operational Docs
 ### Task D2.1: Runbook
@@ -49,8 +49,8 @@ Deliver complete, non-duplicative documentation for architecture, decisions, and
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
 | Sec. 3 system overview and Sec. 4 model docs | Partial | Complete source-of-truth architecture map with ownership and update cadence | `D1.1` |
-| Sec. 5-6 workflow/config contract docs | Partial | Add implementation-synchronized config examples and drift checks | `D1.2` |
-| Sec. 7-10 runtime and protocol docs | Mostly implemented | Add concrete protocol examples aligned with the current app-server contract | `D1.2`, `D2.1` |
+| Sec. 5-6 workflow/config contract docs | Complete | Config examples synchronized with parser behavior | `D1.2` |
+| Sec. 7-10 runtime and protocol docs | Complete | Protocol examples aligned with app-server contract | `D1.2`, `D2.1` |
 | Sec. 13-15 observability and operations docs | Mostly implemented | Keep the runbook synchronized as runtime and operator surfaces evolve | `D2.1` |
 | Sec. 18 rollout checklist | Implemented | Keep cutover and rollback criteria synchronized with CI and live validation evidence | `D2.2` |
 <!-- SPEC_GAP_MAP_END -->

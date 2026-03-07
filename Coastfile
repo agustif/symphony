@@ -1,36 +1,72 @@
-# Manual environment for working on either implementation inside Coast.
-# Start the Elixir dashboard manually with:
-# coast exec <instance> -- bash -lc 'cd elixir && mix setup && ./bin/symphony ./WORKFLOW.md --port 4000'
+# Developer setup for the Symphony monorepo inside Coast.
+# Keep `autostart = false` and start one implementation at a time:
+# - `coast exec <instance> -- sh -lc 'symphony-elixir-dev'`
+# - `coast exec <instance> -- sh -lc 'symphony-rust-dev'`
+# Both implementations use `LINEAR_API_KEY`, and the Rust helper intentionally
+# reuses `elixir/WORKFLOW.md` because the Rust CLI consumes the same workflow
+# contract. Do not run both helpers in the same Coast instance at once.
+# Useful validation loops:
+# - `coast exec <instance> -- sh -lc 'cd /workspace/elixir && make all'`
+# - `coast exec <instance> -- sh -lc 'cd /workspace/rust && cargo test --workspace'`
 [coast]
 name = "symphony"
 runtime = "dind"
 worktree_dir = ".worktrees"
 autostart = false
-primary_port = "dashboard"
+primary_port = "elixir_dashboard"
 
 [coast.setup]
 packages = [
   "bash",
+  "build-base",
+  "cargo",
+  "ca-certificates",
   "curl",
   "git",
+  "jq",
   "make",
-  "ca-certificates",
-  "python3",
   "nodejs",
   "npm",
+  "python3",
+  "ripgrep",
   "elixir",
   "erlang28",
   "rust",
-  "cargo",
-  "build-base",
 ]
 run = [
+  "mkdir -p /workspace/log /root/code/symphony-workspaces /root/code/symphony-workspaces-rust",
   "mix local.hex --force",
   "mix local.rebar --force",
 ]
 
+[[coast.setup.files]]
+path = "/usr/local/bin/symphony-elixir-dev"
+content = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd /workspace/elixir
+mkdir -p /workspace/log/elixir
+mix deps.get
+mix build
+exec ./bin/symphony ./WORKFLOW.md --port 4000 --logs-root /workspace/log/elixir
+'''
+mode = "0755"
+
+[[coast.setup.files]]
+path = "/usr/local/bin/symphony-rust-dev"
+content = '''
+#!/usr/bin/env bash
+set -euo pipefail
+cd /workspace/rust
+mkdir -p /workspace/log/rust /root/code/symphony-workspaces-rust
+cargo fetch
+exec cargo run -p symphony-cli -- ../elixir/WORKFLOW.md --port 4040 --workspace-root /root/code/symphony-workspaces-rust --logs-root /workspace/log/rust
+'''
+mode = "0755"
+
 [ports]
-dashboard = 4000
+elixir_dashboard = 4000
+rust_dashboard = 4040
 
 [secrets.linear_api_key]
 extractor = "env"

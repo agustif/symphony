@@ -1,6 +1,6 @@
 # symphony-agent-protocol Tasks
 
-## Status Snapshot (2026-03-06)
+## Status Snapshot (2026-03-07)
 - Completion: 99%
 - Done: startup/turn sequencing validator and typed protocol method categorization are implemented with coverage for malformed envelopes, including approval-required and `requestUserInput` alias normalization, typed policy-outcome mapping for approval/input-required/timeout/cancelled paths with normalized error categories (`codex_not_found`, `invalid_workspace_cwd`, `response_timeout`, `response_error`, `port_exit`), non-fatal handling for `unsupported_tool_call` marker events, startup payload builders with optional tool advertisement support, response-envelope decoding for methodless `result`/`error` payloads, and payload extractors for nested `thread_id`/`turn_id`, usage-shape variants, and tool-call id/name fields.
 - In Progress: stress-path streaming robustness and rate-limit payload compatibility depth.

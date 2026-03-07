@@ -23,6 +23,7 @@ symphony-observability = { path = "../symphony-observability" }
 
 [dev-dependencies]
 symphony-testkit = { path = "../symphony-testkit" }
+symphony-workspace = { path = "../symphony-workspace" }
 
 [[test]]
 name = "cli_conformance"

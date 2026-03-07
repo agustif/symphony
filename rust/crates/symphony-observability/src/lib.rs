@@ -1,24 +1,28 @@
 #![forbid(unsafe_code)]
 
 mod issue_snapshot;
+mod metrics;
 mod runtime_snapshot;
 mod sanitization;
 mod state_snapshot;
+mod telemetry;
 
 pub use issue_snapshot::IssueSnapshot;
 pub use issue_snapshot::IssueTaskMapKind;
+pub use metrics::{MetricsInitError, init_metrics};
 pub use runtime_snapshot::{
     CodexTotalsSnapshot, RuntimeActivitySnapshot, RuntimeCounts, RuntimeHealthStatus,
     RuntimeHealthView, RuntimeSnapshot, RuntimeSpecView, RuntimeSummaryView, ThroughputSnapshot,
 };
 pub use sanitization::{
     format_json_compact_sorted, redact_secret_text, sanitize_event_text, sanitize_json_value,
-    sanitize_message_text, strip_control_bytes,
+    sanitize_message_text, sanitize_summary_text, strip_control_bytes,
 };
 pub use state_snapshot::{
     IssueStatusTotalsSnapshot, SnapshotErrorCode, SnapshotErrorView, SnapshotStatus, StateSnapshot,
     StateSnapshotEnvelope, StateSpecView, StateSummaryView, TaskMapSnapshot,
 };
+pub use telemetry::{TelemetryInitError, init_telemetry};
 
 #[cfg(test)]
 mod tests {

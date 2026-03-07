@@ -1,0 +1,5 @@
+{
+  "outer": {
+    "inner": "not-a-number"
+  }
+}

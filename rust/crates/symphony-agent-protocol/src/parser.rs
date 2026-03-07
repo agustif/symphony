@@ -6,9 +6,17 @@ pub fn decode_stdout_line(line: &str) -> Result<AppServerEvent, ProtocolError> {
         return Err(ProtocolError::EmptyLine);
     }
 
-    let event = serde_json::from_str::<AppServerEvent>(normalized).map_err(|error| {
-        ProtocolError::InvalidStdoutLine(format!("line `{normalized}`: {error}"))
-    })?;
+    let mut deserializer = serde_json::Deserializer::from_str(normalized);
+    let event: AppServerEvent =
+        serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+            let path = error.path().to_string();
+            let detail = if path.is_empty() {
+                error.inner().to_string()
+            } else {
+                format!("{} at `{path}`", error.inner())
+            };
+            ProtocolError::InvalidStdoutLine(format!("line `{normalized}`: {detail}"))
+        })?;
 
     let missing_method = event.method.trim().is_empty();
     let has_response_payload = event.result.is_some() || event.error.is_some();

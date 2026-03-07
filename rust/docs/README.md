@@ -10,6 +10,8 @@ Update cadence: update after every meaningful runtime, observability, host lifec
 | [architecture/overview.md](architecture/overview.md) | Source-of-truth architecture narrative for crate layout, data flow, and ownership boundaries. | Architecture or crate-boundary changes. |
 | [architecture/dependencies.md](architecture/dependencies.md) | Layering rules and current crate dependency graph. | Cargo/workspace boundaries change. |
 | [adr/0001-reducer-first-runtime.md](adr/0001-reducer-first-runtime.md) through [adr/0007-upgrade-and-cutover-policy.md](adr/0007-upgrade-and-cutover-policy.md) | Architectural decisions, rationale, rejected alternatives, and enforcement expectations. | A decision changes or a new decision is formalized. |
+| [protocol-examples.md](protocol-examples.md) | Concrete JSON-RPC message examples for app-server protocol. | Protocol format or methods change. |
+| [config-examples.md](config-examples.md) | WORKFLOW.md configuration examples and parsed representations. | Config schema or parser behavior changes. |
 | [port-status.md](port-status.md) | Current implementation assessment, cutover blockers, and code-level spec mismatches. | Any material status change or fresh assessment sweep. |
 | [runbook.md](runbook.md) | Startup, health-check, and incident-triage procedures for the Rust runtime. | Operational behavior or validation commands change. |
 | [cutover-checklist.md](cutover-checklist.md) | Shadow-mode, primary switch, and rollback checklist for Rust promotion. | Rollout criteria or operator procedures change. |

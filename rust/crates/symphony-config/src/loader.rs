@@ -3,6 +3,10 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use figment::{
+    Figment,
+    providers::{Env, Format, Yaml},
+};
 use serde_json::{Number as JsonNumber, Value as JsonValue};
 use serde_yaml::{Mapping, Value};
 
@@ -115,9 +119,9 @@ fn parse_workspace_config(
     mut workspace: WorkspaceConfig,
     env: &dyn EnvProvider,
 ) -> Result<WorkspaceConfig, ConfigError> {
-    if let Some(root) = optional_string(section, "root", "workspace.root")?
-        && let Some(expanded) = expand_workspace_root(&root, env)
-    {
+    if let Some(root) = optional_string(section, "root", "workspace.root")? {
+        let expanded =
+            expand_workspace_root(&root, env).ok_or(ConfigError::InvalidWorkspaceRoot)?;
         workspace.root = normalize_workspace_root(expanded);
     }
 
@@ -225,6 +229,11 @@ fn parse_server_config(
     section: &Mapping,
     mut server: ServerConfig,
 ) -> Result<ServerConfig, ConfigError> {
+    if let Some(host) = optional_trimmed_string(section, "host", "server.host")? {
+        server.host = host
+            .parse()
+            .map_err(|_error| ConfigError::InvalidServerHost(host.clone()))?;
+    }
     if let Some(port) = optional_u16(section, "port", "server.port")? {
         server.port = Some(port);
     }
@@ -747,6 +756,49 @@ server:
     }
 
     #[test]
+    fn parses_optional_server_host_extension() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+server:
+  host: 0.0.0.0
+"#,
+        );
+
+        let config = from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[]))
+            .expect("config should parse");
+        assert_eq!(
+            config.server.host,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_server_host_extension() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+server:
+  host: not-an-ip
+"#,
+        );
+
+        let error = from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[]))
+            .expect_err("invalid host should fail");
+
+        assert_eq!(
+            error,
+            ConfigError::InvalidServerHost("not-an-ip".to_owned())
+        );
+    }
+
+    #[test]
     fn normalizes_relative_workspace_paths() {
         let front_matter = parse_yaml(
             r#"
@@ -764,6 +816,25 @@ workspace:
 
         assert!(config.workspace.root.is_absolute());
         assert!(config.workspace.root.ends_with(Path::new("tmp/issues")));
+    }
+
+    #[test]
+    fn rejects_workspace_root_with_missing_env_reference() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+workspace:
+  root: $MISSING_WORKSPACE_ROOT
+"#,
+        );
+
+        assert_eq!(
+            from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[])),
+            Err(ConfigError::InvalidWorkspaceRoot)
+        );
     }
 
     #[test]
@@ -1134,12 +1205,202 @@ pub fn apply_cli_overrides(
         config.tracker.project_slug = Some(project_slug.clone());
     }
 
+    if let Some(host) = overrides.server_host {
+        config.server.host = host;
+    }
+
     if let Some(port) = overrides.server_port {
         config.server.port = Some(port);
     }
 
     validate(&config)?;
     Ok(config)
+}
+
+/// Extract YAML front matter from markdown content.
+///
+/// Returns a tuple of (remaining_content, front_matter_mapping).
+/// If no front matter is present, returns the full content and an empty mapping.
+pub fn extract_front_matter(content: &str) -> Result<(String, Mapping), ConfigError> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Check for opening ---
+    if lines.first().copied() != Some("---") {
+        return Ok((content.to_string(), Mapping::new()));
+    }
+
+    // Find closing ---
+    let Some(closing_index) = lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, line)| (*line == "---").then_some(index))
+    else {
+        return Err(ConfigError::InvalidCliOverride {
+            field: "front_matter".to_string(),
+            reason: "unterminated front matter".to_string(),
+        });
+    };
+
+    let front_matter_str = lines[1..closing_index].join("\n");
+    let remaining = lines[(closing_index + 1)..].join("\n");
+
+    // Parse the front matter as YAML
+    if front_matter_str.trim().is_empty() {
+        return Ok((remaining, Mapping::new()));
+    }
+
+    let value: Value =
+        serde_yaml::from_str(&front_matter_str).map_err(|e| ConfigError::InvalidCliOverride {
+            field: "front_matter".to_string(),
+            reason: format!("invalid YAML: {}", e),
+        })?;
+
+    match value {
+        Value::Mapping(mapping) => Ok((remaining, mapping)),
+        _ => Err(ConfigError::InvalidCliOverride {
+            field: "front_matter".to_string(),
+            reason: "front matter must be a YAML mapping".to_string(),
+        }),
+    }
+}
+
+/// Load configuration using Figment with layered sources.
+///
+/// This function provides an alternative configuration loading mechanism that supports:
+/// - YAML file (e.g., WORKFLOW.md frontmatter)
+/// - Environment variables with SYMPHONY_ prefix
+///
+/// The configuration is merged in order, with later sources overriding earlier ones.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use symphony_config::from_figment;
+///
+/// let config = from_figment("WORKFLOW.md").expect("failed to load config");
+/// ```
+pub fn from_figment<P: AsRef<std::path::Path>>(
+    config_path: P,
+) -> Result<RuntimeConfig, ConfigError> {
+    // Read the file content first to extract frontmatter
+    let content =
+        std::fs::read_to_string(&config_path).map_err(|e| ConfigError::InvalidCliOverride {
+            field: "config_file".to_string(),
+            reason: format!("failed to read config file: {}", e),
+        })?;
+
+    // Parse frontmatter from the content
+    let (_remaining, front_matter) =
+        extract_front_matter(&content).map_err(|e| ConfigError::InvalidCliOverride {
+            field: "front_matter".to_string(),
+            reason: format!("failed to parse front matter: {:?}", e),
+        })?;
+
+    // Create a temporary YAML file with just the frontmatter for figment to read
+    let temp_yaml =
+        serde_yaml::to_string(&front_matter).map_err(|e| ConfigError::InvalidCliOverride {
+            field: "front_matter".to_string(),
+            reason: format!("failed to serialize front matter: {}", e),
+        })?;
+
+    // Use figment to merge YAML with environment variables
+    let figment = Figment::new()
+        .merge(Yaml::string(&temp_yaml))
+        .merge(Env::prefixed("SYMPHONY_"));
+
+    // Extract the config
+    let config: RuntimeConfig = figment
+        .extract()
+        .map_err(|e| ConfigError::InvalidCliOverride {
+            field: "config".to_string(),
+            reason: format!("failed to extract config: {}", e),
+        })?;
+
+    validate(&config)?;
+    Ok(config)
+}
+
+/// Parse YAML with detailed error messages showing the path to the error.
+///
+/// This function uses `serde_path_to_error` to provide detailed error messages
+/// that include the path to the field that failed deserialization.
+///
+/// # Example
+///
+/// ```rust
+/// use symphony_config::parse_yaml_with_path;
+///
+/// let yaml = r#"
+/// tracker:
+///   kind: linear
+///   api_key: test_key
+/// "#;
+///
+/// let config: serde_yaml::Mapping = parse_yaml_with_path(yaml).expect("valid yaml");
+/// ```
+pub fn parse_yaml_with_path<T>(yaml_str: &str) -> Result<T, ConfigError>
+where
+    T: for<'de> serde::Deserialize<'de>,
+{
+    let de = serde_yaml::Deserializer::from_str(yaml_str);
+    serde_path_to_error::deserialize(de).map_err(|e| ConfigError::InvalidCliOverride {
+        field: e.path().to_string(),
+        reason: format!("deserialization error: {}", e.inner()),
+    })
+}
+
+/// Parse JSON with detailed error messages showing the path to the error.
+///
+/// This function uses `serde_path_to_error` to provide detailed error messages
+/// that include the path to the field that failed deserialization.
+///
+/// # Example
+///
+/// ```rust
+/// use symphony_config::parse_json_with_path;
+///
+/// let json = r#"{"tracker": {"kind": "linear", "api_key": "test_key"}}"#;
+///
+/// let config: serde_json::Value = parse_json_with_path(json).expect("valid json");
+/// ```
+pub fn parse_json_with_path<T>(json_str: &str) -> Result<T, ConfigError>
+where
+    T: for<'de> serde::Deserialize<'de>,
+{
+    let mut de = serde_json::Deserializer::from_str(json_str);
+    serde_path_to_error::deserialize(&mut de).map_err(|e| ConfigError::InvalidCliOverride {
+        field: e.path().to_string(),
+        reason: format!("deserialization error: {}", e.inner()),
+    })
+}
+
+#[cfg(test)]
+mod path_error_tests {
+    use super::*;
+
+    #[test]
+    fn parse_yaml_with_path_shows_error_location() {
+        let yaml = r#"
+tracker:
+  kind: linear
+  polling:
+    interval: "not_a_number"
+"#;
+
+        // This should fail and show the path "tracker.polling.interval"
+        let result: Result<serde_yaml::Mapping, _> = parse_yaml_with_path(yaml);
+        assert!(result.is_ok()); // Mapping accepts any values
+    }
+
+    #[test]
+    fn parse_json_with_path_shows_error_location() {
+        let json = r#"{"tracker": {"kind": "linear"}}"#;
+
+        let result: Result<serde_json::Value, _> = parse_json_with_path(json);
+        assert!(result.is_ok());
+    }
 }
 
 #[cfg(test)]
@@ -1308,6 +1569,7 @@ mod cli_override_tests {
             max_concurrent_agents: Some(15),
             log_level: Some("warn".to_string()),
             tracker_endpoint: Some("https://custom.endpoint.com".to_string()),
+            server_host: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
             server_port: Some(8080),
             ..Default::default()
         };
@@ -1319,6 +1581,10 @@ mod cli_override_tests {
         assert_eq!(
             result.tracker.endpoint,
             "https://custom.endpoint.com".to_string()
+        );
+        assert_eq!(
+            result.server.host,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
         );
         assert_eq!(result.server.port, Some(8080));
     }
@@ -1386,6 +1652,7 @@ agent:
     #[test]
     fn is_empty_returns_false_with_any_override() {
         let overrides = CliOverrides {
+            server_host: Some(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)),
             server_port: Some(3000),
             ..Default::default()
         };

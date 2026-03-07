@@ -1,16 +1,29 @@
 #![forbid(unsafe_code)]
 
+//! Pure domain model for Symphony orchestration state.
+//!
+//! This crate owns the reducer, its executable invariant catalog, and the
+//! serialization-safe diagnostics used by runtime and operator surfaces.
+
+mod agent_update;
+mod invariants;
+
 #[cfg(test)]
 mod property_tests;
 
-use std::collections::{HashMap, HashSet};
+use im::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use crate::invariants::{InvariantDescriptor, invariant_catalog, invariant_descriptor};
+use crate::{agent_update::apply_agent_update, invariants::validate_all};
+
+/// Stable issue identifier used as the primary key across reducer state.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct IssueId(pub String);
 
+/// Absolute Codex token counters reported by a worker event.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
@@ -18,6 +31,7 @@ pub struct Usage {
     pub total_tokens: u64,
 }
 
+/// Live worker/session metadata tracked while an issue is running.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunningEntry {
     pub identifier: Option<String>,
@@ -34,6 +48,7 @@ pub struct RunningEntry {
     pub usage: Usage,
 }
 
+/// Workspace-wide aggregate Codex counters derived from absolute worker usage.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodexTotals {
     pub input_tokens: u64,
@@ -41,6 +56,7 @@ pub struct CodexTotals {
     pub total_tokens: u64,
 }
 
+/// Pending retry metadata for an issue that remains claimed but is not running.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryEntry {
     pub attempt: u32,
@@ -49,6 +65,7 @@ pub struct RetryEntry {
     pub due_at: Option<u64>,
 }
 
+/// Single authoritative reducer state for orchestration topology and counters.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrchestratorState {
     pub claimed: HashSet<IssueId>,
@@ -58,6 +75,7 @@ pub struct OrchestratorState {
     pub codex_rate_limits: Option<serde_json::Value>,
 }
 
+/// Incremental live-session update emitted by the worker/protocol layer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentUpdate {
     pub issue_id: IssueId,
@@ -72,6 +90,7 @@ pub struct AgentUpdate {
     pub rate_limits: Option<serde_json::Value>,
 }
 
+/// Reducer input events.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Claim(IssueId),
@@ -81,6 +100,7 @@ pub enum Event {
     Release(IssueId),
 }
 
+/// Reducer side-effect intents emitted by successful or rejected transitions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     Dispatch(IssueId),
@@ -95,6 +115,7 @@ pub enum Command {
     },
 }
 
+/// Typed reasons for state-preserving transition rejection.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum TransitionRejection {
     #[error("issue is already claimed")]
@@ -109,6 +130,7 @@ pub enum TransitionRejection {
     RetryAttemptRegression,
 }
 
+/// Serialization-safe operator payload for rejected transitions.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransitionRejectionPayload {
     pub code: String,
@@ -116,6 +138,7 @@ pub struct TransitionRejectionPayload {
 }
 
 impl TransitionRejection {
+    #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
             Self::AlreadyClaimed => "already_claimed",
@@ -126,6 +149,7 @@ impl TransitionRejection {
         }
     }
 
+    #[must_use]
     pub fn to_payload(&self) -> TransitionRejectionPayload {
         TransitionRejectionPayload {
             code: self.code().to_owned(),
@@ -134,6 +158,7 @@ impl TransitionRejection {
     }
 }
 
+/// Executable invariant violations for the orchestrator reducer state.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum InvariantError {
     #[error("issue cannot run without claim")]
@@ -148,6 +173,7 @@ pub enum InvariantError {
     TransitionRejected(TransitionRejection),
 }
 
+/// Serialization-safe operator payload for invariant failures.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvariantViolation {
     pub code: String,
@@ -155,6 +181,7 @@ pub struct InvariantViolation {
 }
 
 impl InvariantError {
+    #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
             Self::RunningWithoutClaim => "running_without_claim",
@@ -165,6 +192,7 @@ impl InvariantError {
         }
     }
 
+    #[must_use]
     pub fn to_violation(&self) -> InvariantViolation {
         InvariantViolation {
             code: self.code().to_owned(),
@@ -179,6 +207,24 @@ impl From<TransitionRejection> for InvariantError {
     }
 }
 
+/// Applies a reducer event and returns the next state plus emitted commands.
+///
+/// # Examples
+///
+/// ```
+/// use symphony_domain::{Command, Event, IssueId, OrchestratorState, reduce};
+///
+/// let issue_id = IssueId("SYM-101".to_owned());
+/// let (claimed_state, claim_commands) =
+///     reduce(OrchestratorState::default(), Event::Claim(issue_id.clone()));
+/// let (running_state, run_commands) = reduce(claimed_state, Event::MarkRunning(issue_id.clone()));
+///
+/// assert!(claim_commands.is_empty());
+/// assert_eq!(run_commands, vec![Command::Dispatch(issue_id.clone())]);
+/// assert!(running_state.claimed.contains(&issue_id));
+/// assert!(running_state.running.contains_key(&issue_id));
+/// ```
+#[must_use]
 pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState, Vec<Command>) {
     match event {
         Event::Claim(issue_id) => {
@@ -200,76 +246,13 @@ pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState,
             return (state, vec![Command::Dispatch(dispatch_issue_id)]);
         }
         Event::UpdateAgent(update) => {
-            let AgentUpdate {
-                issue_id,
-                session_id,
-                thread_id,
-                turn_id,
-                pid,
-                event,
-                timestamp,
-                message,
-                usage,
-                rate_limits,
-            } = *update;
-            if !state.running.contains_key(&issue_id) {
-                return reject_transition(state, issue_id, TransitionRejection::MissingClaim);
+            let update = *update;
+            let issue_id = update.issue_id.clone();
+
+            if let Err(reason) = apply_agent_update(&mut state, update) {
+                return reject_transition(state, issue_id, reason);
             }
-            if let Some(entry) = state.running.get_mut(&issue_id) {
-                let previous_session_id = entry.session_id.clone();
-                let previous_thread_id = entry.thread_id.clone();
-                let session_changed = session_id
-                    .as_ref()
-                    .is_some_and(|next| previous_session_id.as_ref() != Some(next));
-                let thread_changed = thread_id
-                    .as_ref()
-                    .is_some_and(|next| previous_thread_id.as_ref() != Some(next));
-                if session_changed || thread_changed {
-                    entry.usage = Usage::default();
-                }
-                if let Some(sid) = session_id {
-                    entry.session_id = Some(sid);
-                }
-                if let Some(tid) = thread_id {
-                    entry.thread_id = Some(tid);
-                }
-                if let Some(tuid) = turn_id {
-                    if entry.turn_id.as_ref() != Some(&tuid) {
-                        entry.turn_count = entry.turn_count.saturating_add(1);
-                    }
-                    entry.turn_id = Some(tuid);
-                }
-                if let Some(p) = pid {
-                    entry.codex_app_server_pid = Some(p);
-                }
-                if let Some(e) = event {
-                    entry.last_codex_event = Some(e);
-                }
-                if let Some(ts) = timestamp {
-                    if entry.started_at.is_none() {
-                        entry.started_at = Some(ts);
-                    }
-                    entry.last_codex_timestamp = Some(ts);
-                }
-                if let Some(msg) = message {
-                    entry.last_codex_message = Some(msg);
-                }
-                if let Some(u) = usage {
-                    let previous_usage = entry.usage.clone();
-                    let delta = Usage {
-                        input_tokens: u.input_tokens.saturating_sub(previous_usage.input_tokens),
-                        output_tokens: u.output_tokens.saturating_sub(previous_usage.output_tokens),
-                        total_tokens: u.total_tokens.saturating_sub(previous_usage.total_tokens),
-                    };
-                    entry.usage = u;
-                    state.codex_totals.input_tokens += delta.input_tokens;
-                    state.codex_totals.output_tokens += delta.output_tokens;
-                    state.codex_totals.total_tokens += delta.total_tokens;
-                }
-                if let Some(next_rate_limits) = rate_limits {
-                    state.codex_rate_limits = Some(next_rate_limits);
-                }
-            }
+
             return (state, Vec::new());
         }
         Event::QueueRetry { issue_id, attempt } => {
@@ -317,32 +300,20 @@ pub fn reduce(mut state: OrchestratorState, event: Event) -> (OrchestratorState,
     (state, Vec::new())
 }
 
+/// Validates the reducer's executable invariant catalog in stable order.
+///
+/// Use [`invariant_catalog`] to inspect the full set of stable runtime
+/// invariants that this function enforces.
+///
+/// # Examples
+///
+/// ```
+/// use symphony_domain::{OrchestratorState, validate_invariants};
+///
+/// assert_eq!(validate_invariants(&OrchestratorState::default()), Ok(()));
+/// ```
 pub fn validate_invariants(state: &OrchestratorState) -> Result<(), InvariantError> {
-    if state.running.keys().any(|id| !state.claimed.contains(id)) {
-        return Err(InvariantError::RunningWithoutClaim);
-    }
-    if state
-        .retry_attempts
-        .keys()
-        .any(|issue_id| !state.claimed.contains(issue_id))
-    {
-        return Err(InvariantError::RetryWithoutClaim);
-    }
-    if state
-        .running
-        .keys()
-        .any(|issue_id| state.retry_attempts.contains_key(issue_id))
-    {
-        return Err(InvariantError::RunningAndRetrying);
-    }
-    if state
-        .retry_attempts
-        .values()
-        .any(|retry_entry| retry_entry.attempt == 0)
-    {
-        return Err(InvariantError::RetryAttemptMustBePositive);
-    }
-    Ok(())
+    validate_all(state)
 }
 
 fn reject_transition(
@@ -400,6 +371,312 @@ mod tests {
         assert_eq!(run_commands, vec![Command::Dispatch(issue_id.clone())]);
         assert!(state.claimed.contains(&issue_id));
         assert!(state.running.contains_key(&issue_id));
+        assert_eq!(validate_invariants(&state), Ok(()));
+    }
+
+    #[test]
+    fn update_agent_requires_running_issue() {
+        let issue_id = issue_id("SYM-11");
+        let update = AgentUpdate {
+            issue_id: issue_id.clone(),
+            session_id: Some("session-1".to_owned()),
+            thread_id: Some("thread-1".to_owned()),
+            turn_id: Some("turn-1".to_owned()),
+            pid: Some(1234),
+            event: Some("turn.start".to_owned()),
+            timestamp: Some(1_700_000_000),
+            message: Some("processing".to_owned()),
+            usage: Some(Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+            }),
+            rate_limits: None,
+        };
+
+        let (state, commands) = reduce(
+            OrchestratorState::default(),
+            Event::UpdateAgent(Box::new(update)),
+        );
+
+        assert_eq!(state, OrchestratorState::default());
+        assert_eq!(
+            commands,
+            vec![Command::TransitionRejected {
+                issue_id,
+                reason: TransitionRejection::MissingClaim,
+            }],
+        );
+        assert_eq!(validate_invariants(&state), Ok(()));
+    }
+
+    #[test]
+    fn update_agent_tracks_absolute_usage_without_double_counting() {
+        let issue_id = issue_id("SYM-12");
+        let mut state = OrchestratorState::default();
+        state.claimed.insert(issue_id.clone());
+        state
+            .running
+            .insert(issue_id.clone(), RunningEntry::default());
+
+        let first_usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            total_tokens: 150,
+        };
+        let repeated_usage = first_usage.clone();
+        let increased_usage = Usage {
+            input_tokens: 140,
+            output_tokens: 70,
+            total_tokens: 210,
+        };
+
+        let (state, _) = reduce(
+            state,
+            Event::UpdateAgent(Box::new(AgentUpdate {
+                issue_id: issue_id.clone(),
+                session_id: Some("session-1".to_owned()),
+                thread_id: Some("thread-1".to_owned()),
+                turn_id: Some("turn-1".to_owned()),
+                pid: None,
+                event: None,
+                timestamp: Some(1_700_000_000),
+                message: None,
+                usage: Some(first_usage.clone()),
+                rate_limits: None,
+            })),
+        );
+        let (state, _) = reduce(
+            state,
+            Event::UpdateAgent(Box::new(AgentUpdate {
+                issue_id: issue_id.clone(),
+                session_id: Some("session-1".to_owned()),
+                thread_id: Some("thread-1".to_owned()),
+                turn_id: Some("turn-1".to_owned()),
+                pid: None,
+                event: None,
+                timestamp: Some(1_700_000_001),
+                message: None,
+                usage: Some(repeated_usage),
+                rate_limits: None,
+            })),
+        );
+        let (state, _) = reduce(
+            state,
+            Event::UpdateAgent(Box::new(AgentUpdate {
+                issue_id: issue_id.clone(),
+                session_id: Some("session-1".to_owned()),
+                thread_id: Some("thread-1".to_owned()),
+                turn_id: Some("turn-2".to_owned()),
+                pid: None,
+                event: None,
+                timestamp: Some(1_700_000_002),
+                message: None,
+                usage: Some(increased_usage.clone()),
+                rate_limits: None,
+            })),
+        );
+
+        let entry = state
+            .running
+            .get(&issue_id)
+            .expect("issue should remain running");
+        assert_eq!(entry.usage, increased_usage);
+        assert_eq!(entry.turn_count, 2);
+        assert_eq!(state.codex_totals.input_tokens, 140);
+        assert_eq!(state.codex_totals.output_tokens, 70);
+        assert_eq!(state.codex_totals.total_tokens, 210);
+        assert_eq!(validate_invariants(&state), Ok(()));
+    }
+
+    #[test]
+    fn update_agent_resets_usage_baseline_when_session_identity_changes() {
+        let issue_id = issue_id("SYM-13");
+        let mut state = OrchestratorState::default();
+        state.claimed.insert(issue_id.clone());
+        state
+            .running
+            .insert(issue_id.clone(), RunningEntry::default());
+
+        let (state, _) = reduce(
+            state,
+            Event::UpdateAgent(Box::new(AgentUpdate {
+                issue_id: issue_id.clone(),
+                session_id: Some("session-1".to_owned()),
+                thread_id: Some("thread-1".to_owned()),
+                turn_id: Some("turn-1".to_owned()),
+                pid: None,
+                event: Some("turn.start".to_owned()),
+                timestamp: Some(1_700_000_000),
+                message: None,
+                usage: Some(Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    total_tokens: 150,
+                }),
+                rate_limits: None,
+            })),
+        );
+
+        let (state, _) = reduce(
+            state,
+            Event::UpdateAgent(Box::new(AgentUpdate {
+                issue_id: issue_id.clone(),
+                session_id: Some("session-2".to_owned()),
+                thread_id: Some("thread-2".to_owned()),
+                turn_id: Some("turn-1".to_owned()),
+                pid: None,
+                event: Some("turn.resume".to_owned()),
+                timestamp: Some(1_700_000_005),
+                message: Some("session rotated".to_owned()),
+                usage: Some(Usage {
+                    input_tokens: 30,
+                    output_tokens: 10,
+                    total_tokens: 40,
+                }),
+                rate_limits: Some(serde_json::json!({
+                    "primary": {
+                        "remaining": 9
+                    }
+                })),
+            })),
+        );
+
+        let entry = state
+            .running
+            .get(&issue_id)
+            .expect("issue should remain running");
+        assert_eq!(entry.session_id.as_deref(), Some("session-2"));
+        assert_eq!(entry.thread_id.as_deref(), Some("thread-2"));
+        assert_eq!(entry.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(entry.turn_count, 1);
+        assert_eq!(entry.started_at, Some(1_700_000_000));
+        assert_eq!(entry.last_codex_timestamp, Some(1_700_000_005));
+        assert_eq!(entry.last_codex_message.as_deref(), Some("session rotated"));
+        assert_eq!(
+            entry.usage,
+            Usage {
+                input_tokens: 30,
+                output_tokens: 10,
+                total_tokens: 40,
+            },
+        );
+        assert_eq!(state.codex_totals.input_tokens, 130);
+        assert_eq!(state.codex_totals.output_tokens, 60);
+        assert_eq!(state.codex_totals.total_tokens, 190);
+        assert_eq!(
+            state.codex_rate_limits,
+            Some(serde_json::json!({
+                "primary": {
+                    "remaining": 9
+                }
+            })),
+        );
+        assert_eq!(validate_invariants(&state), Ok(()));
+    }
+
+    #[test]
+    fn update_agent_turn_count_is_stable_for_repeat_turn_ids() {
+        let issue_id = issue_id("SYM-14");
+        let mut state = OrchestratorState::default();
+        state.claimed.insert(issue_id.clone());
+        state
+            .running
+            .insert(issue_id.clone(), RunningEntry::default());
+
+        let initial_turn = AgentUpdate {
+            issue_id: issue_id.clone(),
+            session_id: Some("session-1".to_owned()),
+            thread_id: Some("thread-1".to_owned()),
+            turn_id: Some("turn-1".to_owned()),
+            pid: None,
+            event: None,
+            timestamp: Some(1_700_000_000),
+            message: None,
+            usage: None,
+            rate_limits: None,
+        };
+        let repeated_turn = AgentUpdate {
+            timestamp: Some(1_700_000_001),
+            ..initial_turn.clone()
+        };
+        let new_turn = AgentUpdate {
+            turn_id: Some("turn-2".to_owned()),
+            timestamp: Some(1_700_000_002),
+            ..initial_turn.clone()
+        };
+
+        let (state, _) = reduce(state, Event::UpdateAgent(Box::new(initial_turn.clone())));
+        let (state, _) = reduce(state, Event::UpdateAgent(Box::new(repeated_turn)));
+        let (state, _) = reduce(state, Event::UpdateAgent(Box::new(new_turn)));
+
+        let entry = state
+            .running
+            .get(&issue_id)
+            .expect("issue should remain running");
+        assert_eq!(entry.turn_count, 2);
+        assert_eq!(entry.turn_id.as_deref(), Some("turn-2"));
+        assert_eq!(entry.started_at, Some(1_700_000_000));
+        assert_eq!(entry.last_codex_timestamp, Some(1_700_000_002));
+        assert_eq!(validate_invariants(&state), Ok(()));
+    }
+
+    #[test]
+    fn update_agent_usage_regression_does_not_decrement_totals() {
+        let issue_id = issue_id("SYM-15");
+        let mut state = OrchestratorState::default();
+        state.claimed.insert(issue_id.clone());
+        state
+            .running
+            .insert(issue_id.clone(), RunningEntry::default());
+
+        let (state, _) = reduce(
+            state,
+            Event::UpdateAgent(Box::new(AgentUpdate {
+                issue_id: issue_id.clone(),
+                session_id: Some("session-1".to_owned()),
+                thread_id: Some("thread-1".to_owned()),
+                turn_id: Some("turn-1".to_owned()),
+                pid: None,
+                event: None,
+                timestamp: Some(1_700_000_000),
+                message: None,
+                usage: Some(Usage {
+                    input_tokens: 50,
+                    output_tokens: 30,
+                    total_tokens: 80,
+                }),
+                rate_limits: None,
+            })),
+        );
+        let (state, _) = reduce(
+            state,
+            Event::UpdateAgent(Box::new(AgentUpdate {
+                issue_id: issue_id.clone(),
+                session_id: Some("session-1".to_owned()),
+                thread_id: Some("thread-1".to_owned()),
+                turn_id: Some("turn-2".to_owned()),
+                pid: None,
+                event: None,
+                timestamp: Some(1_700_000_005),
+                message: None,
+                usage: Some(Usage {
+                    input_tokens: 40,
+                    output_tokens: 20,
+                    total_tokens: 60,
+                }),
+                rate_limits: None,
+            })),
+        );
+
+        let entry = state
+            .running
+            .get(&issue_id)
+            .expect("issue should remain running");
+        assert_eq!(entry.usage.total_tokens, 60);
+        assert_eq!(state.codex_totals.input_tokens, 50);
+        assert_eq!(state.codex_totals.output_tokens, 30);
+        assert_eq!(state.codex_totals.total_tokens, 80);
         assert_eq!(validate_invariants(&state), Ok(()));
     }
 
@@ -554,6 +831,122 @@ mod tests {
             validate_invariants(&state),
             Err(InvariantError::RetryAttemptMustBePositive),
         );
+    }
+
+    #[test]
+    fn validate_invariants_rejects_retry_without_claim() {
+        let issue_id = issue_id("SYM-271");
+        let mut state = OrchestratorState::default();
+        state.retry_attempts.insert(
+            issue_id,
+            RetryEntry {
+                attempt: 1,
+                ..RetryEntry::default()
+            },
+        );
+
+        assert_eq!(
+            validate_invariants(&state),
+            Err(InvariantError::RetryWithoutClaim),
+        );
+    }
+
+    #[test]
+    fn validate_invariants_rejects_running_and_retrying_same_issue() {
+        let issue_id = issue_id("SYM-272");
+        let mut state = OrchestratorState::default();
+        state.claimed.insert(issue_id.clone());
+        state
+            .running
+            .insert(issue_id.clone(), RunningEntry::default());
+        state.retry_attempts.insert(
+            issue_id,
+            RetryEntry {
+                attempt: 1,
+                ..RetryEntry::default()
+            },
+        );
+
+        assert_eq!(
+            validate_invariants(&state),
+            Err(InvariantError::RunningAndRetrying),
+        );
+    }
+
+    #[test]
+    fn invariant_catalog_covers_all_current_validation_errors() {
+        let cases = [
+            (
+                {
+                    let issue_id = issue_id("SYM-RUNNING");
+                    let mut state = OrchestratorState::default();
+                    state.running.insert(issue_id, RunningEntry::default());
+                    state
+                },
+                InvariantError::RunningWithoutClaim,
+            ),
+            (
+                {
+                    let issue_id = issue_id("SYM-RETRY");
+                    let mut state = OrchestratorState::default();
+                    state.retry_attempts.insert(
+                        issue_id,
+                        RetryEntry {
+                            attempt: 1,
+                            ..RetryEntry::default()
+                        },
+                    );
+                    state
+                },
+                InvariantError::RetryWithoutClaim,
+            ),
+            (
+                {
+                    let issue_id = issue_id("SYM-BOTH");
+                    let mut state = OrchestratorState::default();
+                    state.claimed.insert(issue_id.clone());
+                    state
+                        .running
+                        .insert(issue_id.clone(), RunningEntry::default());
+                    state.retry_attempts.insert(
+                        issue_id,
+                        RetryEntry {
+                            attempt: 1,
+                            ..RetryEntry::default()
+                        },
+                    );
+                    state
+                },
+                InvariantError::RunningAndRetrying,
+            ),
+            (
+                {
+                    let issue_id = issue_id("SYM-ZERO");
+                    let mut state = OrchestratorState::default();
+                    state.claimed.insert(issue_id.clone());
+                    state.retry_attempts.insert(
+                        issue_id,
+                        RetryEntry {
+                            attempt: 0,
+                            ..RetryEntry::default()
+                        },
+                    );
+                    state
+                },
+                InvariantError::RetryAttemptMustBePositive,
+            ),
+        ];
+
+        for (state, expected_error) in cases {
+            let error = validate_invariants(&state).expect_err("state should violate an invariant");
+            assert_eq!(error, expected_error);
+
+            let descriptor = invariant_descriptor(error.code())
+                .expect("every executable invariant must have catalog metadata");
+            assert_eq!(descriptor.code, error.code());
+            assert!(!descriptor.spec_sections.is_empty());
+            assert!(!descriptor.proof_modules.is_empty());
+        }
     }
 
     #[test]

@@ -6,14 +6,30 @@ if [[ $# -lt 1 ]]; then
   exit 2
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUST_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 suite="$1"
+
+cd "$RUST_ROOT"
 
 case "$suite" in
   interleavings)
-    planned_command="cargo test --test interleavings -- --nocapture"
+    command=(
+      cargo test
+      -p symphony-testkit
+      --test interleavings_suite
+      --
+      --nocapture
+    )
     ;;
   soak)
-    planned_command="cargo test --test soak -- --ignored --nocapture"
+    command=(
+      cargo test
+      -p symphony-testkit
+      --test soak_suite
+      --
+      --nocapture
+    )
     ;;
   *)
     echo "unknown suite: $suite" >&2
@@ -22,6 +38,10 @@ case "$suite" in
     ;;
 esac
 
-echo "[placeholder] long suite '$suite' is not implemented yet"
-echo "planned command: $planned_command"
-echo "placeholder completed successfully"
+echo "=== Symphony Long Suite ==="
+echo "Suite: $suite"
+echo "Rust root: $RUST_ROOT"
+echo "Command: ${command[*]}"
+echo ""
+
+"${command[@]}"

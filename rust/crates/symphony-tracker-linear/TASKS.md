@@ -1,6 +1,6 @@
 # symphony-tracker-linear Tasks
 
-## Status Snapshot (2026-03-06)
+## Status Snapshot (2026-03-07)
 - Completion: 93%
 - Done: task map defined, project-scoped candidate/state queries landed, page-size parity is fixed at `50`, normalized labels/blockers/priority/timestamps now match the current spec, bounded timeout/retry transport policy with transient status/timeout coverage is implemented, and live Linear auth-header compatibility now matches Elixir by sending the raw API token while tolerating accidental `Bearer ` prefixes in configured secrets.
 - In Progress: pagination edge/missing-node coverage and the remaining live API compatibility drills.

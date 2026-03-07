@@ -1,0 +1,78 @@
+name: symphony
+
+x-api-healthcheck: &api-healthcheck
+  test:
+    - CMD-SHELL
+    - curl --fail --silent --show-error http://127.0.0.1:8080/api/v1/state >/dev/null || exit 1
+  interval: 30s
+  timeout: 5s
+  retries: 5
+  start_period: 20s
+
+services:
+  symphony-rust:
+    profiles: ["rust"]
+    build:
+      context: .
+      dockerfile: Dockerfile.rust
+    image: symphony-rust:local
+    restart: unless-stopped
+    command:
+      - /srv/symphony/WORKFLOW.md
+      - --port
+      - "8080"
+      - --bind
+      - 0.0.0.0
+      - --workspace-root
+      - /var/lib/symphony/workspaces
+      - --logs-root
+      - /var/log/symphony
+      - --log-level
+      - info
+    environment:
+      LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY}
+    volumes:
+      - type: bind
+        source: ${SYMPHONY_WORKFLOW_PATH:?set SYMPHONY_WORKFLOW_PATH}
+        target: /srv/symphony/WORKFLOW.md
+        read_only: true
+      - symphony-rust-state:/var/lib/symphony
+      - symphony-rust-logs:/var/log/symphony
+    ports:
+      - "${SYMPHONY_RUST_PORT:-8080}:8080"
+    healthcheck: *api-healthcheck
+    stop_grace_period: 30s
+
+  symphony-elixir:
+    profiles: ["elixir"]
+    build:
+      context: .
+      dockerfile: Dockerfile.elixir
+    image: symphony-elixir:local
+    restart: unless-stopped
+    command:
+      - --i-understand-that-this-will-be-running-without-the-usual-guardrails
+      - --port
+      - "8080"
+      - --logs-root
+      - /var/log/symphony
+      - /srv/symphony/WORKFLOW.md
+    environment:
+      LINEAR_API_KEY: ${LINEAR_API_KEY:?set LINEAR_API_KEY}
+    volumes:
+      - type: bind
+        source: ${SYMPHONY_WORKFLOW_PATH:?set SYMPHONY_WORKFLOW_PATH}
+        target: /srv/symphony/WORKFLOW.md
+        read_only: true
+      - symphony-elixir-state:/var/lib/symphony
+      - symphony-elixir-logs:/var/log/symphony
+    ports:
+      - "${SYMPHONY_ELIXIR_PORT:-8081}:8080"
+    healthcheck: *api-healthcheck
+    stop_grace_period: 30s
+
+volumes:
+  symphony-rust-state:
+  symphony-rust-logs:
+  symphony-elixir-state:
+  symphony-elixir-logs:

@@ -3,11 +3,16 @@
 mod graphql;
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::DateTime;
+use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use reqwest::Client;
+use reqwest_middleware::ClientBuilder;
+use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
 use serde::{Serialize, de::DeserializeOwned};
 use symphony_domain::IssueId;
 use symphony_tracker::{
@@ -126,7 +131,8 @@ pub struct LinearTracker {
     api_key: String,
     project_slug: String,
     candidate_states: Vec<TrackerState>,
-    http_client: Client,
+    http_client: reqwest_middleware::ClientWithMiddleware,
+    rate_limiter: Option<Arc<DefaultDirectRateLimiter>>,
 }
 
 impl LinearTracker {
@@ -148,13 +154,53 @@ impl LinearTracker {
         api_key: impl Into<String>,
         project_slug: impl Into<String>,
     ) -> Self {
+        let retry_policy = ExponentialBackoff::builder()
+            .retry_bounds(
+                Duration::from_millis(DEFAULT_LINEAR_RETRY_BASE_DELAY_MILLIS),
+                Duration::from_secs(10),
+            )
+            .build_with_max_retries(DEFAULT_LINEAR_RETRY_MAX_ATTEMPTS.saturating_sub(1) as u32);
+
+        let http_client = ClientBuilder::new(http_client)
+            .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+            .build();
+
         Self {
             endpoint: endpoint.into(),
             api_key: normalize_api_key(api_key.into()),
             project_slug: project_slug.into().trim().to_owned(),
             candidate_states: Vec::new(),
             http_client,
+            rate_limiter: None,
         }
+    }
+
+    /// Configure rate limiting for API requests.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use symphony_tracker_linear::LinearTracker;
+    ///
+    /// let tracker = LinearTracker::new("https://api.linear.app/graphql", "api_key", "project")
+    ///     .with_rate_limit(100, std::time::Duration::from_secs(60)); // 100 requests per minute
+    /// ```
+    pub fn with_rate_limit(mut self, requests: u32, per: Duration) -> Self {
+        if requests == 0 || per.is_zero() {
+            self.rate_limiter = None;
+            return self;
+        }
+
+        let burst = NonZeroU32::new(requests).unwrap_or_else(|| NonZeroU32::new(1).unwrap());
+        // Calculate refill rate: requests per second
+        let refill_per_second = requests as f64 / per.as_secs_f64();
+        // Create quota with calculated period per request
+        let period_per_request = Duration::from_secs_f64(1.0 / refill_per_second);
+        let quota = Quota::with_period(period_per_request)
+            .expect("valid period")
+            .allow_burst(burst);
+        self.rate_limiter = Some(Arc::new(RateLimiter::direct(quota)));
+        self
     }
 
     pub fn with_candidate_states(mut self, candidate_states: Vec<TrackerState>) -> Self {
@@ -212,75 +258,58 @@ impl LinearTracker {
         V: Serialize + Clone,
         D: DeserializeOwned,
     {
-        for attempt in 1..=DEFAULT_LINEAR_RETRY_MAX_ATTEMPTS {
-            let response = match self
-                .http_client
-                .post(self.endpoint.as_str())
-                .header("Authorization", self.api_key.as_str())
-                .json(&graphql::GraphQlRequest {
-                    query,
-                    variables: variables.clone(),
-                })
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(err) => {
-                    if attempt < DEFAULT_LINEAR_RETRY_MAX_ATTEMPTS {
-                        tokio::time::sleep(retry_backoff(attempt)).await;
-                        continue;
-                    }
-                    return Err(TrackerError::transport(err.to_string()));
-                }
-            };
-
-            let status = response.status();
-            let body = match response.bytes().await {
-                Ok(body) => body,
-                Err(err) => {
-                    if attempt < DEFAULT_LINEAR_RETRY_MAX_ATTEMPTS {
-                        tokio::time::sleep(retry_backoff(attempt)).await;
-                        continue;
-                    }
-                    return Err(TrackerError::transport(err.to_string()));
-                }
-            };
-
-            if !status.is_success() {
-                if should_retry_status(status) && attempt < DEFAULT_LINEAR_RETRY_MAX_ATTEMPTS {
-                    tokio::time::sleep(retry_backoff(attempt)).await;
-                    continue;
-                }
-
-                return Err(TrackerError::status(
-                    status.as_u16(),
-                    String::from_utf8_lossy(&body).to_string(),
-                ));
-            }
-
-            let response = serde_json::from_slice::<graphql::GraphQlResponse<D>>(&body)
-                .map_err(|err| TrackerError::payload(format!("invalid graphql payload: {err}")))?;
-            if !response.errors.is_empty() {
-                let messages = response
-                    .errors
-                    .into_iter()
-                    .map(|err| {
-                        let message = err.message.trim().to_owned();
-                        if message.is_empty() {
-                            "unknown graphql error".to_owned()
-                        } else {
-                            message
-                        }
-                    })
-                    .collect();
-                return Err(TrackerError::graphql(messages));
-            }
-            return response
-                .data
-                .ok_or_else(|| TrackerError::payload("graphql payload missing data"));
+        // Apply rate limiting if configured
+        if let Some(ref limiter) = self.rate_limiter {
+            limiter.until_ready().await;
         }
 
-        unreachable!("bounded retry loop should always return or continue");
+        let body = serde_json::to_vec(&graphql::GraphQlRequest { query, variables })
+            .map_err(|err| TrackerError::payload(format!("failed to serialize request: {err}")))?;
+
+        let response = self
+            .http_client
+            .post(self.endpoint.as_str())
+            .header("Authorization", self.api_key.as_str())
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|err| TrackerError::transport(err.to_string()))?;
+
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|err| TrackerError::transport(err.to_string()))?;
+
+        if !status.is_success() {
+            return Err(TrackerError::status(
+                status.as_u16(),
+                String::from_utf8_lossy(&body).to_string(),
+            ));
+        }
+
+        let response = parse_graphql_response(&body)?;
+
+        if !response.errors.is_empty() {
+            let messages = response
+                .errors
+                .into_iter()
+                .map(|err| {
+                    let message = err.message.trim().to_owned();
+                    if message.is_empty() {
+                        "unknown graphql error".to_owned()
+                    } else {
+                        message
+                    }
+                })
+                .collect();
+            return Err(TrackerError::graphql(messages));
+        }
+
+        response
+            .data
+            .ok_or_else(|| TrackerError::payload("graphql payload missing data"))
     }
 }
 
@@ -293,15 +322,22 @@ fn normalize_api_key(api_key: String) -> String {
         .to_owned()
 }
 
-fn retry_backoff(attempt: usize) -> Duration {
-    let exponent = attempt.saturating_sub(1).min(4) as u32;
-    Duration::from_millis(DEFAULT_LINEAR_RETRY_BASE_DELAY_MILLIS.saturating_mul(1_u64 << exponent))
-}
-
-fn should_retry_status(status: reqwest::StatusCode) -> bool {
-    status == reqwest::StatusCode::REQUEST_TIMEOUT
-        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
+fn parse_graphql_response<D>(body: &[u8]) -> Result<graphql::GraphQlResponse<D>, TrackerError>
+where
+    D: DeserializeOwned,
+{
+    let mut deserializer = serde_json::Deserializer::from_slice(body);
+    let response: graphql::GraphQlResponse<D> = serde_path_to_error::deserialize(&mut deserializer)
+        .map_err(|err| {
+            let path = err.path().to_string();
+            let detail = if path.is_empty() {
+                err.inner().to_string()
+            } else {
+                format!("{} at `{path}`", err.inner())
+            };
+            TrackerError::payload(format!("invalid graphql payload: {detail}"))
+        })?;
+    Ok(response)
 }
 
 fn insert_unique_issue_id(
@@ -589,7 +625,9 @@ impl TrackerClient for LinearTracker {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_api_key;
+    use std::time::Duration;
+
+    use super::{LinearTracker, normalize_api_key};
 
     #[test]
     fn normalize_api_key_trims_optional_bearer_prefix() {
@@ -605,5 +643,21 @@ mod tests {
             normalize_api_key(" bearer linear-api-key ".to_owned()),
             "linear-api-key"
         );
+    }
+
+    #[test]
+    fn with_rate_limit_ignores_zero_requests() {
+        let tracker = LinearTracker::new("https://api.linear.app/graphql", "api_key", "project")
+            .with_rate_limit(0, Duration::from_secs(60));
+
+        assert!(tracker.rate_limiter.is_none());
+    }
+
+    #[test]
+    fn with_rate_limit_ignores_zero_period() {
+        let tracker = LinearTracker::new("https://api.linear.app/graphql", "api_key", "project")
+            .with_rate_limit(100, Duration::ZERO);
+
+        assert!(tracker.rate_limiter.is_none());
     }
 }

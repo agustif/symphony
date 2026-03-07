@@ -7,10 +7,11 @@ use serde_json::Value;
 
 use crate::{
     API_V1_PREFIX, ApiResponse, DASHBOARD_ROUTE, HttpMethod, ISSUE_ROUTE_PREFIX, REFRESH_ROUTE,
-    STATE_ROUTE,
+    STATE_ROUTE, issue_route,
 };
 use symphony_observability::{
-    IssueSnapshot, RuntimeSnapshot, SnapshotStatus, StateSnapshot, StateSnapshotEnvelope,
+    IssueSnapshot, RuntimeHealthStatus, RuntimeSnapshot, SnapshotStatus, StateSnapshot,
+    StateSnapshotEnvelope,
 };
 
 use crate::payloads::{
@@ -88,6 +89,7 @@ pub fn dashboard_to_html(snapshot: &StateSnapshot) -> String {
 }
 
 pub fn dashboard_envelope_to_html(envelope: &StateSnapshotEnvelope) -> String {
+    let snapshot_available = envelope.snapshot.is_some();
     let snapshot = envelope.snapshot.as_ref().cloned().unwrap_or_default();
     let view = StateApiView::from(&snapshot);
     let now = DateTime::<Utc>::from(SystemTime::now());
@@ -95,6 +97,65 @@ pub fn dashboard_envelope_to_html(envelope: &StateSnapshotEnvelope) -> String {
         (Some(_), SnapshotStatus::Stale) => ("stale", "status-stale"),
         (Some(_), _) => ("offline", "status-offline"),
         (None, _) => ("live", "status-live"),
+    };
+    let (
+        running_value,
+        running_detail,
+        retrying_value,
+        retrying_detail,
+        token_value,
+        token_detail,
+        runtime_value,
+        runtime_detail,
+        poll_status,
+        poll_status_detail_text,
+        last_activity,
+        last_activity_detail_text,
+        throughput_value,
+        throughput_detail,
+    ) = if snapshot_available {
+        (
+            view.counts.running.to_string(),
+            "Active issue sessions in the current runtime.".to_owned(),
+            view.counts.retrying.to_string(),
+            "Issues waiting for the next retry window.".to_owned(),
+            format_token_count(view.codex_totals.total_tokens),
+            format!(
+                "In {} / Out {}",
+                format_token_count(view.codex_totals.input_tokens),
+                format_token_count(view.codex_totals.output_tokens),
+            ),
+            format_duration_seconds(total_runtime_seconds(&view, &now)),
+            "Total Codex runtime across completed and active sessions.".to_owned(),
+            poll_status_value(&view),
+            poll_status_detail(&view, &now),
+            last_activity_value(&view, &now),
+            last_activity_detail(&view),
+            format_tps(view.activity.throughput.total_tokens_per_second),
+            format!(
+                "{} · In {} / Out {}",
+                format_throughput_window(view.activity.throughput.window_seconds),
+                format_tps(view.activity.throughput.input_tokens_per_second),
+                format_tps(view.activity.throughput.output_tokens_per_second),
+            ),
+        )
+    } else {
+        (
+            "n/a".to_owned(),
+            "Snapshot unavailable; live running counts are not available yet.".to_owned(),
+            "n/a".to_owned(),
+            "Snapshot unavailable; retry backlog counts are not available yet.".to_owned(),
+            "n/a".to_owned(),
+            "Snapshot unavailable; Codex usage totals are not available yet.".to_owned(),
+            "n/a".to_owned(),
+            "Snapshot unavailable; total Codex runtime is not available yet.".to_owned(),
+            "unavailable".to_owned(),
+            "No cached snapshot is available yet. JSON routes return error envelopes until the runtime recovers.".to_owned(),
+            "n/a".to_owned(),
+            "No cached snapshot is available yet, so recent activity cannot be summarized.".to_owned(),
+            "n/a".to_owned(),
+            "Snapshot unavailable; throughput is not available yet.".to_owned(),
+        )
     };
 
     let mut html = String::new();
@@ -200,31 +261,25 @@ pub fn dashboard_envelope_to_html(envelope: &StateSnapshotEnvelope) -> String {
         ),
         health_class,
         health_label,
-        view.counts.running,
-        view.counts.retrying,
-        format_token_count(view.codex_totals.total_tokens),
-        format_token_count(view.codex_totals.input_tokens),
-        format_token_count(view.codex_totals.output_tokens),
-        format_duration_seconds(total_runtime_seconds(&view, &now)),
-        escape_html(&poll_status_value(&view)),
-        escape_html(&poll_status_detail(&view, &now)),
-        escape_html(&last_activity_value(&view, &now)),
-        escape_html(&last_activity_detail(&view)),
-        escape_html(&format_tps(
-            view.activity.throughput.total_tokens_per_second
-        )),
-        escape_html(&format_throughput_window(
-            view.activity.throughput.window_seconds
-        )),
-        escape_html(&format_tps(
-            view.activity.throughput.input_tokens_per_second
-        )),
-        escape_html(&format_tps(
-            view.activity.throughput.output_tokens_per_second
-        )),
+        escape_html(&running_value),
+        escape_html(&running_detail),
+        escape_html(&retrying_value),
+        escape_html(&retrying_detail),
+        escape_html(&token_value),
+        escape_html(&token_detail),
+        escape_html(&runtime_value),
+        escape_html(&runtime_detail),
+        escape_html(&poll_status),
+        escape_html(&poll_status_detail_text),
+        escape_html(&last_activity),
+        escape_html(&last_activity_detail_text),
+        escape_html(&throughput_value),
+        escape_html(&throughput_detail),
     );
 
-    push_operator_briefing_panel(&mut html, &view, envelope, &now);
+    push_operator_briefing_panel(&mut html, &view, envelope, &now, snapshot_available);
+    push_issue_status_panel(&mut html, snapshot_available.then_some(&view));
+    push_snapshot_summary_panel(&mut html, snapshot_available.then_some(&view));
 
     if let Some(error) = &envelope.error {
         push_snapshot_health_panel(
@@ -237,9 +292,17 @@ pub fn dashboard_envelope_to_html(envelope: &StateSnapshotEnvelope) -> String {
         );
     }
 
-    push_rate_limits_panel(&mut html, view.rate_limits.as_ref());
-    push_running_sessions_table(&mut html, &view.running, &now);
-    push_retry_queue_table(&mut html, &view.retrying, &now);
+    push_rate_limits_panel(&mut html, view.rate_limits.as_ref(), snapshot_available);
+    push_running_sessions_table(
+        &mut html,
+        snapshot_available.then_some(view.running.as_slice()),
+        &now,
+    );
+    push_retry_queue_table(
+        &mut html,
+        snapshot_available.then_some(view.retrying.as_slice()),
+        &now,
+    );
 
     html.push_str(concat!(
         "<section aria-labelledby=\"api-heading\">",
@@ -308,7 +371,7 @@ pub fn handle_request_with_workspace_envelope(
             HttpMethod::Get => envelope
                 .snapshot
                 .as_ref()
-                .and_then(|snapshot| snapshot.issue_by_id_or_identifier(issue_identifier))
+                .and_then(|snapshot| snapshot.issue_by_id_or_identifier(&issue_identifier))
                 .map_or_else(ApiResponse::issue_not_found, |issue| {
                     ApiResponse::ok(issue_detail_to_json_with_workspace(issue, workspace_root))
                 }),
@@ -343,7 +406,7 @@ pub fn handle_post(path: &str, snapshot: &StateSnapshot) -> ApiResponse {
     handle_request(HttpMethod::Post, path, snapshot)
 }
 
-fn issue_identifier_from_path(path: &str) -> Option<&str> {
+fn issue_identifier_from_path(path: &str) -> Option<String> {
     if let Some(issue_identifier) = path.strip_prefix(ISSUE_ROUTE_PREFIX) {
         return normalize_issue_identifier(issue_identifier);
     }
@@ -356,15 +419,20 @@ fn issue_identifier_from_path(path: &str) -> Option<&str> {
     normalize_issue_identifier(short_route)
 }
 
-fn normalize_issue_identifier(issue_identifier: &str) -> Option<&str> {
+fn normalize_issue_identifier(issue_identifier: &str) -> Option<String> {
     if issue_identifier.is_empty() || issue_identifier.contains('/') {
         None
     } else {
-        Some(issue_identifier)
+        crate::routes::decode_issue_identifier(issue_identifier)
+            .filter(|decoded| !decoded.is_empty())
     }
 }
 
-fn push_rate_limits_panel(html: &mut String, rate_limits: Option<&Value>) {
+fn push_rate_limits_panel(
+    html: &mut String,
+    rate_limits: Option<&Value>,
+    snapshot_available: bool,
+) {
     html.push_str(concat!(
         "<section aria-labelledby=\"rate-limits-heading\">",
         "<div class=\"section-header\">",
@@ -375,7 +443,11 @@ fn push_rate_limits_panel(html: &mut String, rate_limits: Option<&Value>) {
         "</div>"
     ));
 
-    if rate_limits.is_some() {
+    if !snapshot_available {
+        html.push_str(
+            "<p class=\"empty-state\">No cached snapshot is available yet, so upstream rate-limit data is unavailable.</p>",
+        );
+    } else if rate_limits.is_some() {
         let _ = write!(
             html,
             "<pre class=\"code-panel\">{}</pre>",
@@ -395,7 +467,50 @@ fn push_operator_briefing_panel(
     view: &StateApiView,
     envelope: &StateSnapshotEnvelope,
     now: &DateTime<Utc>,
+    snapshot_available: bool,
 ) {
+    let runtime_health = if snapshot_available {
+        runtime_health_value(view).to_owned()
+    } else {
+        "unavailable".to_owned()
+    };
+    let runtime_health_detail_text = if snapshot_available {
+        runtime_health_detail(view, now)
+    } else {
+        "No cached snapshot is available yet, so runtime health cannot be derived.".to_owned()
+    };
+    let latest_issue_update = if snapshot_available {
+        latest_issue_update_value(view, now)
+    } else {
+        "n/a".to_owned()
+    };
+    let latest_issue_update_detail_text = if snapshot_available {
+        latest_issue_update_detail(view)
+    } else {
+        "No cached snapshot is available yet, so recent issue activity cannot be summarized."
+            .to_owned()
+    };
+    let next_retry = if snapshot_available {
+        next_retry_value(&view.retrying, now)
+    } else {
+        "n/a".to_owned()
+    };
+    let next_retry_detail_text = if snapshot_available {
+        next_retry_detail(&view.retrying, now)
+    } else {
+        "No cached snapshot is available yet, so retry scheduling cannot be summarized.".to_owned()
+    };
+    let task_map_drift = if snapshot_available {
+        task_map_drift_value(view)
+    } else {
+        "unavailable".to_owned()
+    };
+    let task_map_drift_detail_text = if snapshot_available {
+        task_map_drift_detail(view)
+    } else {
+        "No cached snapshot is available yet, so task-map drift cannot be calculated.".to_owned()
+    };
+
     let _ = write!(
         html,
         concat!(
@@ -418,12 +533,22 @@ fn push_operator_briefing_panel(
             "<p class=\"metric-detail mono\">{}</p>",
             "</article>",
             "<article class=\"metric-card\">",
+            "<p class=\"metric-label\">Runtime Health</p>",
+            "<p class=\"metric-value\">{}</p>",
+            "<p class=\"metric-detail\">{}</p>",
+            "</article>",
+            "<article class=\"metric-card\">",
             "<p class=\"metric-label\">Latest Issue Update</p>",
             "<p class=\"metric-value\">{}</p>",
             "<p class=\"metric-detail\">{}</p>",
             "</article>",
             "<article class=\"metric-card\">",
             "<p class=\"metric-label\">Next Retry</p>",
+            "<p class=\"metric-value\">{}</p>",
+            "<p class=\"metric-detail\">{}</p>",
+            "</article>",
+            "<article class=\"metric-card\">",
+            "<p class=\"metric-label\">Task Map Drift</p>",
             "<p class=\"metric-value\">{}</p>",
             "<p class=\"metric-detail\">{}</p>",
             "</article>",
@@ -434,10 +559,14 @@ fn push_operator_briefing_panel(
         escape_html(&snapshot_status_detail(view, envelope, now)),
         escape_html(&format_relative_time(Some(&view.generated_at), now)),
         escape_html(&view.generated_at),
-        escape_html(&latest_issue_update_value(view, now)),
-        escape_html(&latest_issue_update_detail(view)),
-        escape_html(&next_retry_value(&view.retrying, now)),
-        escape_html(&next_retry_detail(&view.retrying, now)),
+        escape_html(&runtime_health),
+        escape_html(&runtime_health_detail_text),
+        escape_html(&latest_issue_update),
+        escape_html(&latest_issue_update_detail_text),
+        escape_html(&next_retry),
+        escape_html(&next_retry_detail_text),
+        escape_html(&task_map_drift),
+        escape_html(&task_map_drift_detail_text),
     );
 }
 
@@ -463,23 +592,137 @@ fn push_snapshot_health_panel(
             "<dt>Mode</dt><dd>{}</dd>",
             "<dt>Code</dt><dd><code>{}</code></dd>",
             "<dt>Message</dt><dd>{}</dd>",
+            "<dt>Runtime health</dt><dd>{}</dd>",
+            "<dt>Task map drift</dt><dd>{}</dd>",
             "<dt>Operator impact</dt><dd>{}</dd>",
-            "<dt>Snapshot generated</dt><dd><span class=\"mono\" title=\"{}\">{}</span></dd>",
+            "<dt>Response generated</dt><dd><span class=\"mono\" title=\"{}\">{}</span></dd>",
             "</dl>",
             "</section>"
         ),
         escape_html(snapshot_status_value(envelope)),
         escape_html(error_code),
         escape_html(error_message),
+        escape_html(runtime_health_value(view)),
+        escape_html(&task_map_drift_value(view)),
         escape_html(&snapshot_status_detail(view, envelope, now)),
         escape_html(&view.generated_at),
         escape_html(&format_relative_time(Some(&view.generated_at), now)),
     );
 }
 
+fn push_issue_status_panel(html: &mut String, view: Option<&StateApiView>) {
+    if let Some(view) = view {
+        let _ = write!(
+            html,
+            concat!(
+                "<section aria-labelledby=\"issue-status-heading\">",
+                "<div class=\"section-header\">",
+                "<div>",
+                "<h2 id=\"issue-status-heading\">Issue Status</h2>",
+                "<p class=\"section-copy\">Tracker-facing totals derived from the current snapshot.</p>",
+                "</div>",
+                "</div>",
+                "<div class=\"metric-grid\">",
+                "<article class=\"metric-card\">",
+                "<p class=\"metric-label\">Tracked</p>",
+                "<p class=\"metric-value numeric\">{}</p>",
+                "<p class=\"metric-detail\">All issues represented in the in-memory state snapshot.</p>",
+                "</article>",
+                "<article class=\"metric-card\">",
+                "<p class=\"metric-label\">Active</p>",
+                "<p class=\"metric-value numeric\">{}</p>",
+                "<p class=\"metric-detail\">Running plus retrying issues.</p>",
+                "</article>",
+                "<article class=\"metric-card\">",
+                "<p class=\"metric-label\">Terminal</p>",
+                "<p class=\"metric-value numeric\">{}</p>",
+                "<p class=\"metric-detail\">Completed, failed, or canceled issues.</p>",
+                "</article>",
+                "<article class=\"metric-card\">",
+                "<p class=\"metric-label\">Pending</p>",
+                "<p class=\"metric-value numeric\">{}</p>",
+                "<p class=\"metric-detail\">Issues not yet dispatched or waiting in a non-terminal state.</p>",
+                "</article>",
+                "<article class=\"metric-card\">",
+                "<p class=\"metric-label\">Failed</p>",
+                "<p class=\"metric-value numeric\">{}</p>",
+                "<p class=\"metric-detail\">Issues currently marked failed in tracked state.</p>",
+                "</article>",
+                "<article class=\"metric-card\">",
+                "<p class=\"metric-label\">Completed</p>",
+                "<p class=\"metric-value numeric\">{}</p>",
+                "<p class=\"metric-detail\">Issues already completed successfully.</p>",
+                "</article>",
+                "</div>",
+                "</section>"
+            ),
+            view.issue_totals.total,
+            view.issue_totals.active,
+            view.issue_totals.terminal,
+            view.issue_totals.pending,
+            view.issue_totals.failed,
+            view.issue_totals.completed,
+        );
+    } else {
+        html.push_str(concat!(
+            "<section aria-labelledby=\"issue-status-heading\">",
+            "<div class=\"section-header\">",
+            "<div>",
+            "<h2 id=\"issue-status-heading\">Issue Status</h2>",
+            "<p class=\"section-copy\">Tracker-facing totals derived from the current snapshot.</p>",
+            "</div>",
+            "</div>",
+            "<p class=\"empty-state\">No cached snapshot is available yet, so tracker totals are unavailable.</p>",
+            "</section>"
+        ));
+    }
+}
+
+fn push_snapshot_summary_panel(html: &mut String, view: Option<&StateApiView>) {
+    if let Some(view) = view {
+        let _ = write!(
+            html,
+            concat!(
+                "<section aria-labelledby=\"snapshot-summary-heading\">",
+                "<div class=\"section-header\">",
+                "<div>",
+                "<h2 id=\"snapshot-summary-heading\">Snapshot Summary</h2>",
+                "<p class=\"section-copy\">Compact operator-facing strings exposed by the JSON API.</p>",
+                "</div>",
+                "</div>",
+                "<div class=\"metric-grid\">",
+                "<article class=\"metric-card\">",
+                "<p class=\"metric-label\">Runtime Summary</p>",
+                "<pre class=\"code-panel\">{}</pre>",
+                "</article>",
+                "<article class=\"metric-card\">",
+                "<p class=\"metric-label\">State Summary</p>",
+                "<pre class=\"code-panel\">{}</pre>",
+                "</article>",
+                "</div>",
+                "</section>"
+            ),
+            escape_html(&format_runtime_summary(view)),
+            escape_html(&format_state_summary(view)),
+        );
+    } else {
+        html.push_str(concat!(
+            "<section aria-labelledby=\"snapshot-summary-heading\">",
+            "<div class=\"section-header\">",
+            "<div>",
+            "<h2 id=\"snapshot-summary-heading\">Snapshot Summary</h2>",
+            "<p class=\"section-copy\">Compact operator-facing strings exposed by the JSON API.</p>",
+            "</div>",
+            "</div>",
+            "<p class=\"empty-state\">No cached snapshot is available yet, so snapshot summaries are unavailable.</p>",
+            "</section>"
+        ));
+    }
+}
+
 fn push_running_sessions_table(
     html: &mut String,
-    running: &[RunningIssueView],
+    running: Option<&[RunningIssueView]>,
     now: &DateTime<Utc>,
 ) {
     html.push_str(concat!(
@@ -491,6 +734,13 @@ fn push_running_sessions_table(
         "</div>",
         "</div>"
     ));
+
+    let Some(running) = running else {
+        html.push_str(
+            "<p class=\"empty-state\">No cached snapshot is available yet, so running session details are unavailable.</p></section>",
+        );
+        return;
+    };
 
     if running.is_empty() {
         html.push_str("<p class=\"empty-state\">No active sessions.</p></section>");
@@ -514,7 +764,7 @@ fn push_running_sessions_table(
     ));
 
     for entry in running {
-        let issue_href = format!("{API_V1_PREFIX}/{}", escape_html(&entry.issue_identifier));
+        let issue_href = issue_route(&entry.issue_identifier);
         let session = entry.session_id.as_deref().unwrap_or("n/a");
         let last_update = entry
             .last_message
@@ -572,7 +822,11 @@ fn push_running_sessions_table(
     html.push_str("</tbody></table></div></section>");
 }
 
-fn push_retry_queue_table(html: &mut String, retrying: &[RetryIssueView], now: &DateTime<Utc>) {
+fn push_retry_queue_table(
+    html: &mut String,
+    retrying: Option<&[RetryIssueView]>,
+    now: &DateTime<Utc>,
+) {
     html.push_str(concat!(
         "<section aria-labelledby=\"retrying-heading\">",
         "<div class=\"section-header\">",
@@ -582,6 +836,13 @@ fn push_retry_queue_table(html: &mut String, retrying: &[RetryIssueView], now: &
         "</div>",
         "</div>"
     ));
+
+    let Some(retrying) = retrying else {
+        html.push_str(
+            "<p class=\"empty-state\">No cached snapshot is available yet, so retry queue details are unavailable.</p></section>",
+        );
+        return;
+    };
 
     if retrying.is_empty() {
         html.push_str(
@@ -605,7 +866,7 @@ fn push_retry_queue_table(html: &mut String, retrying: &[RetryIssueView], now: &
     ));
 
     for entry in retrying {
-        let issue_href = format!("{API_V1_PREFIX}/{}", escape_html(&entry.issue_identifier));
+        let issue_href = issue_route(&entry.issue_identifier);
         let due_at = entry.due_at.as_deref().unwrap_or("n/a");
         let _ = write!(
             html,
@@ -655,25 +916,27 @@ fn snapshot_status_value(envelope: &StateSnapshotEnvelope) -> &'static str {
 fn snapshot_status_detail(
     view: &StateApiView,
     envelope: &StateSnapshotEnvelope,
-    now: &DateTime<Utc>,
+    _now: &DateTime<Utc>,
 ) -> String {
     match (&envelope.error, envelope.status, envelope.snapshot.is_some()) {
         (Some(_), SnapshotStatus::Stale, true) => format!(
-            "Serving cached runtime state with {} active and {} queued issues. Snapshot generated {}.",
+            "Serving cached runtime state with {} active and {} queued issues across {} tracked issues while live refresh is degraded.",
             view.counts.running,
             view.counts.retrying,
-            format_relative_time(Some(&view.generated_at), now),
+            view.issue_totals.total,
         ),
         (Some(_), _, false) => "No cached snapshot is available yet. JSON routes return error envelopes until the runtime recovers.".to_owned(),
         (Some(_), _, true) => format!(
-            "Latest cached snapshot is still available with {} active and {} queued issues.",
+            "Latest cached runtime state is still available with {} active and {} queued issues across {} tracked issues while the runtime is degraded.",
             view.counts.running,
             view.counts.retrying,
+            view.issue_totals.total,
         ),
         (None, _, _) => format!(
-            "Reading live in-memory runtime state with {} active and {} queued issues.",
+            "Reading live in-memory runtime state with {} active and {} queued issues across {} tracked issues.",
             view.counts.running,
             view.counts.retrying,
+            view.issue_totals.total,
         ),
     }
 }
@@ -686,6 +949,18 @@ fn latest_issue_update_value(view: &StateApiView, now: &DateTime<Utc>) -> String
                 .as_deref()
                 .or(entry.started_at.as_deref());
             format_relative_time(timestamp, now)
+        })
+        .or_else(|| {
+            (!view.retrying.is_empty()).then(|| {
+                if let Some(entry) = next_retry_entry(&view.retrying) {
+                    format!(
+                        "retry {}",
+                        format_relative_time(entry.due_at.as_deref(), now)
+                    )
+                } else {
+                    "retry backlog".to_owned()
+                }
+            })
         })
         .unwrap_or_else(|| "n/a".to_owned())
 }
@@ -700,7 +975,51 @@ fn latest_issue_update_detail(view: &StateApiView) -> String {
                 .unwrap_or("no reported event");
             format!("{} · {}", entry.issue_identifier, summary)
         })
+        .or_else(|| {
+            next_retry_entry(&view.retrying).map(|entry| {
+                let error = entry.error.as_deref().unwrap_or("retry queued");
+                format!("{} · retry backlog · {}", entry.issue_identifier, error)
+            })
+        })
         .unwrap_or_else(|| "No active sessions have reported activity yet.".to_owned())
+}
+
+fn runtime_health_value(view: &StateApiView) -> &'static str {
+    match view.health.status {
+        RuntimeHealthStatus::Polling => "polling",
+        RuntimeHealthStatus::Busy => "busy",
+        RuntimeHealthStatus::Idle => "idle",
+        RuntimeHealthStatus::Unknown => "unknown",
+    }
+}
+
+fn runtime_health_detail(view: &StateApiView, now: &DateTime<Utc>) -> String {
+    let mut details = Vec::new();
+
+    if view.health.has_running_work {
+        details.push(format!("{} active issue sessions", view.counts.running));
+    }
+    if view.health.has_retry_backlog {
+        details.push(format!("{} queued retries", view.counts.retrying));
+    }
+    if view.health.poll_in_progress {
+        details.push("poll in progress".to_owned());
+    } else if view.activity.next_poll_due_at.is_some() {
+        details.push(format!(
+            "next poll {}",
+            format_relative_time(view.activity.next_poll_due_at.as_deref(), now)
+        ));
+    } else if !view.health.has_running_work && !view.health.has_retry_backlog {
+        details.push("no active sessions".to_owned());
+    }
+
+    details.push(if view.health.has_rate_limits {
+        "rate-limit payload present".to_owned()
+    } else {
+        "no rate-limit payload".to_owned()
+    });
+
+    details.join(" · ")
 }
 
 fn latest_issue_update_entry(running: &[RunningIssueView]) -> Option<&RunningIssueView> {
@@ -712,6 +1031,71 @@ fn latest_issue_update_entry(running: &[RunningIssueView]) -> Option<&RunningIss
                 .or(entry.started_at.as_deref()),
         )
     })
+}
+
+fn task_map_drift_value(view: &StateApiView) -> String {
+    if view.task_maps.runtime_running_gap == 0 && view.task_maps.runtime_retrying_gap == 0 {
+        "aligned".to_owned()
+    } else {
+        format!(
+            "running {:+} · retry {:+}",
+            view.task_maps.runtime_running_gap, view.task_maps.runtime_retrying_gap
+        )
+    }
+}
+
+fn task_map_drift_detail(view: &StateApiView) -> String {
+    format!(
+        "tracked total {} · active {} · terminal {} · rows {} running / {} retrying",
+        view.issue_totals.total,
+        view.issue_totals.active,
+        view.issue_totals.terminal,
+        view.task_maps.running_rows,
+        view.task_maps.retrying_rows,
+    )
+}
+
+fn format_runtime_summary(view: &StateApiView) -> String {
+    [
+        view.summary.runtime.counts.as_str(),
+        view.summary.runtime.tokens.as_str(),
+        view.summary.runtime.activity.as_str(),
+        view.summary.runtime.throughput.as_str(),
+        view.summary.runtime.health.as_str(),
+        view.summary
+            .runtime
+            .rate_limits
+            .as_deref()
+            .unwrap_or("rate_limits=none"),
+    ]
+    .join("\n")
+}
+
+fn format_state_summary(view: &StateApiView) -> String {
+    let running = if view.summary.state.running_identifiers.is_empty() {
+        "running_identifiers=none".to_owned()
+    } else {
+        format!(
+            "running_identifiers={}",
+            view.summary.state.running_identifiers.join(",")
+        )
+    };
+    let retrying = if view.summary.state.retrying_identifiers.is_empty() {
+        "retrying_identifiers=none".to_owned()
+    } else {
+        format!(
+            "retrying_identifiers={}",
+            view.summary.state.retrying_identifiers.join(",")
+        )
+    };
+
+    [
+        view.summary.state.issues.as_str(),
+        view.summary.state.task_maps.as_str(),
+        running.as_str(),
+        retrying.as_str(),
+    ]
+    .join("\n")
 }
 
 fn next_retry_value(retrying: &[RetryIssueView], now: &DateTime<Utc>) -> String {

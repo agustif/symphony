@@ -18,8 +18,12 @@ pub open spec fn is_safe_key_char(c: char) -> bool {
         || c == '-'
 }
 
+pub open spec fn is_path_separator(c: char) -> bool {
+    c == '/' || c == '\\'
+}
+
 pub open spec fn workspace_key_sanitized(key: PathText) -> bool {
-    forall|i: int| 0 <= i < key.len() ==> is_safe_key_char(key[i])
+    forall|i: int| #![auto] 0 <= i < key.len() ==> is_safe_key_char(key[i])
 }
 
 pub open spec fn sanitize_workspace_key(identifier: PathText) -> PathText {
@@ -61,6 +65,7 @@ pub proof fn lemma_sanitize_produces_sanitized_key(identifier: PathText)
     if identifier.len() == 0 {
     } else {
         assert forall|i: int|
+            #![auto]
             0 <= i < sanitize_workspace_key(identifier).len() implies
                 is_safe_key_char(sanitize_workspace_key(identifier)[i]) by {
                 if is_safe_key_char(identifier[i]) {
@@ -94,12 +99,24 @@ pub proof fn lemma_sanitize_removes_path_separator(identifier: PathText)
         };
 }
 
+pub proof fn lemma_sanitize_removes_backslash(identifier: PathText)
+    ensures
+        forall|i: int|
+            0 <= i < sanitize_workspace_key(identifier).len() ==> sanitize_workspace_key(identifier)[i] != '\\',
+{
+    lemma_sanitize_produces_sanitized_key(identifier);
+    assert forall|i: int|
+        0 <= i < sanitize_workspace_key(identifier).len() implies sanitize_workspace_key(identifier)[i] != '\\' by {
+            assert(is_safe_key_char(sanitize_workspace_key(identifier)[i]));
+        };
+}
+
 pub proof fn lemma_join_workspace_path_keeps_root_prefix(root: PathText, key: PathText)
     ensures
         root_prefix(root, join_workspace_path(root, key)),
 {
     assert(root.len() <= join_workspace_path(root, key).len());
-    assert forall|i: int| 0 <= i < root.len() implies root[i] == join_workspace_path(root, key)[i] by {
+    assert forall|i: int| #![auto] 0 <= i < root.len() implies root[i] == join_workspace_path(root, key)[i] by {
         if root.len() == 0 {
         } else {
         }
@@ -111,6 +128,53 @@ pub proof fn lemma_dot_keys_rejected_by_workspace_policy()
         !workspace_key_allowed_for_path(seq!['.']),
         !workspace_key_allowed_for_path(seq!['.', '.']),
 {
+}
+
+pub proof fn lemma_safe_non_dot_non_empty_keys_are_allowed(key: PathText)
+    requires
+        workspace_key_sanitized(key),
+        key.len() > 0,
+        key != seq!['.'],
+        key != seq!['.', '.'],
+    ensures
+        workspace_key_allowed_for_path(key),
+{
+}
+
+pub proof fn lemma_empty_and_separator_identifiers_sanitize_to_safe_placeholder()
+    ensures
+        sanitize_workspace_key(seq![]) == seq!['_'],
+        sanitize_workspace_key(seq!['/']) == seq!['_'],
+        sanitize_workspace_key(seq!['\\']) == seq!['_'],
+        workspace_key_sanitized(sanitize_workspace_key(seq![])),
+        workspace_key_sanitized(sanitize_workspace_key(seq!['/'])),
+        workspace_key_sanitized(sanitize_workspace_key(seq!['\\'])),
+        sanitize_workspace_key(seq![]).len() > 0,
+        sanitize_workspace_key(seq!['/']).len() > 0,
+        sanitize_workspace_key(seq!['\\']).len() > 0,
+{
+    assert(sanitize_workspace_key(seq![]) == seq!['_']);
+    assert(sanitize_workspace_key(seq!['/']) == seq!['_']);
+    assert(sanitize_workspace_key(seq!['\\']) == seq!['_']);
+    assert(workspace_key_sanitized(seq!['_'])) by {
+        assert forall|i: int| #![auto] 0 <= i < seq!['_'].len() implies is_safe_key_char(seq!['_'][i]) by {
+        };
+    };
+    assert(seq!['_'].len() > 0);
+}
+
+pub proof fn lemma_allowed_keys_are_fixed_points_of_sanitize(identifier: PathText)
+    requires
+        workspace_key_allowed_for_path(identifier),
+    ensures
+        sanitize_workspace_key(identifier) == identifier,
+        workspace_key_allowed_for_path(sanitize_workspace_key(identifier)),
+{
+    assert(identifier.len() > 0);
+    assert forall|i: int| #![auto] 0 <= i < identifier.len() implies sanitize_workspace_key(identifier)[i] == identifier[i] by {
+        assert(is_safe_key_char(identifier[i]));
+    };
+    assert(sanitize_workspace_key(identifier) == identifier);
 }
 
 pub proof fn lemma_sanitized_key_is_root_contained_when_allowed(

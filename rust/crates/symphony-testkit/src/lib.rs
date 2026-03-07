@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 mod clock;
+mod config_builders;
+mod fake_generators;
 mod fakes;
 mod fixtures;
 mod observability_builders;
@@ -11,6 +13,14 @@ mod timer_queue;
 mod trace;
 
 pub use clock::{Clock, ClockHandle, DeterministicClock, RealClock, ThreadSafeClock};
+pub use config_builders::{
+    RuntimeConfigBuilder, WorkflowContentBuilder, minimal_workflow, runtime_config,
+    workflow_content,
+};
+pub use fake_generators::{
+    fake_blocker_ref, fake_issue_id, fake_issue_identifier, fake_tracker_issue,
+    fake_tracker_issue_with_state, fake_tracker_issues,
+};
 pub use fakes::{
     FakeAppServerStream, FakeTracker, FakeTrackerConfig, FakeTrackerResponse, FakeWorkspaceHooks,
     tracker_issue,

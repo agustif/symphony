@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1.7
+
+FROM rust:nightly-bookworm AS builder
+
+WORKDIR /build/rust
+
+COPY rust/rust-toolchain.toml rust/Cargo.toml rust/Cargo.lock ./
+COPY rust/crates ./crates
+
+RUN cargo build --locked --release --package symphony-cli
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        git \
+        openssh-client \
+        tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system symphony \
+    && useradd --system --gid symphony --create-home --home-dir /home/symphony --shell /bin/bash symphony \
+    && mkdir -p /srv/symphony /var/lib/symphony/workspaces /var/log/symphony \
+    && chown -R symphony:symphony /srv/symphony /var/lib/symphony /var/log/symphony /home/symphony
+
+COPY --from=builder /build/rust/target/release/symphony-cli /usr/local/bin/symphony
+
+WORKDIR /srv/symphony
+USER symphony:symphony
+
+ENV HOME=/home/symphony
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
+  CMD curl --fail --silent --show-error http://127.0.0.1:8080/api/v1/state >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/symphony"]
+
+CMD ["/srv/symphony/WORKFLOW.md", "--port", "8080", "--bind", "0.0.0.0", "--workspace-root", "/var/lib/symphony/workspaces", "--logs-root", "/var/log/symphony", "--log-level", "info"]

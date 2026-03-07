@@ -57,6 +57,14 @@ pub open spec fn claim_then_mark_running(
     apply_event(apply_event(state, Event::Claim(issue_id)), Event::MarkRunning(issue_id))
 }
 
+pub open spec fn claim_then_mark_running_commands(
+    state: OrchestratorState,
+    issue_id: IssueId,
+) -> Seq<Command> {
+    emitted_commands(state, Event::Claim(issue_id))
+        + emitted_commands(apply_event(state, Event::Claim(issue_id)), Event::MarkRunning(issue_id))
+}
+
 pub open spec fn queue_retry_from_state(
     state: OrchestratorState,
     issue_id: IssueId,
@@ -83,6 +91,30 @@ pub proof fn lemma_claim_then_mark_running_establishes_running(
     lemma_apply_event_preserves_invariants(
         apply_event(state, Event::Claim(issue_id)),
         Event::MarkRunning(issue_id),
+    );
+    lemma_claim_emits_no_commands_on_valid_transition(state, issue_id);
+    lemma_mark_running_emits_dispatch_on_valid_transition(
+        apply_event(state, Event::Claim(issue_id)),
+        issue_id,
+    );
+}
+
+pub proof fn lemma_claim_then_mark_running_emits_single_dispatch(
+    state: OrchestratorState,
+    issue_id: IssueId,
+)
+    requires
+        orchestrator_invariants(state),
+        !state.claimed.contains(issue_id),
+        !state.running.dom().contains(issue_id),
+    ensures
+        claim_then_mark_running_commands(state, issue_id)
+            == seq![Command::Dispatch(issue_id)],
+{
+    lemma_claim_emits_no_commands_on_valid_transition(state, issue_id);
+    lemma_mark_running_emits_dispatch_on_valid_transition(
+        apply_event(state, Event::Claim(issue_id)),
+        issue_id,
     );
 }
 
@@ -135,6 +167,15 @@ pub open spec fn release_after_retry(
     apply_event(queue_retry_from_state(state, issue_id, attempt), Event::Release(issue_id))
 }
 
+pub open spec fn release_after_retry_commands(
+    state: OrchestratorState,
+    issue_id: IssueId,
+    attempt: nat,
+) -> Seq<Command> {
+    emitted_commands(state, Event::QueueRetry { issue_id, attempt })
+        + emitted_commands(queue_retry_from_state(state, issue_id, attempt), Event::Release(issue_id))
+}
+
 pub proof fn lemma_release_after_retry_clears_all(
     state: OrchestratorState,
     issue_id: IssueId,
@@ -155,6 +196,35 @@ pub proof fn lemma_release_after_retry_clears_all(
     lemma_apply_event_preserves_invariants(
         queue_retry_from_state(state, issue_id, attempt),
         Event::Release(issue_id),
+    );
+    lemma_queue_retry_emits_schedule_retry_on_valid_transition(state, issue_id, attempt);
+    lemma_release_emits_release_claim_on_valid_transition(
+        queue_retry_from_state(state, issue_id, attempt),
+        issue_id,
+    );
+}
+
+pub proof fn lemma_release_after_retry_emits_retry_then_release_commands(
+    state: OrchestratorState,
+    issue_id: IssueId,
+    attempt: nat,
+)
+    requires
+        orchestrator_invariants(state),
+        state.claimed.contains(issue_id),
+        attempt > 0,
+        state.retry_attempts.dom().contains(issue_id) ==> state.retry_attempts[issue_id].attempt < attempt,
+    ensures
+        release_after_retry_commands(state, issue_id, attempt)
+            == seq![
+                Command::ScheduleRetry { issue_id, attempt },
+                Command::ReleaseClaim(issue_id),
+            ],
+{
+    lemma_queue_retry_emits_schedule_retry_on_valid_transition(state, issue_id, attempt);
+    lemma_release_emits_release_claim_on_valid_transition(
+        queue_retry_from_state(state, issue_id, attempt),
+        issue_id,
     );
 }
 
@@ -228,7 +298,10 @@ pub proof fn lemma_mark_running_clears_retry_entry(
     ensures
         apply_event(state, Event::MarkRunning(issue_id)).running.dom().contains(issue_id),
         !apply_event(state, Event::MarkRunning(issue_id)).retry_attempts.dom().contains(issue_id),
+        emitted_commands(state, Event::MarkRunning(issue_id))
+            == seq![Command::Dispatch(issue_id)],
 {
+    lemma_mark_running_emits_dispatch_on_valid_transition(state, issue_id);
 }
 
 fn main() {}

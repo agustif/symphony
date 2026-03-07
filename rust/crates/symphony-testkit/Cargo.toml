@@ -6,16 +6,21 @@ license.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+fake.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_path_to_error.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+uuid.workspace = true
 symphony-agent-protocol = { path = "../symphony-agent-protocol" }
+symphony-config = { path = "../symphony-config" }
 symphony-domain = { path = "../symphony-domain" }
 symphony-observability = { path = "../symphony-observability" }
 symphony-tracker = { path = "../symphony-tracker" }
 
 [dev-dependencies]
-symphony-config = { path = "../symphony-config" }
+symphony-http = { path = "../symphony-http" }
 symphony-runtime = { path = "../symphony-runtime" }
 symphony-workflow = { path = "../symphony-workflow" }
+symphony-workspace = { path = "../symphony-workspace" }

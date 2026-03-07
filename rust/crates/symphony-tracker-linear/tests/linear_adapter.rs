@@ -960,3 +960,233 @@ async fn live_linear_smoke_test_reports_explicit_skip_when_dependencies_are_unav
         );
     }
 }
+
+// ============================================================================
+// C3.1.3: Pagination Edge Case Tests
+// ============================================================================
+
+/// C3.1.3: Pagination handles empty page gracefully (hasNextPage but no nodes)
+#[tokio::test]
+async fn fetch_candidates_handles_empty_page_with_has_next_page() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({
+            "variables": {
+                "after": null
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "issues": {
+                    "nodes": [],
+                    "pageInfo": {
+                        "hasNextPage": true,
+                        "endCursor": "cursor-empty"
+                    }
+                }
+            }
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({
+            "variables": {
+                "after": "cursor-empty"
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "lin_1",
+                            "identifier": "SYM-200",
+                            "title": "After empty page",
+                            "state": { "name": "Todo" }
+                        }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tracker = build_tracker(&server);
+    let issues = tracker
+        .fetch_candidates_by_states(&[TrackerState::new("Todo")])
+        .await
+        .expect("should handle empty page gracefully");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].identifier, "SYM-200");
+}
+
+/// C3.1.3: Pagination handles error mid-way through pages
+#[tokio::test]
+async fn fetch_candidates_surfaces_error_mid_pagination() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({
+            "variables": {
+                "after": null
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "lin_1",
+                            "identifier": "SYM-301",
+                            "title": "First page",
+                            "state": { "name": "Todo" }
+                        }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": true,
+                        "endCursor": "cursor-1"
+                    }
+                }
+            }
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .and(body_partial_json(json!({
+            "variables": {
+                "after": "cursor-1"
+            }
+        })))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "errors": [{ "message": "Internal server error during pagination" }]
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let tracker = build_tracker(&server);
+    let result = tracker
+        .fetch_candidates_by_states(&[TrackerState::new("Todo")])
+        .await;
+
+    assert!(result.is_err(), "should surface mid-pagination error");
+}
+
+/// C3.1.3: Pagination handles missing pageInfo as payload error
+#[tokio::test]
+async fn fetch_candidates_rejects_missing_page_info() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "lin_1",
+                            "identifier": "SYM-400",
+                            "title": "No page info",
+                            "state": { "name": "Todo" }
+                        }
+                    ]
+                    // pageInfo is missing entirely - should error
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let tracker = build_tracker(&server);
+    let result = tracker
+        .fetch_candidates_by_states(&[TrackerState::new("Todo")])
+        .await;
+
+    // Missing pageInfo should be a payload error
+    assert!(result.is_err(), "missing pageInfo should cause error");
+    let err = result.unwrap_err();
+    assert!(matches!(err, TrackerError::Payload { .. }));
+}
+
+/// C3.1.3: Pagination handles single large page (no pagination needed)
+#[tokio::test]
+async fn fetch_candidates_single_page_without_cursor() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "lin_1",
+                            "identifier": "SYM-500",
+                            "title": "Only issue",
+                            "state": { "name": "Todo" }
+                        }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let tracker = build_tracker(&server);
+    let issues = tracker
+        .fetch_candidates_by_states(&[TrackerState::new("Todo")])
+        .await
+        .expect("should handle single page");
+
+    assert_eq!(issues.len(), 1);
+}
+
+/// C3.1.3: Pagination rejects partial node data (missing required fields)
+#[tokio::test]
+async fn fetch_candidates_rejects_partial_node_data() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "issues": {
+                    "nodes": [
+                        {
+                            "id": "lin_1",
+                            "identifier": "SYM-600"
+                            // title is missing - should error
+                        }
+                    ],
+                    "pageInfo": {
+                        "hasNextPage": false,
+                        "endCursor": null
+                    }
+                }
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let tracker = build_tracker(&server);
+    let result = tracker
+        .fetch_candidates_by_states(&[TrackerState::new("Todo")])
+        .await;
+
+    // Missing required fields should be a payload error
+    assert!(result.is_err(), "missing title should cause error");
+    let err = result.unwrap_err();
+    assert!(matches!(err, TrackerError::Payload { .. }));
+}

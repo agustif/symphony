@@ -1,6 +1,6 @@
 # Architecture Documentation Tasks
 
-## Status Snapshot (2026-03-06)
+## Status Snapshot (2026-03-07)
 - Completion: 95%
 - Done: architecture overview now documents current crate layering, runtime data flow, state ownership, invariants, failure boundaries, and a topology diagram, and `architecture/dependencies.md` records the current workspace dependency graph and layering rules.
 - In Progress: keeping the dependency map and ownership boundaries synchronized with code changes.

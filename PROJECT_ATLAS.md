@@ -24,6 +24,10 @@ The authoritative behavior contract is [`SPEC.md`](./SPEC.md).
 | 3 | [`elixir/README.md`](./elixir/README.md), [`rust/README.md`](./rust/README.md) | Implementation-level operational docs. |
 | 4 | `TASKS.md` files under `rust/` | Delivery/maturity map for crate-level, test-level, proof-level, and docs-level completion. |
 
+Practical rule:
+- Treat `rust/TASKS.md`, child `TASKS.md` files, and `rust/docs/port-status.md` as the only active Rust migration status sources.
+- Do not add speculative future-architecture plans at repo root without an explicit linked implementation track. Future direction belongs in scoped ADRs or scheduled task maps once work is actually accepted.
+
 ## 3) Topology Map
 
 ```text
@@ -427,4 +431,3 @@ This repo is a dual-track orchestration platform:
 
 - Elixir: richer, operational reference implementation with dashboard + broad behavioral coverage.
 - Rust: structurally cleaner reducer-first architecture with explicit correctness and proof trajectory, still closing final parity and operations hardening.
-

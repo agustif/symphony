@@ -1,6 +1,6 @@
 # ADR Backlog
 
-## Status Snapshot (2026-03-06)
+## Status Snapshot (2026-03-07)
 - Completion: 95%
 - Done: reducer-first, runtime execution, adapter boundary, retry semantics, observability contract, secret-handling/redaction, and upgrade/cutover policy ADRs are now written and accepted.
 - In Progress: keeping ADR enforcement expectations aligned with code-review and rollout practice.

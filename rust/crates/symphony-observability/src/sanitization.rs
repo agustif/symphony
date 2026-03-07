@@ -50,6 +50,24 @@ pub fn sanitize_message_text(input: &str) -> String {
     redact_secret_text(&strip_control_bytes(input))
 }
 
+/// Produces deterministic, redaction-safe operator summary text.
+///
+/// JSON objects and arrays are sanitized structurally and re-encoded with sorted keys.
+/// Other payloads are treated as plain text after control stripping.
+#[must_use]
+pub fn sanitize_summary_text(input: &str) -> String {
+    let stripped = strip_control_bytes(input);
+    let trimmed = stripped.trim();
+
+    if matches!(trimmed.chars().next(), Some('{' | '['))
+        && let Ok(value) = serde_json::from_str::<Value>(trimmed)
+    {
+        return format_json_compact_sorted(&sanitize_json_value(&value));
+    }
+
+    redact_secret_text(&stripped)
+}
+
 #[must_use]
 pub fn redact_secret_text(input: &str) -> String {
     let redacted_urls = redact_url_userinfo(input);
@@ -363,7 +381,7 @@ mod tests {
 
     use super::{
         format_json_compact_sorted, redact_secret_text, sanitize_event_text, sanitize_json_value,
-        sanitize_message_text, strip_control_bytes,
+        sanitize_message_text, sanitize_summary_text, strip_control_bytes,
     };
 
     #[test]
@@ -442,6 +460,27 @@ mod tests {
                     "note": "cookie=[REDACTED]"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn sanitize_summary_text_formats_json_deterministically() {
+        let input =
+            r#"{"zeta":1,"authorization":"Bearer abc123","alpha":{"token":"xyz","ok":"yes"}}"#;
+
+        assert_eq!(
+            sanitize_summary_text(input),
+            r#"{"alpha":{"ok":"yes","token":"[REDACTED]"},"authorization":"[REDACTED]","zeta":1}"#
+        );
+    }
+
+    #[test]
+    fn sanitize_summary_text_falls_back_to_redacted_plain_text() {
+        let input = "token=abc123 path=/tmp/workspace";
+
+        assert_eq!(
+            sanitize_summary_text(input),
+            "token=[REDACTED] path=/tmp/workspace"
         );
     }
 

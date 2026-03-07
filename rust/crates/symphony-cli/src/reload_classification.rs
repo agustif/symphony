@@ -2,10 +2,13 @@ use symphony_config::RuntimeConfig;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostOwnedConfigChange {
+    TrackerKind,
     TrackerEndpoint,
     TrackerApiKey,
     TrackerProjectSlug,
     TrackerActiveStates,
+    WorkspaceRoot,
+    ServerHost,
     ServerPort,
     LogLevel,
 }
@@ -14,10 +17,13 @@ impl HostOwnedConfigChange {
     #[must_use]
     pub const fn field_path(self) -> &'static str {
         match self {
+            Self::TrackerKind => "tracker.kind",
             Self::TrackerEndpoint => "tracker.endpoint",
             Self::TrackerApiKey => "tracker.api_key",
             Self::TrackerProjectSlug => "tracker.project_slug",
             Self::TrackerActiveStates => "tracker.active_states",
+            Self::WorkspaceRoot => "workspace.root",
+            Self::ServerHost => "server.host",
             Self::ServerPort => "server.port",
             Self::LogLevel => "log_level.level",
         }
@@ -52,6 +58,9 @@ pub fn classify_workflow_reload(
 ) -> WorkflowReloadDisposition {
     let mut reasons = Vec::new();
 
+    if current.tracker.kind != next.tracker.kind {
+        reasons.push(HostOwnedConfigChange::TrackerKind);
+    }
     if current.tracker.endpoint != next.tracker.endpoint {
         reasons.push(HostOwnedConfigChange::TrackerEndpoint);
     }
@@ -63,6 +72,12 @@ pub fn classify_workflow_reload(
     }
     if current.tracker.active_states != next.tracker.active_states {
         reasons.push(HostOwnedConfigChange::TrackerActiveStates);
+    }
+    if current.workspace.root != next.workspace.root {
+        reasons.push(HostOwnedConfigChange::WorkspaceRoot);
+    }
+    if current.server.host != next.server.host {
+        reasons.push(HostOwnedConfigChange::ServerHost);
     }
     if current.server.port != next.server.port {
         reasons.push(HostOwnedConfigChange::ServerPort);
@@ -113,9 +128,24 @@ mod tests {
     }
 
     #[test]
+    fn classifies_server_host_change_as_restart_required() {
+        let current = RuntimeConfig::default();
+        let mut next = current.clone();
+        next.server.host = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+
+        assert_eq!(
+            classify_workflow_reload(&current, &next),
+            WorkflowReloadDisposition::RestartRequired {
+                reasons: vec![HostOwnedConfigChange::ServerHost],
+            }
+        );
+    }
+
+    #[test]
     fn classifies_tracker_changes_as_restart_required() {
         let current = RuntimeConfig::default();
         let mut next = current.clone();
+        next.tracker.kind = "mock-tracker".to_owned();
         next.tracker.endpoint = "https://example.invalid/graphql".to_owned();
         next.tracker.api_key = Some("new-token".to_owned());
         next.tracker.project_slug = Some("NEW".to_owned());
@@ -125,6 +155,7 @@ mod tests {
             classify_workflow_reload(&current, &next),
             WorkflowReloadDisposition::RestartRequired {
                 reasons: vec![
+                    HostOwnedConfigChange::TrackerKind,
                     HostOwnedConfigChange::TrackerEndpoint,
                     HostOwnedConfigChange::TrackerApiKey,
                     HostOwnedConfigChange::TrackerProjectSlug,
@@ -149,22 +180,42 @@ mod tests {
     }
 
     #[test]
+    fn classifies_workspace_root_change_as_restart_required() {
+        let current = RuntimeConfig::default();
+        let mut next = current.clone();
+        next.workspace.root = std::env::temp_dir().join("symphony-new-root");
+
+        assert_eq!(
+            classify_workflow_reload(&current, &next),
+            WorkflowReloadDisposition::RestartRequired {
+                reasons: vec![HostOwnedConfigChange::WorkspaceRoot],
+            }
+        );
+    }
+
+    #[test]
     fn exposes_restart_reason_field_paths() {
         assert_eq!(
             [
+                HostOwnedConfigChange::TrackerKind,
                 HostOwnedConfigChange::TrackerEndpoint,
                 HostOwnedConfigChange::TrackerApiKey,
                 HostOwnedConfigChange::TrackerProjectSlug,
                 HostOwnedConfigChange::TrackerActiveStates,
+                HostOwnedConfigChange::WorkspaceRoot,
+                HostOwnedConfigChange::ServerHost,
                 HostOwnedConfigChange::ServerPort,
                 HostOwnedConfigChange::LogLevel,
             ]
             .map(HostOwnedConfigChange::field_path),
             [
+                "tracker.kind",
                 "tracker.endpoint",
                 "tracker.api_key",
                 "tracker.project_slug",
                 "tracker.active_states",
+                "workspace.root",
+                "server.host",
                 "server.port",
                 "log_level.level",
             ]

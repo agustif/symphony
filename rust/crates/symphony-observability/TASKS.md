@@ -1,10 +1,10 @@
 # symphony-observability Tasks
 
-## Status Snapshot (2026-03-06)
-- Completion: 86%
-- Done: snapshot struct shells, runtime-fed session metadata, absolute token accounting, retry views, rate-limit payload propagation, runtime-seconds totals, poll/last-activity timing views, rolling throughput windows, HTTP-facing view types, and degraded snapshot envelope types are implemented.
-- In Progress: secret-safe summary shaping and richer operator/dashboard metrics.
-- Remaining: finish redaction-safe summary formatting and any residual operator-surface validation gaps.
+## Status Snapshot (2026-03-07)
+- Completion: 94%
+- Done: snapshot struct shells, runtime-fed session metadata, absolute token accounting, retry views, rate-limit payload propagation, runtime-seconds totals, poll/last-activity timing views, rolling throughput windows, degraded snapshot envelope types, deterministic summary-safe sanitization, runtime/state operator summary strings, and TrackerIssue assignee fields are implemented.
+- In Progress: broader parity against any future operator-visible event classes beyond the current humanization coverage.
+- Remaining: extend summary coverage only as new protocol event shapes or new operator fields land elsewhere in the stack.
 
 ## Scope
 Own runtime snapshot model, metrics aggregation, and display-ready view shaping.
@@ -22,7 +22,7 @@ Own runtime snapshot model, metrics aggregation, and display-ready view shaping.
 
 ### Task O1.2: Sanitization
 - [x] Subtask O1.2.1: Strip control bytes and ANSI sequences from event text.
-- [ ] Subtask O1.2.2: Secret-safe redaction helpers and deterministic summary formatting.
+- [x] Subtask O1.2.2: Secret-safe redaction helpers and deterministic summary formatting.
 
 ## Epic O2: Aggregation Semantics
 ### Task O2.1: Token and rate-limit accounting
@@ -55,6 +55,6 @@ Own runtime snapshot model, metrics aggregation, and display-ready view shaping.
 | Sec. 13.3 runtime snapshot interface | Mostly implemented | Add any still-missing issue-detail fields needed by operator surfaces and validate degraded envelopes end to end | `O1.1`, `O3.1`, `O4.1` |
 | Sec. 13.4 human-readable status surface | Mostly implemented | Finish richer degraded markers and any remaining operator polish beyond the current countdown/activity views | `O2.2`, `O3.1` |
 | Sec. 13.5 session metrics and token accounting | Mostly implemented | Keep throughput math validated as the session metric surface grows | `O2.1`, `O4.1` |
-| Sec. 13.6 humanized event summaries | Partial | Add deterministic summary formatting and redaction rules | `O1.2`, `O4.1` |
-| Sec. 17.6 observability | Mostly implemented | Finish the remaining redaction and end-to-end operator validation paths | `O1.2`, `O3.1`, `O4.1` |
+| Sec. 13.6 humanized event summaries | Mostly implemented | Extend coverage only as additional protocol event classes are exposed to operators | `O1.2`, `O4.1` |
+| Sec. 17.6 observability | Mostly implemented | Preserve parity as future operator-visible fields and degraded cases are added | `O1.2`, `O3.1`, `O4.1` |
 <!-- SPEC_GAP_MAP_END -->

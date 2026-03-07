@@ -1,10 +1,10 @@
 # symphony-http Tasks
 
-## Status Snapshot (2026-03-06)
-- Completion: 90%
-- Done: route wiring, state-driven snapshot sourcing, Elixir-shaped state and issue-detail payloads, refresh status/error semantics, timeout/unavailable stale-snapshot handling, degraded dashboard rendering, safe HTML escaping, runtime activity/throughput summary fields, and endpoint integration/conformance tests including state/issue contract completeness cases are implemented.
-- In Progress: richer dashboard depth outside the current summary cards and any compatibility edge cases outside the current API contract.
-- Remaining: complete the remaining dashboard/operator surface polish and any required compatibility shims.
+## Status Snapshot (2026-03-07)
+- Completion: 92%
+- Done: route wiring, state-driven snapshot sourcing, Elixir-shaped state and issue-detail payloads, refresh status/error semantics, timeout/unavailable stale-snapshot handling, degraded dashboard rendering, safe HTML escaping, runtime activity/throughput summary fields, additive health/task-map/operator summary fields, deterministic redaction-safe message shaping, endpoint integration/conformance tests including offline/stale operator cases, and workspace conformance tests (15 tests) are implemented.
+- In Progress: preserving parity as any new operator-visible fields arrive from upstream runtime or protocol work.
+- Remaining: no known HTTP-only contract gaps in the current owned surface; remaining work is compatibility follow-through as adjacent crates evolve.
 
 ## Scope
 Own HTTP observability/control endpoints and serialization contracts.
@@ -45,7 +45,7 @@ Own HTTP observability/control endpoints and serialization contracts.
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
 | Sec. 13.7.2 JSON REST API | Implemented for steady-state, stale, timeout, and unavailable cases | Keep backward-compatible additive fields stable as the operator surface grows | `H2.2`, `H3.1` |
-| Sec. 13.7.1 human dashboard | Implemented for baseline live, stale, and offline rendering | Add richer state visibility and operator detail beyond the current summary cards | `H1.1`, `H3.1` |
+| Sec. 13.7.1 human dashboard | Mostly implemented with live, stale, and offline operator detail | Preserve degraded-state accuracy and extend panels only if the observability model gains new fields | `H1.1`, `H3.1` |
 | Sec. 13.3 runtime snapshot surface contract | Mostly implemented | Preserve compatibility as activity/timing detail continues to grow | `H2.2`, `H3.1` |
 | Sec. 14.2 failure behavior | Mostly implemented for snapshot degradation | Keep dashboard and API behavior stable as recovery semantics deepen | `H1.1`, `H3.1` |
 | Sec. 17.6 observability endpoint validation | Mostly implemented | Keep extending conformance coverage as new operator-visible fields are added | `H3.1` |

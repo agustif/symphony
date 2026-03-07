@@ -125,6 +125,7 @@ mod tests {
             tracker_endpoint: None,
             tracker_api_key: None,
             tracker_project_slug: None,
+            bind: None,
             port: None,
             logs_root: None,
         };
@@ -151,6 +152,7 @@ mod tests {
             tracker_endpoint: Some("https://linear.example/graphql".to_owned()),
             tracker_api_key: Some("cli-token".to_owned()),
             tracker_project_slug: Some("cli-project".to_owned()),
+            bind: Some("0.0.0.0".parse().expect("bind address should parse")),
             port: Some(4040),
             logs_root: Some(PathBuf::from("var/log/symphony")),
         };
@@ -181,6 +183,10 @@ mod tests {
         assert_eq!(
             startup.cli_overrides.tracker_project_slug.as_deref(),
             Some("cli-project")
+        );
+        assert_eq!(
+            startup.cli_overrides.server_host,
+            Some("0.0.0.0".parse().expect("bind address should parse"))
         );
         assert_eq!(startup.cli_overrides.server_port, Some(4040));
     }

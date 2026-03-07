@@ -253,7 +253,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
 
     fn remember_running_attempt(&self, issue_id: IssueId, attempt: u32) {
         let mut running_attempts = lock_unpoisoned(&self.running_attempts);
-        running_attempts.insert(issue_id, attempt.max(1));
+        running_attempts.insert(issue_id, attempt);
     }
 
     fn take_running_attempt(&self, issue_id: &IssueId) -> Option<u32> {
@@ -379,6 +379,10 @@ impl<T: TrackerClient + 'static> Runtime<T> {
                             continue;
                         }
 
+                        if let Some(entry) = state.running.get_mut(&issue_id) {
+                            entry.tracker_state = Some(tracker_state.as_str().to_owned());
+                        }
+
                         if !tracker_state_matches_any(tracker_state, &active_states) {
                             non_active_running_ids.push(issue_id);
                         }
@@ -420,15 +424,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let mut global_available =
             (config.agent.max_concurrent_agents as usize).saturating_sub(state.running.len());
 
-        let mut running_by_state: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        for issue in &issues {
-            if state.running.contains_key(&issue.id)
-                && let Some(state_key) = issue.state.normalized_key()
-            {
-                *running_by_state.entry(state_key).or_insert(0) += 1;
-            }
-        }
+        let mut running_by_state = running_state_counts(&state, &issues);
 
         for issue_id in candidate_ids {
             if global_available == 0 {
@@ -510,7 +506,7 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         let mut state = state_guard.clone();
         let mut commands = Vec::new();
         let mut retry_schedule = None;
-        let next_retry_metadata = match worker_exit {
+        let mut next_retry_metadata = match worker_exit {
             WorkerExit::Completed | WorkerExit::PermanentFailure => None,
             WorkerExit::Continuation | WorkerExit::RetryableFailure => {
                 Some(build_retry_metadata(&state, &issue_id))
@@ -542,6 +538,12 @@ impl<T: TrackerClient + 'static> Runtime<T> {
                     .get(&issue_id)
                     .is_some_and(|retry_entry| retry_entry.attempt == attempt)
                 {
+                    if let Some(metadata) = next_retry_metadata.as_mut() {
+                        metadata.due_at = Some(
+                            current_unix_timestamp_secs()
+                                .saturating_add(planned_schedule.delay.as_secs()),
+                        );
+                    }
                     retry_schedule = Some(planned_schedule);
                 }
             }
@@ -652,6 +654,13 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         state.running.insert(issue_id, entry);
     }
 
+    /// Sets up an issue as claimed and in retry queue. For testing purposes.
+    pub async fn setup_retry(&self, issue_id: IssueId, entry: symphony_domain::RetryEntry) {
+        let mut state = self.state.lock().await;
+        state.claimed.insert(issue_id.clone());
+        state.retry_attempts.insert(issue_id, entry);
+    }
+
     fn snapshot_from_state(&self, state: &OrchestratorState) -> RuntimeSnapshot {
         let telemetry = lock_unpoisoned(&self.telemetry);
         RuntimeSnapshot {
@@ -744,7 +753,8 @@ impl<T: TrackerClient + 'static> Runtime<T> {
                 }
                 _ = shutdown_rx.recv() => {
                     tracing::info!("Shutting down poll loop");
-                    self.abort_background_tasks();
+                    let shutdown_config = config.read().await.clone();
+                    self.abort_background_tasks_with_cleanup(&shutdown_config);
                     break;
                 }
             }
@@ -759,10 +769,11 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         for command in commands {
             match command {
                 Command::Dispatch(issue_id) => {
-                    let attempt = self.take_pending_dispatch_attempt(&issue_id).unwrap_or(1);
+                    let attempt = self.take_pending_dispatch_attempt(&issue_id).unwrap_or(0);
                     self.spawn_worker_task(issue_id, attempt, config.clone());
                 }
                 Command::ScheduleRetry { issue_id, attempt } => {
+                    self.abort_worker_task(&issue_id);
                     let retry_policy = retry_policy_for_config(&config);
                     let schedule =
                         retry_policy.schedule_retry(issue_id, attempt, RetryKind::Failure);
@@ -1256,7 +1267,16 @@ impl<T: TrackerClient + 'static> Runtime<T> {
         }
     }
 
+    #[cfg(test)]
     fn abort_background_tasks(&self) {
+        self.abort_background_tasks_internal(None);
+    }
+
+    fn abort_background_tasks_with_cleanup(&self, config: &RuntimeConfig) {
+        self.abort_background_tasks_internal(Some(config));
+    }
+
+    fn abort_background_tasks_internal(&self, config: Option<&RuntimeConfig>) {
         let mut workers = lock_unpoisoned(&self.active_workers);
         for (_, worker) in workers.drain() {
             request_worker_stop(worker);
@@ -1274,8 +1294,18 @@ impl<T: TrackerClient + 'static> Runtime<T> {
             handle.abort();
         }
 
-        let mut pending_cleanup = lock_unpoisoned(&self.pending_terminal_cleanup);
-        pending_cleanup.clear();
+        let pending_cleanup = {
+            let mut pending_cleanup = lock_unpoisoned(&self.pending_terminal_cleanup);
+            pending_cleanup
+                .drain()
+                .map(|(_, identifier)| identifier)
+                .collect::<Vec<_>>()
+        };
+        if let Some(config) = config {
+            for identifier in pending_cleanup {
+                self.cleanup_workspace_for_identifier(config, &identifier);
+            }
+        }
     }
 }
 
@@ -1591,15 +1621,7 @@ fn dispatch_slots_available_for_issue(
         return false;
     }
 
-    let mut running_by_state: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    for candidate in issues {
-        if state.running.contains_key(&candidate.id)
-            && let Some(state_key) = candidate.state.normalized_key()
-        {
-            *running_by_state.entry(state_key).or_insert(0) += 1;
-        }
-    }
+    let running_by_state = running_state_counts(state, issues);
 
     let Some(state_key) = issue.state.normalized_key() else {
         return false;
@@ -1623,6 +1645,35 @@ fn dispatch_state_allows_issue(
         && !issue.id.0.trim().is_empty()
         && !issue.identifier.trim().is_empty()
         && !issue.title.trim().is_empty()
+}
+
+fn running_state_counts(
+    state: &OrchestratorState,
+    issues: &[TrackerIssue],
+) -> HashMap<String, usize> {
+    let issue_states = issues
+        .iter()
+        .filter_map(|issue| {
+            issue
+                .state
+                .normalized_key()
+                .map(|key| (issue.id.clone(), key))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut running_by_state = HashMap::new();
+
+    for (issue_id, running_entry) in &state.running {
+        let state_key = running_entry
+            .tracker_state
+            .as_deref()
+            .and_then(|state_name| TrackerState::new(state_name).normalized_key())
+            .or_else(|| issue_states.get(issue_id).cloned());
+        if let Some(state_key) = state_key {
+            *running_by_state.entry(state_key).or_insert(0) += 1;
+        }
+    }
+
+    running_by_state
 }
 
 fn todo_issue_blocked_by_non_terminal(
@@ -2018,6 +2069,43 @@ mod tests {
         assert_eq!(capped.delay, Duration::from_secs(10));
     }
 
+    #[test]
+    fn next_running_retry_attempt_prefers_running_attempt_over_retry_entry() {
+        let issue_id = issue("SYM-300");
+        let mut state = OrchestratorState::default();
+        state.retry_attempts.insert(
+            issue_id.clone(),
+            symphony_domain::RetryEntry {
+                attempt: 2,
+                ..symphony_domain::RetryEntry::default()
+            },
+        );
+
+        assert_eq!(next_running_retry_attempt(&state, Some(4), &issue_id), 5);
+        assert_eq!(next_running_retry_attempt(&state, Some(0), &issue_id), 3);
+        assert_eq!(next_running_retry_attempt(&state, None, &issue_id), 3);
+    }
+
+    #[test]
+    fn next_running_retry_attempt_treats_initial_dispatch_as_first_retry() {
+        let issue_id = issue("SYM-300A");
+        let state = OrchestratorState::default();
+
+        assert_eq!(next_running_retry_attempt(&state, Some(0), &issue_id), 1);
+    }
+
+    #[test]
+    fn stall_elapsed_ms_prefers_last_codex_timestamp_over_started_at() {
+        let now_secs: u64 = 1_700_000_600;
+        let entry = symphony_domain::RunningEntry {
+            started_at: Some(now_secs.saturating_sub(500)),
+            last_codex_timestamp: Some(now_secs.saturating_sub(30)),
+            ..symphony_domain::RunningEntry::default()
+        };
+
+        assert_eq!(stall_elapsed_ms(&entry, now_secs), Some(30_000));
+    }
+
     #[tokio::test]
     async fn worker_exit_retryable_failure_queues_retry_and_schedules_backoff() {
         let issue_id = issue("SYM-301");
@@ -2193,6 +2281,71 @@ mod tests {
                 Command::Dispatch(issue("SYM-1")),
                 Command::Dispatch(issue("SYM-3")),
                 Command::Dispatch(issue("SYM-9")),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tick_dispatch_order_uses_priority_then_created_at() {
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![
+                // High priority (1) but newer - should be first
+                TrackerIssue {
+                    id: issue("SYM-HIGH"),
+                    identifier: "SYM-HIGH".to_owned(),
+                    title: "High priority newer".to_owned(),
+                    priority: Some(1),
+                    created_at: Some(2000),
+                    ..tracker_issue("SYM-HIGH")
+                },
+                // Medium priority (2) - should be second
+                TrackerIssue {
+                    id: issue("SYM-MED"),
+                    identifier: "SYM-MED".to_owned(),
+                    title: "Medium priority".to_owned(),
+                    priority: Some(2),
+                    created_at: Some(1000),
+                    ..tracker_issue("SYM-MED")
+                },
+                // Low priority (3) but oldest - should be third (priority beats created_at)
+                TrackerIssue {
+                    id: issue("SYM-LOW"),
+                    identifier: "SYM-LOW".to_owned(),
+                    title: "Low priority oldest".to_owned(),
+                    priority: Some(3),
+                    created_at: Some(500),
+                    ..tracker_issue("SYM-LOW")
+                },
+                // No priority (sorts last) but oldest created_at
+                TrackerIssue {
+                    id: issue("SYM-NONE"),
+                    identifier: "SYM-NONE".to_owned(),
+                    title: "No priority oldest".to_owned(),
+                    priority: None,
+                    created_at: Some(100),
+                    ..tracker_issue("SYM-NONE")
+                },
+            ])
+            .await;
+        let runtime = Runtime::new(Arc::clone(&tracker));
+
+        let mut config = RuntimeConfig::default();
+        config.agent.max_concurrent_agents = 4;
+
+        let tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("dispatch tick should succeed");
+
+        // Priority ordering: HIGH(1) < MED(2) < LOW(3) < NONE(max)
+        assert_eq!(
+            tick.commands,
+            vec![
+                Command::Dispatch(issue("SYM-HIGH")),
+                Command::Dispatch(issue("SYM-MED")),
+                Command::Dispatch(issue("SYM-LOW")),
+                Command::Dispatch(issue("SYM-NONE")),
             ],
         );
     }
@@ -2565,12 +2718,12 @@ mod tests {
                 .retry_attempts
                 .get(&issue_id)
                 .map(|entry| entry.attempt),
-            Some(2)
+            Some(1)
         );
 
         runtime.cancel_retry_task(&issue_id);
         runtime
-            .handle_ready_retry(issue_id.clone(), 2, config.clone())
+            .handle_ready_retry(issue_id.clone(), 1, config.clone())
             .await;
         tokio::time::sleep(Duration::from_millis(25)).await;
 
@@ -2821,6 +2974,165 @@ mod tests {
 
         assert_process_exits(pid, "runtime abort fallback").await;
         assert!(!runtime.has_active_worker(&issue_id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stalled_retry_schedule_stops_existing_child_process() {
+        let issue_id = issue("SYM-706A");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![tracker_issue(&issue_id.0)])
+            .await;
+        let runtime = Arc::new(Runtime::new(Arc::clone(&tracker)));
+
+        let root = unique_temp_root("stall-retry-stop");
+        let mut config = RuntimeConfig::default();
+        config.workspace.root = root.clone();
+        config.codex.command = sleeping_app_server_command("thread-stall-stop", "turn-stall-stop");
+        config.codex.turn_timeout_ms = 5_000;
+        config.codex.read_timeout_ms = 500;
+        config.codex.stall_timeout_ms = 300_000;
+
+        let dispatch_tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("dispatch tick should succeed");
+        assert_eq!(
+            dispatch_tick.commands,
+            vec![Command::Dispatch(issue_id.clone())]
+        );
+        runtime
+            .process_tick_commands(dispatch_tick.commands, config.clone())
+            .await;
+
+        let pid = wait_for_worker_pid(runtime.as_ref(), &issue_id).await;
+        assert!(process_is_running(pid));
+
+        {
+            let mut state = runtime.state.lock().await;
+            let entry = state
+                .running
+                .get_mut(&issue_id)
+                .expect("issue should still be running");
+            entry.last_codex_timestamp = Some(current_unix_timestamp_secs().saturating_sub(400));
+        }
+
+        let stalled_tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("stall tick should succeed");
+        assert_eq!(
+            stalled_tick.commands,
+            vec![Command::ScheduleRetry {
+                issue_id: issue_id.clone(),
+                attempt: 1,
+            }]
+        );
+        runtime
+            .process_tick_commands(stalled_tick.commands, config)
+            .await;
+
+        assert_process_exits(pid, "stalled retry stop path").await;
+
+        let state = runtime.state().await;
+        assert_eq!(
+            state
+                .retry_attempts
+                .get(&issue_id)
+                .map(|entry| entry.attempt),
+            Some(1)
+        );
+        assert!(!runtime.has_active_worker(&issue_id));
+
+        runtime.cancel_retry_task(&issue_id);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_reconciliation_stops_child_and_cleans_workspace() {
+        let issue_id = issue("SYM-707");
+        let tracker = Arc::new(MutableTracker::default());
+        tracker
+            .set_candidates(vec![tracker_issue(&issue_id.0)])
+            .await;
+        let runtime = Arc::new(Runtime::new(Arc::clone(&tracker)));
+
+        let root = unique_temp_root("terminal-reconciliation-stop");
+        let workspace_path = root.join("SYM-707");
+        fs::create_dir_all(&workspace_path).expect("workspace should be created");
+
+        let mut config = RuntimeConfig::default();
+        config.workspace.root = root.clone();
+        config.codex.command =
+            sleeping_app_server_command("thread-terminal-stop", "turn-terminal-stop");
+        config.codex.turn_timeout_ms = 5_000;
+        config.codex.read_timeout_ms = 500;
+
+        let dispatch_tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("dispatch tick should succeed");
+        assert_eq!(
+            dispatch_tick.commands,
+            vec![Command::Dispatch(issue_id.clone())]
+        );
+        runtime
+            .process_tick_commands(dispatch_tick.commands, config.clone())
+            .await;
+
+        let pid = wait_for_worker_pid(runtime.as_ref(), &issue_id).await;
+        assert!(process_is_running(pid));
+
+        tracker
+            .set_candidates(vec![
+                TrackerIssue::new(issue_id.clone(), "SYM-707", TrackerState::new("Done"))
+                    .with_title("Terminal issue"),
+            ])
+            .await;
+
+        let release_tick = runtime
+            .run_tick(&config)
+            .await
+            .expect("release tick should succeed");
+        assert_eq!(
+            release_tick.commands,
+            vec![Command::ReleaseClaim(issue_id.clone())]
+        );
+        runtime
+            .process_tick_commands(release_tick.commands, config)
+            .await;
+
+        assert_process_exits(pid, "terminal reconciliation stop path").await;
+        assert!(
+            !workspace_path.exists(),
+            "terminal workspace should be removed"
+        );
+        assert!(!runtime.has_active_worker(&issue_id));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn shutdown_cleanup_drains_pending_terminal_workspaces() {
+        let runtime = Runtime::new(Arc::new(MutableTracker::default()));
+        let root = unique_temp_root("shutdown-pending-cleanup");
+        let workspace_path = root.join("SYM-SHUTDOWN");
+        fs::create_dir_all(&workspace_path).expect("workspace should be created");
+
+        let mut config = RuntimeConfig::default();
+        config.workspace.root = root.clone();
+
+        runtime.queue_terminal_cleanup(issue("lin-shutdown"), "SYM-SHUTDOWN".to_owned());
+        runtime.abort_background_tasks_with_cleanup(&config);
+
+        assert!(
+            !workspace_path.exists(),
+            "shutdown cleanup should remove pending terminal workspace"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -3089,5 +3401,111 @@ mod tests {
 
         // Should fail with MissingClaim (which is the invariant error for non-running issues)
         assert!(result.is_err());
+    }
+
+    /// R1.1.3: Verify dispatch-time config revalidation rejects stale candidates
+    /// When an issue is queued for dispatch but is no longer a valid candidate
+    /// (e.g., changed state in tracker), the dispatch should be skipped gracefully.
+    #[tokio::test]
+    async fn dispatch_time_revalidation_skips_stale_candidates() {
+        let issue_id = issue("SYM-STALE");
+        let tracker = Arc::new(MutableTracker::default());
+
+        // Initially the issue exists in the tracker
+        tracker
+            .set_candidates(vec![
+                TrackerIssue::new(
+                    issue_id.clone(),
+                    "SYM-STALE",
+                    TrackerState::new("In Progress"),
+                )
+                .with_title("Stale issue"),
+            ])
+            .await;
+
+        let runtime = Runtime::new(Arc::clone(&tracker));
+        let config = RuntimeConfig::default();
+
+        // Claim the issue (simulating tick processing)
+        {
+            let mut state = runtime.state.lock().await;
+            state.claimed.insert(issue_id.clone());
+        }
+
+        // Now remove the issue from tracker (simulating external state change)
+        tracker.set_candidates(vec![]).await;
+
+        // Attempt to revalidate for dispatch
+        let result = runtime
+            .revalidate_issue_for_dispatch(&issue_id, &config)
+            .await
+            .expect("revalidation should not error");
+
+        // Should return None because issue is no longer a candidate
+        assert!(
+            result.is_none(),
+            "stale issue should not be valid for dispatch"
+        );
+
+        // State should still have the claim (cleanup happens via handle_worker_exit)
+        let state = runtime.state().await;
+        assert!(state.claimed.contains(&issue_id));
+    }
+
+    /// R1.1.3: Verify dispatch-time revalidation succeeds for valid candidates
+    #[tokio::test]
+    async fn dispatch_time_revalidation_accepts_valid_candidates() {
+        let issue_id = issue("SYM-VALID");
+        let tracker = Arc::new(MutableTracker::default());
+
+        let valid_issue = TrackerIssue::new(
+            issue_id.clone(),
+            "SYM-VALID",
+            TrackerState::new("In Progress"),
+        )
+        .with_title("Valid issue");
+
+        tracker.set_candidates(vec![valid_issue.clone()]).await;
+
+        let runtime = Runtime::new(Arc::clone(&tracker));
+        let config = RuntimeConfig::default();
+
+        // Claim the issue
+        {
+            let mut state = runtime.state.lock().await;
+            state.claimed.insert(issue_id.clone());
+        }
+
+        // Revalidate for dispatch
+        let result = runtime
+            .revalidate_issue_for_dispatch(&issue_id, &config)
+            .await
+            .expect("revalidation should not error");
+
+        // Should return Some with the issue
+        assert!(result.is_some(), "valid issue should pass revalidation");
+        let revalidated = result.unwrap();
+        assert_eq!(revalidated.id, issue_id);
+        assert_eq!(revalidated.identifier, "SYM-VALID");
+    }
+
+    /// R1.1.3: Verify dispatch-time revalidation handles tracker errors gracefully
+    #[tokio::test]
+    async fn dispatch_time_revalidation_handles_tracker_errors() {
+        let issue_id = issue("SYM-ERROR");
+        let tracker = Arc::new(ErrorTracker);
+        let runtime = Runtime::new(Arc::clone(&tracker));
+        let config = RuntimeConfig::default();
+
+        // Attempt to revalidate with failing tracker
+        let result = runtime
+            .revalidate_issue_for_dispatch(&issue_id, &config)
+            .await;
+
+        // Should return an error
+        assert!(
+            result.is_err(),
+            "tracker error should propagate as revalidation failure"
+        );
     }
 }

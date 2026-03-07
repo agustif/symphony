@@ -27,6 +27,8 @@ pub enum ConfigError {
     InvalidCodexStallTimeout,
     #[error("`workspace.root` must resolve to a non-empty path")]
     InvalidWorkspaceRoot,
+    #[error("invalid `server.host`: {0}")]
+    InvalidServerHost(String),
     #[error("`tracker.kind` is required")]
     MissingTrackerKind,
     #[error("`tracker.active_states` must contain at least one state")]

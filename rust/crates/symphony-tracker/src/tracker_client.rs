@@ -5,6 +5,33 @@ use symphony_domain::IssueId;
 
 use crate::{TrackerError, TrackerIssue, TrackerState};
 
+#[cfg(test)]
+mockall::mock! {
+    pub TrackerClient {}
+
+    #[async_trait]
+    impl TrackerClient for TrackerClient {
+        async fn fetch_candidates(&self) -> Result<Vec<TrackerIssue>, TrackerError>;
+        async fn fetch_candidates_by_states(
+            &self,
+            states: &[TrackerState],
+        ) -> Result<Vec<TrackerIssue>, TrackerError>;
+        async fn fetch_states_by_ids(
+            &self,
+            ids: &[IssueId],
+        ) -> Result<HashMap<IssueId, TrackerState>, TrackerError>;
+        async fn fetch_terminal_candidates(
+            &self,
+            terminal_states: &[TrackerState],
+        ) -> Result<Vec<TrackerIssue>, TrackerError>;
+        async fn fetch_terminal_states_by_ids(
+            &self,
+            ids: &[IssueId],
+            terminal_states: &[TrackerState],
+        ) -> Result<HashMap<IssueId, TrackerState>, TrackerError>;
+    }
+}
+
 #[async_trait]
 pub trait TrackerClient: Send + Sync {
     async fn fetch_candidates(&self) -> Result<Vec<TrackerIssue>, TrackerError>;

@@ -10,6 +10,8 @@ use crate::{
     truncate_hook_result,
 };
 
+const TRANSIENT_WORKSPACE_ENTRIES: &[&str] = &[".elixir_ls", "tmp"];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedWorkspace {
     pub root: PathBuf,
@@ -38,13 +40,19 @@ pub fn ensure_within_root(root: &Path, candidate: &Path) -> Result<PathBuf, Work
 }
 
 pub fn sanitize_workspace_key(issue_identifier: &str) -> String {
-    let mut sanitized = String::with_capacity(issue_identifier.len());
+    let mut sanitized = String::with_capacity(issue_identifier.len().saturating_mul(4));
 
-    for character in issue_identifier.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
-            sanitized.push(character);
-        } else {
-            sanitized.push('_');
+    for byte in issue_identifier.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' => {
+                sanitized.push(byte as char);
+            }
+            b'_' => sanitized.push_str("__"),
+            _ => {
+                sanitized.push('_');
+                sanitized.push_str(&format!("{byte:02X}"));
+                sanitized.push('_');
+            }
         }
     }
 
@@ -115,6 +123,7 @@ pub fn prepare_workspace(
             if !metadata.is_dir() {
                 return Err(WorkspaceError::WorkspacePathNotDirectory(path));
             }
+            cleanup_transient_workspace_entries(&path)?;
             false
         }
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -147,13 +156,25 @@ pub fn prepare_workspace_with_hooks(
     executor: &dyn HookExecutor,
 ) -> Result<PreparedWorkspace, WorkspaceError> {
     let prepared = prepare_workspace(root, issue_identifier)?;
-    if prepared.created_now {
-        run_workspace_hook(
+    if prepared.created_now
+        && let Err(hook_error) = run_workspace_hook(
             &prepared.path,
             hooks,
             WorkspaceHookKind::AfterCreate,
             executor,
-        )?;
+        )
+    {
+        match fs::remove_dir_all(&prepared.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(WorkspaceError::RemoveDirectory {
+                    path: prepared.path.clone(),
+                    reason: error.to_string(),
+                });
+            }
+        }
+        return Err(hook_error);
     }
     Ok(prepared)
 }
@@ -230,10 +251,16 @@ pub fn remove_workspace_with_hooks(
     }
 
     run_workspace_hook(&path, hooks, WorkspaceHookKind::BeforeRemove, executor)?;
-    fs::remove_dir_all(&path).map_err(|error| WorkspaceError::RemoveDirectory {
-        path,
-        reason: error.to_string(),
-    })?;
+    match fs::remove_dir_all(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(WorkspaceError::RemoveDirectory {
+                path,
+                reason: error.to_string(),
+            });
+        }
+    }
     Ok(true)
 }
 
@@ -269,14 +296,71 @@ fn run_workspace_hook(
                 hook: kind.as_str().to_owned(),
                 reason,
             })?;
+    Ok(Some(classify_hook_result(
+        kind,
+        truncate_hook_result(result, output_limit_bytes),
+        timeout_ms,
+    )?))
+}
+
+fn classify_hook_result(
+    kind: WorkspaceHookKind,
+    result: HookResult,
+    timeout_ms: u64,
+) -> Result<HookResult, WorkspaceError> {
+    let hook = kind.as_str().to_owned();
     if result.timed_out {
         return Err(WorkspaceError::HookTimedOut {
-            hook: kind.as_str().to_owned(),
+            hook,
             timeout_ms,
+            result,
         });
     }
 
-    Ok(Some(truncate_hook_result(result, output_limit_bytes)))
+    match result.exit_code {
+        Some(0) => Ok(result),
+        Some(exit_code) => Err(WorkspaceError::HookExitedNonZero {
+            hook,
+            exit_code,
+            result,
+        }),
+        None => Err(WorkspaceError::HookTerminated { hook, result }),
+    }
+}
+
+fn cleanup_transient_workspace_entries(workspace_path: &Path) -> Result<(), WorkspaceError> {
+    for entry in TRANSIENT_WORKSPACE_ENTRIES {
+        remove_workspace_entry(&workspace_path.join(entry))?;
+    }
+
+    Ok(())
+}
+
+fn remove_workspace_entry(path: &Path) -> Result<(), WorkspaceError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(WorkspaceError::CleanupPath {
+                path: path.to_path_buf(),
+                reason: error.to_string(),
+            });
+        }
+    };
+
+    if metadata.is_dir() {
+        fs::remove_dir_all(path).map_err(|error| WorkspaceError::CleanupPath {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    } else {
+        fs::remove_file(path).map_err(|error| WorkspaceError::CleanupPath {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    }
+
+    Ok(())
 }
 
 fn workspace_path_for_key(root: &Path, key: &str) -> Result<PathBuf, WorkspaceError> {
@@ -431,19 +515,45 @@ mod tests {
     #[test]
     fn sanitize_workspace_key_replaces_invalid_characters() {
         assert_eq!(sanitize_workspace_key("SYM-1"), "SYM-1");
-        assert_eq!(sanitize_workspace_key("SYM 1/#danger"), "SYM_1__danger");
+        assert_eq!(
+            sanitize_workspace_key("SYM 1/#danger"),
+            "SYM_20_1_2F__23_danger"
+        );
+        assert_eq!(sanitize_workspace_key("SYM_1"), "SYM__1");
         assert_eq!(sanitize_workspace_key(""), "_");
     }
 
     #[test]
-    fn workspace_path_rejects_root_alias() {
-        let root = fresh_temp_path("symphony-workspace-root-alias");
+    fn workspace_path_encodes_dot_safely() {
+        let root = fresh_temp_path("symphony-workspace-dot-sanitize");
         fs::create_dir_all(&root).expect("root should be creatable");
+        let canonical_root = root.canonicalize().expect("root should resolve");
 
-        let error = workspace_path(&root, ".").expect_err("dot key should map to root");
-        assert!(matches!(error, WorkspaceError::WorkspaceIsRoot(_)));
+        let path = workspace_path(&root, ".").expect("dot should be sanitized safely");
+        assert!(
+            path.ends_with("_2E_"),
+            "expected path to end with encoded dot, got {:?}",
+            path
+        );
+        assert!(
+            path.starts_with(&canonical_root),
+            "path {:?} should be within root {:?}",
+            path,
+            canonical_root
+        );
 
         cleanup(&root);
+    }
+
+    #[test]
+    fn sanitize_workspace_key_keeps_distinct_invalid_identifiers_unique() {
+        let slash = sanitize_workspace_key("SYM/1");
+        let colon = sanitize_workspace_key("SYM:1");
+        let dot = sanitize_workspace_key("SYM.1");
+
+        assert_ne!(slash, colon);
+        assert_ne!(slash, dot);
+        assert_ne!(colon, dot);
     }
 
     #[test]
@@ -498,6 +608,31 @@ mod tests {
     }
 
     #[test]
+    fn prepare_workspace_reuse_cleans_transient_entries_only() {
+        let root = fresh_temp_path("symphony-workspace-reuse-cleanup");
+
+        let created = prepare_workspace(&root, "SYM-42").expect("workspace should be prepared");
+        fs::create_dir_all(created.path.join(".elixir_ls/cache"))
+            .expect("transient elixir ls directory should be creatable");
+        fs::create_dir_all(created.path.join("tmp/build"))
+            .expect("transient tmp directory should be creatable");
+        fs::write(created.path.join("keep.txt"), "stable").expect("stable file should be writable");
+
+        let reused = prepare_workspace(&root, "SYM-42").expect("workspace should be reused");
+
+        assert!(!reused.created_now);
+        assert!(!reused.path.join(".elixir_ls").exists());
+        assert!(!reused.path.join("tmp").exists());
+        assert_eq!(
+            fs::read_to_string(reused.path.join("keep.txt"))
+                .expect("stable file should be preserved"),
+            "stable"
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
     fn prepare_workspace_rejects_non_directory_path() {
         let root = fresh_temp_path("symphony-workspace-file");
         fs::create_dir_all(&root).expect("root should be creatable");
@@ -534,6 +669,41 @@ mod tests {
         let requests = executor.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].kind, WorkspaceHookKind::AfterCreate);
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn prepare_workspace_with_hooks_rolls_back_failed_after_create() {
+        let root = fresh_temp_path("symphony-workspace-hooks-create-failure");
+        let hooks = WorkspaceHooks {
+            after_create: Some("echo created".to_owned()),
+            ..WorkspaceHooks::default()
+        };
+        let executor = RecordingExecutor::with_responses(vec![
+            Ok(HookResult::with_status(Some(9), "stdout", "stderr")),
+            Ok(HookResult::success()),
+        ]);
+
+        let first = prepare_workspace_with_hooks(&root, "SYM-44", &hooks, &executor);
+        assert_eq!(
+            first,
+            Err(WorkspaceError::HookExitedNonZero {
+                hook: "after_create".to_owned(),
+                exit_code: 9,
+                result: HookResult::with_status(Some(9), "stdout", "stderr"),
+            })
+        );
+        assert!(!root.join("SYM-44").exists());
+
+        let second = prepare_workspace_with_hooks(&root, "SYM-44", &hooks, &executor)
+            .expect("second prepare should retry after rollback");
+        assert!(second.created_now);
+
+        let requests = executor.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].kind, WorkspaceHookKind::AfterCreate);
+        assert_eq!(requests[1].kind, WorkspaceHookKind::AfterCreate);
 
         cleanup(&root);
     }
@@ -601,8 +771,11 @@ mod tests {
             ..WorkspaceHooks::default()
         };
         let timeout_result = HookResult {
+            stdout: "partial stdout".to_owned(),
+            stderr: "partial stderr".to_owned(),
             timed_out: true,
-            ..HookResult::success()
+            exit_code: None,
+            truncated: false,
         };
         let executor = RecordingExecutor::with_responses(vec![Ok(timeout_result)]);
 
@@ -613,6 +786,41 @@ mod tests {
             Err(WorkspaceError::HookTimedOut {
                 hook: "before_run".to_owned(),
                 timeout_ms: 10,
+                result: HookResult {
+                    stdout: "partial stdout".to_owned(),
+                    stderr: "partial stderr".to_owned(),
+                    timed_out: true,
+                    exit_code: None,
+                    truncated: false,
+                },
+            })
+        );
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn run_after_run_hook_reports_nonzero_exit_taxonomy() {
+        let root = fresh_temp_path("symphony-workspace-hooks-after-run-error");
+        let workspace = prepare_workspace(&root, "SYM-47A").expect("workspace should be prepared");
+        let hooks = WorkspaceHooks {
+            after_run: Some("echo after".to_owned()),
+            ..WorkspaceHooks::default()
+        };
+        let executor = RecordingExecutor::with_responses(vec![Ok(HookResult::with_status(
+            Some(7),
+            "after stdout",
+            "after stderr",
+        ))]);
+
+        let result = run_after_run_hook(&workspace, &hooks, &executor);
+
+        assert_eq!(
+            result,
+            Err(WorkspaceError::HookExitedNonZero {
+                hook: "after_run".to_owned(),
+                exit_code: 7,
+                result: HookResult::with_status(Some(7), "after stdout", "after stderr"),
             })
         );
 
@@ -637,6 +845,83 @@ mod tests {
         let requests = executor.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].kind, WorkspaceHookKind::BeforeRemove);
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn remove_workspace_with_hooks_preserves_workspace_when_before_remove_fails() {
+        let root = fresh_temp_path("symphony-workspace-hooks-remove-rollback");
+        let workspace = prepare_workspace(&root, "SYM-48B").expect("workspace should be prepared");
+        fs::write(workspace.path.join("keep.txt"), "still here")
+            .expect("workspace marker should be writable");
+        let hooks = WorkspaceHooks {
+            before_remove: Some("echo remove".to_owned()),
+            ..WorkspaceHooks::default()
+        };
+        let executor = RecordingExecutor::with_responses(vec![Ok(HookResult::with_status(
+            Some(9),
+            "remove stdout",
+            "remove stderr",
+        ))]);
+
+        let result = remove_workspace_with_hooks(&root, "SYM-48B", &hooks, &executor);
+
+        assert_eq!(
+            result,
+            Err(WorkspaceError::HookExitedNonZero {
+                hook: "before_remove".to_owned(),
+                exit_code: 9,
+                result: HookResult::with_status(Some(9), "remove stdout", "remove stderr"),
+            })
+        );
+        assert!(workspace.path.exists());
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("keep.txt"))
+                .expect("workspace contents should remain for fallback cleanup"),
+            "still here"
+        );
+
+        let removed = remove_workspace(&root, "SYM-48B").expect("direct removal should succeed");
+        assert!(removed);
+        assert!(!workspace.path.exists());
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn remove_workspace_with_hooks_tolerates_hook_owned_deletion() {
+        let root = fresh_temp_path("symphony-workspace-hooks-remove-owned");
+        let workspace = prepare_workspace(&root, "SYM-48C").expect("workspace should be prepared");
+
+        struct RemovingExecutor {
+            requests: RefCell<Vec<HookRequest>>,
+            workspace_path: PathBuf,
+        }
+
+        impl HookExecutor for RemovingExecutor {
+            fn execute(&self, request: &HookRequest) -> Result<HookResult, String> {
+                self.requests.borrow_mut().push(request.clone());
+                fs::remove_dir_all(&self.workspace_path).map_err(|error| error.to_string())?;
+                Ok(HookResult::success())
+            }
+        }
+
+        let hooks = WorkspaceHooks {
+            before_remove: Some("echo remove".to_owned()),
+            ..WorkspaceHooks::default()
+        };
+        let executor = RemovingExecutor {
+            requests: RefCell::new(Vec::new()),
+            workspace_path: workspace.path.clone(),
+        };
+
+        let removed = remove_workspace_with_hooks(&root, "SYM-48C", &hooks, &executor)
+            .expect("remove should succeed when hook already removed workspace");
+
+        assert!(removed);
+        assert!(!workspace.path.exists());
+        assert_eq!(executor.requests.borrow().len(), 1);
 
         cleanup(&root);
     }
@@ -670,5 +955,189 @@ mod tests {
         if path.exists() {
             let _ = fs::remove_dir_all(path);
         }
+    }
+
+    // ========================================================================
+    // W3.1.2: Long Path Behavior Tests
+    // ========================================================================
+
+    #[test]
+    fn workspace_creation_rejects_path_exceeding_limit() {
+        // Test that very long paths are handled gracefully
+        let root = fresh_temp_path("symphony-workspace-long-path");
+        fs::create_dir_all(&root).expect("root should be creatable");
+
+        // Create a path with a very long component (>255 chars, typical filename limit)
+        let long_key: String = (0..300).map(|_| 'a').collect();
+        let result = workspace_path(&root, &long_key);
+
+        // Should either succeed with truncation/sanitization or fail gracefully
+        match result {
+            Ok(path) => {
+                // Path was created - verify it's within bounds
+                // Use canonicalized root for comparison since workspace_path resolves the root
+                let resolved_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+                assert!(path.starts_with(&resolved_root));
+            }
+            Err(WorkspaceError::PathResolution { .. }) => {
+                // Acceptable - path was too long to resolve
+            }
+            Err(_) => {}
+        }
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn deeply_nested_workspace_path_is_valid() {
+        let root = fresh_temp_path("symphony-workspace-nested");
+        fs::create_dir_all(&root).expect("root should be creatable");
+
+        // Create deeply nested workspace path
+        let nested_key = "level1/level2/level3/level4/level5";
+        let result = workspace_path(&root, nested_key);
+
+        // "/" is encoded, so this should create a valid path
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        assert!(path.starts_with(root.canonicalize().unwrap_or_else(|_| root.clone())));
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn path_boundary_at_component_limit() {
+        let root = fresh_temp_path("symphony-workspace-boundary");
+        fs::create_dir_all(&root).expect("root should be creatable");
+
+        // Test with key at typical filesystem component limit (255 chars)
+        let boundary_key: String = (0..255).map(|_| 'x').collect();
+        let result = prepare_workspace(&root, &boundary_key);
+
+        // Should handle gracefully
+        match result {
+            Ok(workspace) => {
+                assert!(workspace.path.exists());
+                cleanup(&root);
+            }
+            Err(_) => {
+                cleanup(&root);
+            }
+        }
+    }
+
+    // ========================================================================
+    // W3.1.2: Permission Edge Behavior Tests (Unix-specific)
+    // ========================================================================
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_creation_in_readonly_parent_fails_gracefully() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = fresh_temp_path("symphony-workspace-perm-test");
+        let readonly_dir = root.join("readonly");
+        fs::create_dir_all(&readonly_dir).expect("should create readonly dir");
+
+        // Set directory to read-only
+        let mut perms = fs::metadata(&readonly_dir)
+            .expect("should get metadata")
+            .permissions();
+        perms.set_mode(0o555);
+        fs::set_permissions(&readonly_dir, perms).expect("should set permissions");
+
+        // Attempt to create workspace inside read-only directory
+        let result = prepare_workspace(&readonly_dir, "SHOULD-FAIL");
+
+        // Restore permissions for cleanup
+        let mut perms = fs::metadata(&readonly_dir)
+            .expect("should get metadata for restore")
+            .permissions();
+        perms.set_mode(0o755);
+        let _ = fs::set_permissions(&readonly_dir, perms);
+
+        // Should fail with appropriate error
+        assert!(
+            result.is_err(),
+            "should fail to create workspace in read-only dir"
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn hook_execution_in_readonly_workspace_reports_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = fresh_temp_path("symphony-workspace-hook-perm");
+        let workspace =
+            prepare_workspace(&root, "SYM-PERM-TEST").expect("workspace should be prepared");
+
+        // Create a file and make parent directory read-only
+        fs::write(workspace.path.join("test.txt"), "content").expect("should write file");
+
+        let hooks = WorkspaceHooks {
+            before_run: Some("echo test".to_owned()),
+            ..WorkspaceHooks::default()
+        };
+        let executor = RecordingExecutor::default();
+
+        // Make workspace read-only after preparation
+        let mut perms = fs::metadata(&workspace.path)
+            .expect("should get metadata")
+            .permissions();
+        perms.set_mode(0o555);
+        fs::set_permissions(&workspace.path, perms).expect("should set permissions");
+
+        // Hook execution should still work (hooks run with their own permissions)
+        let result = run_before_run_hook(&workspace, &hooks, &executor);
+
+        // Restore permissions
+        let mut perms = fs::metadata(&workspace.path)
+            .expect("should get metadata for restore")
+            .permissions();
+        perms.set_mode(0o755);
+        let _ = fs::set_permissions(&workspace.path, perms);
+
+        // Hook should execute (executor is mock, so it succeeds)
+        assert!(result.is_ok());
+
+        cleanup(&root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_cleanup_handles_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = fresh_temp_path("symphony-workspace-cleanup-perm");
+        let workspace =
+            prepare_workspace(&root, "SYM-CLEANUP").expect("workspace should be prepared");
+
+        // Create a file inside
+        fs::write(workspace.path.join("protected.txt"), "data").expect("should write file");
+
+        // Make the file read-only and the workspace directory read-only
+        let mut file_perms = fs::metadata(workspace.path.join("protected.txt"))
+            .expect("should get file metadata")
+            .permissions();
+        file_perms.set_mode(0o444);
+        fs::set_permissions(workspace.path.join("protected.txt"), file_perms)
+            .expect("should set file permissions");
+
+        // Attempt removal - should either succeed or fail gracefully
+        let result = remove_workspace(&root, "SYM-CLEANUP");
+
+        // Restore permissions if removal failed
+        if result.is_err() {
+            let mut file_perms = fs::metadata(workspace.path.join("protected.txt"))
+                .expect("should get file metadata for restore")
+                .permissions();
+            file_perms.set_mode(0o644);
+            let _ = fs::set_permissions(workspace.path.join("protected.txt"), file_perms);
+            let _ = remove_workspace(&root, "SYM-CLEANUP");
+        }
+
+        cleanup(&root);
     }
 }

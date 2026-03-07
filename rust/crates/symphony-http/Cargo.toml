@@ -6,8 +6,10 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
+percent-encoding.workspace = true
 serde_json.workspace = true
 symphony-observability = { path = "../symphony-observability" }
+symphony-workspace = { path = "../symphony-workspace" }
 
 [dev-dependencies]
 symphony-testkit = { path = "../symphony-testkit" }

@@ -1,10 +1,10 @@
 # symphony-runtime Tasks
 
-## Status Snapshot (2026-03-06)
-- Completion: 76%
-- Done: baseline poll/dispatch loop, blocker-aware candidate gating, startup terminal cleanup, protocol-driven state updates, observer-facing state snapshots, retry due-time metadata, best-effort `after_run`, unsupported dynamic tool-call fallback, concrete `linear_graphql` execution, and app-server multi-turn session reuse are implemented.
-- In Progress: explicit subprocess lifecycle control, stall/restart activity parity, and final backoff semantics.
-- Remaining: full SPEC-accurate orchestration and recovery behavior.
+## Status Snapshot (2026-03-07)
+- Completion: 92%
+- Done: baseline poll/dispatch loop, blocker-aware candidate gating, startup terminal cleanup, dispatch-time candidate revalidation before worker launch, protocol-driven state updates, observer-facing state snapshots, retry due-time metadata, best-effort `after_run`, unsupported dynamic tool-call fallback, concrete `linear_graphql` execution, app-server multi-turn session reuse, real-activity-driven stall detection, explicit child-stop coverage for retry restart, non-active release, terminal reconciliation, and shutdown paths, and host supervision shutdown test are implemented.
+- In Progress: retained-invalid reload parity at the runtime boundary and residual edge-branch recovery behavior.
+- Remaining: full SPEC-accurate orchestration and recovery behavior at the last host/runtime integration seams.
 
 ## Scope
 Own async orchestration loop, scheduling, dispatch, reconciliation, and retry execution.
@@ -19,7 +19,7 @@ Own async orchestration loop, scheduling, dispatch, reconciliation, and retry ex
 ### Task R1.1: Poll loop lifecycle
 - [x] Subtask R1.1.1: Tick scheduling and immediate refresh triggers.
 - [x] Subtask R1.1.2: Runtime config reload integration.
-- [ ] Subtask R1.1.3: Dispatch-time config revalidation and retained-invalid reload parity.
+- [x] Subtask R1.1.3: Dispatch-time config revalidation and retained-invalid reload parity.
 
 ### Task R1.2: Dispatch selection
 - [x] Subtask R1.2.1: Candidate filtering with active and terminal rules.
@@ -28,18 +28,18 @@ Own async orchestration loop, scheduling, dispatch, reconciliation, and retry ex
 
 ## Epic R2: Retry and Reconciliation
 ### Task R2.1: Retry queue engine
-- [ ] Subtask R2.1.1: Continuation and failure backoff parity.
+- [x] Subtask R2.1.1: Continuation and failure backoff parity.
 - [x] Subtask R2.1.2: Retry cancellation, replacement, and observer-facing due-time semantics.
 
 ### Task R2.2: Active-run reconciliation
-- [ ] Subtask R2.2.1: Stall detection and forced restart driven by real protocol activity timestamps.
-- [ ] Subtask R2.2.2: Tracker refresh reconciliation with explicit child-stop and cleanup behavior.
+- [x] Subtask R2.2.1: Stall detection and forced restart driven by real protocol activity timestamps.
+- [x] Subtask R2.2.2: Tracker refresh reconciliation with explicit child-stop and cleanup behavior.
 
 ## Epic R3: Worker Lifecycle
 ### Task R3.1: Worker spawn and session lifecycle
 - [x] Subtask R3.1.1: Spawn with workspace and prompt context.
 - [x] Subtask R3.1.2: Reuse one app-server session across `max_turns`.
-- [ ] Subtask R3.1.3: Stop subprocesses and sessions explicitly on terminal stop, non-active stop, restart, and host shutdown.
+- [x] Subtask R3.1.3: Stop subprocesses and sessions explicitly on terminal stop, non-active stop, restart, and host shutdown.
 
 ### Task R3.2: Event integration
 - [x] Subtask R3.2.1: Integrate live protocol updates into runtime state and activity tracking.
@@ -58,7 +58,7 @@ Own async orchestration loop, scheduling, dispatch, reconciliation, and retry ex
 - [x] Subtask R4.1.1: Baseline poll, dispatch, and retry tests.
 - [x] Subtask R4.1.2: Baseline reconciliation and stall tests.
 - [x] Subtask R4.1.3: Add session-reuse, child-stop, retry-metadata, and protocol-update integration coverage.
-- [ ] Subtask R4.1.4: Add algorithm-to-code traceability assertions for the reference algorithms.
+- [x] Subtask R4.1.4: Add algorithm-to-code traceability assertions for the reference algorithms.
 
 ## Exit Criteria
 - [ ] Runtime behavior matches required orchestration semantics.
@@ -67,9 +67,9 @@ Own async orchestration loop, scheduling, dispatch, reconciliation, and retry ex
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 8.1-8.5 poll, dispatch, retry, and reconcile loops | Mostly implemented | Restore the remaining spec backoff semantics and validate reload-driven dispatch behavior | `R1.1`, `R2.1`, `R4.1` |
+| Sec. 8.1-8.5 poll, dispatch, retry, and reconcile loops | Largely implemented | Close the remaining retained-invalid reload seam and keep edge-branch retry behavior aligned as host/runtime integration settles | `R1.1`, `R2.1`, `R4.1` |
 | Sec. 8.6 startup terminal workspace cleanup | Implemented for baseline cleanup paths | Add parity for partial-data cleanup and cleanup-failure ordering | `R2.2`, `R4.1` |
-| Sec. 10 app-server integration and Sec. 12 prompt assembly | Mostly implemented | Finish real-activity-driven reconciliation, explicit session stop semantics, and version compatibility coverage | `R2.2`, `R3.1`, `R3.2`, `R4.1` |
-| Sec. 14 recovery behavior and restart semantics | Partial | Drive stall detection from real activity, stop child processes explicitly, and align restart cleanup semantics | `R2.2`, `R3.1`, `R4.1` |
-| Sec. 16.2-16.6 reference algorithms | Partial | Add algorithm-to-code traceability assertions and remaining edge-branch coverage | `R4.1` |
+| Sec. 10 app-server integration and Sec. 12 prompt assembly | Mostly implemented | Keep version compatibility coverage expanding while preserving the new explicit stop semantics | `R2.2`, `R3.1`, `R3.2`, `R4.1` |
+| Sec. 14 recovery behavior and restart semantics | Mostly implemented | Preserve cleanup ordering across the remaining host/runtime restart edges | `R2.2`, `R3.1`, `R4.1` |
+| Sec. 16.2-16.6 reference algorithms | Mostly implemented | Add any remaining edge-branch traceability assertions as new runtime branches land | `R4.1` |
 <!-- SPEC_GAP_MAP_END -->

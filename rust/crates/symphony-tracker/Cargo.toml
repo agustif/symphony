@@ -10,4 +10,5 @@ thiserror.workspace = true
 symphony-domain = { path = "../symphony-domain" }
 
 [dev-dependencies]
+mockall.workspace = true
 tokio.workspace = true

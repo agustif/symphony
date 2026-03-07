@@ -2,7 +2,7 @@
 # Symphony Rust Architecture Overview
 
 Owner: Rust implementation maintainers
-Last updated: 2026-03-06
+Last updated: 2026-03-07
 
 This document is the source-of-truth architecture narrative for the Rust
 orchestrator. It describes the current crate layering, runtime data flow,
@@ -144,11 +144,22 @@ The runtime currently relies on these architectural invariants.
 | ID | Invariant | Enforcement point |
 | --- | --- | --- |
 | INV-001 | `running ⊆ claimed` | `symphony-domain::validate_invariants` |
-| INV-002 | `retry_attempts` are positive and monotonic per issue | Reducer rules plus runtime retry scheduling |
+| INV-002 | `retry_attempts` are always positive in state; monotonicity is enforced as a queue-transition contract | `symphony-domain::validate_invariants` plus reducer retry rules |
 | INV-003 | Release clears claimed, running, retry, and worker bookkeeping for that issue | Reducer plus runtime cleanup path |
 | INV-004 | Protocol/adapter failures do not mutate orchestration state except through explicit mapped events | Adapter boundary contract |
 | INV-005 | HTTP and dashboard paths never require live tracker access | Snapshot-only operator surfaces |
 | INV-006 | Worker cwd must stay within the configured workspace root | `symphony-workspace` safety validation |
+| INV-007 | Absolute token totals remain monotonic across repeated `UpdateAgent` events, including session resets | `symphony-domain` agent-update reducer helpers plus observability tests |
+
+## Executable Traceability
+
+Correctness is enforced in three layers that now line up explicitly:
+
+1. `symphony-domain::invariant_catalog()` publishes the stable executable state invariants with SPEC and proof metadata.
+2. `symphony-testkit::validate_trace()` replays traces against the reducer and checks invariant preservation, command/state coherence, and per-event transition contracts.
+3. The Verus proof suite in `proofs/verus/specs/` mirrors those invariants and lifecycle obligations at the abstract model layer.
+
+This split keeps executable state checks in Rust, transition-chain checks in shared test harnesses, and long-horizon proof obligations in Verus without duplicating unnamed invariants across layers.
 
 ## Failure Boundaries
 

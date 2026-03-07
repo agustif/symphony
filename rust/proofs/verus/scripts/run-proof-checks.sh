@@ -126,7 +126,22 @@ else
     [[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
     
     echo ""
-    echo "Phase 3: Session Liveness Proofs"
+    echo "Phase 3: Agent Update Accounting Proofs"
+    echo "  - Missing-running rejection remains state-preserving"
+    echo "  - Successful updates preserve topology invariants"
+    echo "  - Absolute token totals remain monotonic"
+    echo "  - Session changes reset usage baselines"
+    echo ""
+
+    "$verus_bin" "$PROOF_DIR/specs/agent_update_safety.rs" \
+        --crate-name symphony_proofs_agent_update \
+        --rlimit 600 \
+        2>&1 | tee /tmp/verus-agent-update.log
+
+    [[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
+    
+    echo ""
+    echo "Phase 4: Session Liveness Proofs"
     echo "  - Eventually dispatched"
     echo "  - Eventually completes or retries"
     echo "  - Retry queue processed"
@@ -141,7 +156,7 @@ else
     [[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
     
     echo ""
-    echo "Phase 4: Workspace Safety Proofs"
+    echo "Phase 5: Workspace Safety Proofs"
     echo "  - Path containment"
     echo "  - Key sanitization"
     echo "  - Path traversal prevention"

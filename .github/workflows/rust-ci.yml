@@ -102,6 +102,58 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace --all-features --locked
 
+  coverage:
+    name: cargo-coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: rust
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install nightly with llvm-tools
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2.68.20
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      - name: Generate coverage reports
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --workspace --all-features --locked --no-report
+          cargo llvm-cov report --summary-only | tee coverage/summary.txt
+          cargo llvm-cov report --lcov --output-path coverage/lcov.info
+
+      - name: Publish coverage summary
+        run: |
+          {
+            echo "## Rust coverage"
+            echo
+            cat coverage/summary.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-coverage
+          path: |
+            rust/coverage/summary.txt
+            rust/coverage/lcov.info
+
   suite-gates:
     name: suite-${{ matrix.suite }}
     runs-on: ubuntu-24.04

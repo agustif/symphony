@@ -94,6 +94,20 @@ impl HookResult {
             truncated: false,
         }
     }
+
+    pub fn with_status(
+        exit_code: Option<i32>,
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+    ) -> Self {
+        Self {
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            timed_out: false,
+            exit_code,
+            truncated: false,
+        }
+    }
 }
 
 pub trait HookExecutor {
@@ -146,6 +160,15 @@ mod tests {
 
         assert_eq!(truncated.stdout, "12345");
         assert_eq!(truncated.stderr, "abcde");
+        assert!(truncated.truncated);
+    }
+
+    #[test]
+    fn truncation_preserves_utf8_boundaries() {
+        let result = HookResult::with_output("ééé", "");
+        let truncated = truncate_hook_result(result, 3);
+
+        assert_eq!(truncated.stdout, "é");
         assert!(truncated.truncated);
     }
 }

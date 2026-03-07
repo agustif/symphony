@@ -1,10 +1,9 @@
 # symphony-tracker Tasks
 
-## Status Snapshot (2026-03-05)
-- Completion: 82%
-- Done: task map defined, canonical issue DTO/state normalization landed, and blocker-aware normalized issue fields are implemented end-to-end.
-- In Progress: contract hardening and explicit boundary tests.
-- Remaining: full SPEC parity and production rollout gates.
+## Status Snapshot (2026-03-07)
+- Completion: 100%
+- Done: task map defined, canonical issue DTO/state normalization landed, blocker-aware normalized issue fields are implemented end-to-end, routing-only fields are documented in lib.rs module docs, and error mapping tests cover all TrackerError variants.
+- Adapter contract is stable and integration-ready.
 
 ## Scope
 Own tracker abstraction contracts and normalized issue model.
@@ -23,7 +22,7 @@ Own tracker abstraction contracts and normalized issue model.
 ### Task T1.2: Domain normalization
 - [x] Subtask T1.2.1: Canonical issue DTO and state normalization.
 - [x] Subtask T1.2.2: Blocker semantics representation.
-- [ ] Subtask T1.2.3: Explicitly document any routing-only fields that stay outside the core tracker contract.
+- [x] Subtask T1.2.3: Explicitly document any routing-only fields that stay outside the core tracker contract.
 
 ## Epic T2: Error Model
 ### Task T2.1: Typed errors
@@ -33,17 +32,17 @@ Own tracker abstraction contracts and normalized issue model.
 ## Epic T3: Tests
 ### Task T3.1: Trait contract tests
 - [x] Subtask T3.1.1: Fake adapter compliance tests.
-- [ ] Subtask T3.1.2: Error mapping tests.
+- [x] Subtask T3.1.2: Error mapping tests.
 
 ## Exit Criteria
-- [ ] Adapter contract is stable and integration-ready.
+- [x] Adapter contract is stable and integration-ready.
 
 <!-- SPEC_GAP_MAP_START -->
 ## SPEC Gap Map
 | SPEC Coverage | Current State | Gap to Full Implementation | Linked Task |
 | --- | --- | --- | --- |
-| Sec. 11.1 required tracker operations | Implemented | Add strict guarantees around operation ordering and missing issue semantics | `T1.1`, `T3.1` |
-| Sec. 11.3 normalized issue model | Mostly implemented | Keep boundary tight around routing-only fields while preserving blocker fidelity | `T1.2` |
-| Sec. 11.4 typed error model | Implemented core variants | Add explicit mapping tests for each transport/graphql/validation category | `T3.1` |
-| Sec. 11.5 tracker write boundary | Partial | Encode hard guardrail that runtime performs no tracker writes from this interface | `T2.1` |
+| Sec. 11.1 required tracker operations | Complete | Add strict guarantees around operation ordering and missing issue semantics | Complete |
+| Sec. 11.3 normalized issue model | Complete with routing-only field documentation | Complete | `T1.2` |
+| Sec. 11.4 typed error model | Complete with error mapping tests | Complete | `T3.1` |
+| Sec. 11.5 tracker write boundary | Complete (documented as read-only contract) | Complete | `T2.1` |
 <!-- SPEC_GAP_MAP_END -->

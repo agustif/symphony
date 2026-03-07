@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use crate::HookResult;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum WorkspaceError {
     #[error("workspace path escaped root: root={root:?} candidate={candidate:?}")]
@@ -16,6 +18,8 @@ pub enum WorkspaceError {
     WorkspacePathNotDirectory(PathBuf),
     #[error("failed to create directory `{path}`: {reason}")]
     CreateDirectory { path: PathBuf, reason: String },
+    #[error("failed to clean workspace path `{path}`: {reason}")]
+    CleanupPath { path: PathBuf, reason: String },
     #[error("failed to remove directory `{path}`: {reason}")]
     RemoveDirectory { path: PathBuf, reason: String },
     #[error(
@@ -28,6 +32,18 @@ pub enum WorkspaceError {
     },
     #[error("workspace hook `{hook}` failed: {reason}")]
     HookExecutionFailed { hook: String, reason: String },
+    #[error("workspace hook `{hook}` exited with status {exit_code}")]
+    HookExitedNonZero {
+        hook: String,
+        exit_code: i32,
+        result: HookResult,
+    },
+    #[error("workspace hook `{hook}` terminated without an exit status")]
+    HookTerminated { hook: String, result: HookResult },
     #[error("workspace hook `{hook}` timed out after {timeout_ms}ms")]
-    HookTimedOut { hook: String, timeout_ms: u64 },
+    HookTimedOut {
+        hook: String,
+        timeout_ms: u64,
+        result: HookResult,
+    },
 }

@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -52,6 +53,10 @@ pub struct CliArgs {
     #[arg(long, value_name = "SLUG")]
     pub tracker_project_slug: Option<String>,
 
+    /// Bind optional HTTP server to this address
+    #[arg(long, value_name = "IP_ADDR")]
+    pub bind: Option<IpAddr>,
+
     /// Enable optional HTTP server on this port (`0` requests an ephemeral local port)
     #[arg(long, value_name = "PORT")]
     pub port: Option<u16>,
@@ -74,6 +79,7 @@ impl CliArgs {
             tracker_endpoint: self.tracker_endpoint.clone(),
             tracker_api_key: self.tracker_api_key.clone(),
             tracker_project_slug: self.tracker_project_slug.clone(),
+            server_host: self.bind,
             server_port: self.port,
         }
     }
@@ -97,6 +103,7 @@ mod tests {
             tracker_endpoint: Some("https://custom.endpoint.com".to_string()),
             tracker_api_key: Some("api-key".to_string()),
             tracker_project_slug: Some("my-project".to_string()),
+            bind: Some("0.0.0.0".parse().expect("bind address should parse")),
             port: Some(8080),
             logs_root: Some(PathBuf::from("/tmp/logs")),
         };
@@ -120,6 +127,10 @@ mod tests {
             overrides.tracker_project_slug,
             Some("my-project".to_string())
         );
+        assert_eq!(
+            overrides.server_host,
+            Some("0.0.0.0".parse().expect("bind address should parse"))
+        );
         assert_eq!(overrides.server_port, Some(8080));
     }
 
@@ -137,6 +148,7 @@ mod tests {
             tracker_endpoint: None,
             tracker_api_key: None,
             tracker_project_slug: None,
+            bind: None,
             port: None,
             logs_root: None,
         };

@@ -95,6 +95,7 @@ impl RuntimeSnapshot {
     #[must_use]
     pub fn summary(&self) -> RuntimeSummaryView {
         let snapshot = self.normalized();
+        let health = snapshot.health();
         RuntimeSummaryView {
             counts: format!(
                 "running={} retrying={} total_active={}",
@@ -123,6 +124,14 @@ impl RuntimeSnapshot {
                 format_one_decimal(snapshot.activity.throughput.input_tokens_per_second),
                 format_one_decimal(snapshot.activity.throughput.output_tokens_per_second),
                 format_one_decimal(snapshot.activity.throughput.total_tokens_per_second),
+            ),
+            health: format!(
+                "status={} has_running_work={} has_retry_backlog={} poll_in_progress={} has_rate_limits={}",
+                runtime_health_status_label(health.status),
+                health.has_running_work,
+                health.has_retry_backlog,
+                health.poll_in_progress,
+                health.has_rate_limits,
             ),
             rate_limits: snapshot
                 .rate_limits
@@ -221,6 +230,7 @@ pub struct RuntimeSummaryView {
     pub tokens: String,
     pub activity: String,
     pub throughput: String,
+    pub health: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<String>,
 }
@@ -265,6 +275,15 @@ fn format_one_decimal(value: f64) -> String {
 
 fn format_optional_u64(value: Option<u64>) -> String {
     value.map_or_else(|| "none".to_owned(), |value| value.to_string())
+}
+
+fn runtime_health_status_label(status: RuntimeHealthStatus) -> &'static str {
+    match status {
+        RuntimeHealthStatus::Polling => "polling",
+        RuntimeHealthStatus::Busy => "busy",
+        RuntimeHealthStatus::Idle => "idle",
+        RuntimeHealthStatus::Unknown => "unknown",
+    }
 }
 
 #[cfg(test)]
@@ -340,6 +359,10 @@ mod tests {
             "window_seconds=5.0 input_tps=1.2 output_tps=2.4 total_tps=3.6"
         );
         assert_eq!(
+            spec_view.summary.health,
+            "status=polling has_running_work=true has_retry_backlog=true poll_in_progress=true has_rate_limits=true"
+        );
+        assert_eq!(
             spec_view.summary.rate_limits.as_deref(),
             Some(r#"{"primary":{"remaining":12}}"#)
         );
@@ -389,6 +412,10 @@ mod tests {
         assert_eq!(
             normalized.summary().throughput,
             "window_seconds=0.0 input_tps=0.0 output_tps=0.0 total_tps=0.0"
+        );
+        assert_eq!(
+            normalized.summary().health,
+            "status=unknown has_running_work=false has_retry_backlog=false poll_in_progress=false has_rate_limits=false"
         );
     }
 
@@ -453,5 +480,9 @@ mod tests {
         assert!(!health.has_running_work);
         assert!(!health.has_retry_backlog);
         assert!(!health.poll_in_progress);
+        assert_eq!(
+            snapshot.summary().health,
+            "status=idle has_running_work=false has_retry_backlog=false poll_in_progress=false has_rate_limits=false"
+        );
     }
 }
