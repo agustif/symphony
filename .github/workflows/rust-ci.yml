@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - "rust/**"
+      - "fixtures/http_state/**"
       - ".github/workflows/rust-ci.yml"
   push:
     branches:
       - main
     paths:
       - "rust/**"
+      - "fixtures/http_state/**"
       - ".github/workflows/rust-ci.yml"
   workflow_dispatch:
 

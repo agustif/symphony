@@ -1,1 +1,0 @@
-{"rustc":7468874786222975348,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[18408407127522236545,"build_script_build",false,6540896448071076161]],"local":[{"RerunIfChanged":{"output":"debug/build/getrandom-a4564131a21811f9/output","paths":["build.rs"]}}],"rustflags":["-C","link-arg=-fuse-ld=/usr/bin/ld"],"config":0,"compile_kind":0}

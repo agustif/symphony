@@ -102,7 +102,7 @@ defmodule SymphonyElixir.StatusDashboard do
     refresh_ms = refresh_ms_override || Config.observability_refresh_ms()
     render_interval_ms = render_interval_ms_override || Config.observability_render_interval_ms()
     render_fun = Keyword.get(opts, :render_fun, &render_to_terminal/1)
-    enabled = resolve_override(enabled_override, Config.observability_enabled?() and dashboard_enabled?())
+    enabled = resolve_override(enabled_override, dashboard_enabled?())
     schedule_tick(refresh_ms, enabled)
 
     {:ok,
@@ -136,6 +136,7 @@ defmodule SymphonyElixir.StatusDashboard do
       |> Enum.join("\n")
 
     render_to_terminal(content)
+
     :ok
   rescue
     error in [ArgumentError, RuntimeError] ->
@@ -178,7 +179,7 @@ defmodule SymphonyElixir.StatusDashboard do
   defp refresh_runtime_config(%__MODULE__{} = state) do
     %{
       state
-      | enabled: resolve_override(state.enabled_override, Config.observability_enabled?() and dashboard_enabled?()),
+      | enabled: resolve_override(state.enabled_override, dashboard_enabled?()),
         refresh_ms: state.refresh_ms_override || Config.observability_refresh_ms(),
         render_interval_ms: state.render_interval_ms_override || Config.observability_render_interval_ms()
     }
@@ -463,12 +464,24 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp render_to_terminal(content) do
-    IO.write([
-      IO.ANSI.home(),
-      IO.ANSI.clear(),
-      normalize_status_lines(content),
-      "\n"
-    ])
+    cond do
+      interactive_terminal?() ->
+        IO.write([
+          IO.ANSI.home(),
+          IO.ANSI.clear(),
+          normalize_status_lines(content),
+          "\n"
+        ])
+
+      test_env?() ->
+        IO.write([
+          normalize_status_lines(content),
+          "\n"
+        ])
+
+      true ->
+        :ok
+    end
   end
 
   defp update_token_samples(samples, now_ms, total_tokens) do
@@ -1929,14 +1942,24 @@ defmodule SymphonyElixir.StatusDashboard do
   defp truncate(value, _max), do: value
 
   defp dashboard_enabled? do
+    Config.observability_enabled?() and interactive_terminal?() and not test_env?()
+  end
+
+  defp interactive_terminal? do
+    IO.ANSI.enabled?() and match?({:ok, columns} when is_integer(columns) and columns > 0, :io.columns())
+  rescue
+    _ -> false
+  end
+
+  defp test_env? do
     if Code.ensure_loaded?(Mix) and function_exported?(Mix, :env, 0) do
       try do
-        Mix.env() != :test
+        Mix.env() == :test
       rescue
-        _ -> true
+        _ -> false
       end
     else
-      true
+      false
     end
   end
 

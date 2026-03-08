@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 use std::env::temp_dir;
+use std::fs;
+use std::path::PathBuf;
 
 use serde_json::json;
 use symphony_http::{
@@ -28,6 +30,45 @@ fn http_state_route_returns_runtime_and_issue_data() {
     assert_eq!(response.body["running"][0]["issue_id"], "SYM-1");
     assert_eq!(response.body["retrying"][0]["issue_id"], "SYM-2");
     assert!(response.body["running"][0]["last_message"].is_null());
+}
+
+#[test]
+fn http_state_route_matches_shared_benchmark_golden_projection() {
+    let mut runtime = runtime_snapshot(1, 1);
+    runtime.input_tokens = 4;
+    runtime.output_tokens = 8;
+    runtime.total_tokens = 12;
+    runtime.seconds_running = 42.5;
+    runtime.rate_limits = Some(json!({
+        "primary": {
+            "remaining": 11
+        }
+    }));
+
+    let mut running = issue_snapshot("issue-http", "MT-HTTP", "In Progress", 0);
+    running.session_id = Some("thread-http".to_owned());
+    running.turn_count = 7;
+    running.last_event = Some("notification".to_owned());
+    running.last_message = Some("rendered".to_owned());
+    running.started_at = Some(1_700_000_000);
+    running.last_event_at = Some(1_700_000_000);
+    running.input_tokens = 4;
+    running.output_tokens = 8;
+    running.total_tokens = 12;
+
+    let mut retrying = issue_snapshot("issue-retry", "MT-RETRY", "Todo", 2);
+    retrying.retry_due_at = Some(1_700_000_120);
+    retrying.retry_error = Some("boom".to_owned());
+
+    let response = handle_get(
+        STATE_ROUTE,
+        &state_snapshot(runtime, vec![running, retrying]),
+    );
+
+    assert_eq!(
+        benchmark_projection(&response.body),
+        load_benchmark_fixture("benchmark_state_small.json")
+    );
 }
 
 #[test]
@@ -367,6 +408,61 @@ fn http_operator_surfaces_redact_and_sort_structured_payloads() {
         retry_issue_response.body["last_error"],
         r#"{"a":"ok","token":"[REDACTED]"}"#
     );
+}
+
+fn benchmark_projection(body: &serde_json::Value) -> serde_json::Value {
+    let mut running = body["running"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "issue_id": entry["issue_id"].clone(),
+                "issue_identifier": entry["issue_identifier"].clone(),
+                "state": entry["state"].clone(),
+                "session_id": entry["session_id"].clone(),
+                "turn_count": entry["turn_count"].clone(),
+                "last_event": entry["last_event"].clone(),
+                "last_message": entry["last_message"].clone(),
+                "tokens": entry["tokens"].clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    running.sort_by(|left, right| left["issue_id"].as_str().cmp(&right["issue_id"].as_str()));
+
+    let mut retrying = body["retrying"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "issue_id": entry["issue_id"].clone(),
+                "issue_identifier": entry["issue_identifier"].clone(),
+                "attempt": entry["attempt"].clone(),
+                "error": entry["error"].clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    retrying.sort_by(|left, right| left["issue_id"].as_str().cmp(&right["issue_id"].as_str()));
+
+    json!({
+        "counts": body["counts"].clone(),
+        "running": running,
+        "retrying": retrying,
+        "codex_totals": body["codex_totals"].clone(),
+        "rate_limits": body["rate_limits"].clone(),
+    })
+}
+
+fn load_benchmark_fixture(name: &str) -> serde_json::Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join("fixtures/http_state")
+        .join(name);
+    serde_json::from_str(&fs::read_to_string(path).expect("benchmark fixture should exist"))
+        .expect("benchmark fixture should decode")
 }
 
 #[test]

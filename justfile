@@ -33,6 +33,7 @@ help:
   @echo "  just quick              # Run fast repo checks"
   @echo "  just lint               # Run Rust clippy and Elixir lint"
   @echo "  just test               # Run Rust and Elixir test suites"
+  @echo "  just conformance        # Run shared HTTP-state benchmark conformance checks"
   @echo "  just validate           # Run full Rust + Elixir validation"
   @echo "  just check              # Alias for validate"
   @echo "  just ci                 # Alias for validate"
@@ -71,6 +72,8 @@ lint: rust-lint elixir-lint
 
 test: rust-test elixir-test
 
+conformance: rust-http-state-conformance elixir-http-state-conformance
+
 validate: rust-validate elixir-validate
 
 check: validate
@@ -97,6 +100,9 @@ rust-lint:
 rust-test:
   cd {{rust_dir}} && cargo test --workspace
 
+rust-http-state-conformance:
+  cd {{rust_dir}} && cargo test -p symphony-http --test http_conformance http_state_route_matches_shared_benchmark_golden_projection
+
 rust-validate:
   cd {{rust_dir}} && cargo fmt --all --check
   cd {{rust_dir}} && cargo clippy --workspace --all-targets -- -D warnings
@@ -119,6 +125,9 @@ elixir-lint:
 
 elixir-test:
   cd {{elixir_dir}} && mise exec -- make test
+
+elixir-http-state-conformance:
+  cd {{elixir_dir}} && mise exec -- mix test test/symphony_elixir/http_state_golden_test.exs
 
 elixir-validate:
   cd {{elixir_dir}} && mise exec -- make all

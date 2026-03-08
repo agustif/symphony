@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Config do
   """
 
   alias NimbleOptions
-  alias SymphonyElixir.Workflow
+  alias SymphonyElixir.{Workflow, WorkflowStore}
 
   @default_active_states ["Todo", "In Progress"]
   @default_terminal_states ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
@@ -44,6 +44,8 @@ defmodule SymphonyElixir.Config do
   @default_observability_refresh_ms 1_000
   @default_observability_render_interval_ms 16
   @default_server_host "127.0.0.1"
+  @workflow_config_cache_key {__MODULE__, :workflow_config}
+  @validated_workflow_cache_key {__MODULE__, :validated_workflow_options}
   @workflow_options_schema NimbleOptions.new!(
                              tracker: [
                                type: :map,
@@ -172,10 +174,28 @@ defmodule SymphonyElixir.Config do
           before_remove: String.t() | nil,
           timeout_ms: pos_integer()
         }
+  @type validated_workflow_options :: %{
+          tracker: map(),
+          polling: map(),
+          workspace: map(),
+          agent: map(),
+          codex: map(),
+          hooks: map(),
+          observability: map(),
+          server: map()
+        }
 
   @spec current_workflow() :: {:ok, workflow_payload()} | {:error, term()}
   def current_workflow do
     Workflow.current()
+  end
+
+  @spec validated_workflow_options_from_config(map()) :: validated_workflow_options()
+  def validated_workflow_options_from_config(config) when is_map(config) do
+    config
+    |> normalize_keys()
+    |> extract_workflow_options()
+    |> NimbleOptions.validate!(@workflow_options_schema)
   end
 
   @spec tracker_kind() :: tracker_kind()
@@ -439,9 +459,23 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validated_workflow_options do
-    workflow_config()
-    |> extract_workflow_options()
-    |> NimbleOptions.validate!(@workflow_options_schema)
+    case WorkflowStore.cached_validated_options() do
+      {:ok, options} ->
+        options
+
+      :unavailable ->
+        config = workflow_config()
+
+        case :persistent_term.get(@validated_workflow_cache_key, :missing) do
+          {^config, options} ->
+            options
+
+          _ ->
+            options = validated_workflow_options_from_config(config)
+            :persistent_term.put(@validated_workflow_cache_key, {config, options})
+            options
+        end
+    end
   end
 
   defp extract_workflow_options(config) do
@@ -793,12 +827,23 @@ defmodule SymphonyElixir.Config do
   defp normalize_tracker_kind(_kind), do: nil
 
   defp workflow_config do
-    case current_workflow() do
-      {:ok, %{config: config}} when is_map(config) ->
-        normalize_keys(config)
+    config = current_workflow_config()
+
+    case :persistent_term.get(@workflow_config_cache_key, :missing) do
+      {^config, normalized_config} ->
+        normalized_config
 
       _ ->
-        %{}
+        normalized_config = normalize_keys(config)
+        :persistent_term.put(@workflow_config_cache_key, {config, normalized_config})
+        normalized_config
+    end
+  end
+
+  defp current_workflow_config do
+    case current_workflow() do
+      {:ok, %{config: config}} when is_map(config) -> config
+      _ -> %{}
     end
   end
 

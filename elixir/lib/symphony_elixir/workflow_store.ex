@@ -6,14 +6,14 @@ defmodule SymphonyElixir.WorkflowStore do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.Workflow
+  alias SymphonyElixir.{Config, Workflow}
 
   @poll_interval_ms 1_000
 
   defmodule State do
     @moduledoc false
 
-    defstruct [:path, :stamp, :workflow]
+    defstruct [:path, :stamp, :workflow, :validated_options]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -29,6 +29,17 @@ defmodule SymphonyElixir.WorkflowStore do
 
       _ ->
         Workflow.load()
+    end
+  end
+
+  @spec cached_validated_options() :: {:ok, map()} | :unavailable
+  def cached_validated_options do
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) ->
+        GenServer.call(__MODULE__, :cached_validated_options)
+
+      _ ->
+        :unavailable
     end
   end
 
@@ -60,12 +71,17 @@ defmodule SymphonyElixir.WorkflowStore do
 
   @impl true
   def handle_call(:current, _from, %State{} = state) do
-    case reload_state(state) do
-      {:ok, new_state} ->
-        {:reply, {:ok, new_state.workflow}, new_state}
+    path = Workflow.workflow_file_path()
 
-      {:error, _reason, new_state} ->
-        {:reply, {:ok, new_state.workflow}, new_state}
+    cond do
+      path != state.path ->
+        reply_with_reload(reload_path(path, state))
+
+      workflow_file_unchanged?(path, state.stamp) ->
+        {:reply, {:ok, state.workflow}, state}
+
+      true ->
+        reply_with_reload(reload_current_path(path, state))
     end
   end
 
@@ -76,6 +92,21 @@ defmodule SymphonyElixir.WorkflowStore do
 
       {:error, reason, new_state} ->
         {:reply, {:error, reason}, new_state}
+    end
+  end
+
+  def handle_call(:cached_validated_options, _from, %State{} = state) do
+    path = Workflow.workflow_file_path()
+
+    cond do
+      path != state.path ->
+        reply_with_validated_options(reload_path(path, state))
+
+      workflow_file_unchanged?(path, state.stamp) ->
+        {:reply, {:ok, state.validated_options}, state}
+
+      true ->
+        reply_with_validated_options(reload_current_path(path, state))
     end
   end
 
@@ -131,7 +162,13 @@ defmodule SymphonyElixir.WorkflowStore do
   defp load_state(path) do
     with {:ok, workflow} <- Workflow.load(path),
          {:ok, stamp} <- current_stamp(path) do
-      {:ok, %State{path: path, stamp: stamp, workflow: workflow}}
+      {:ok,
+       %State{
+         path: path,
+         stamp: stamp,
+         workflow: workflow,
+         validated_options: Config.validated_workflow_options_from_config(workflow.config)
+       }}
     else
       {:error, reason} ->
         {:error, reason}
@@ -139,13 +176,37 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   defp current_stamp(path) when is_binary(path) do
-    with {:ok, stat} <- File.stat(path, time: :posix),
+    with {:ok, {mtime, size}} <- current_file_stamp(path),
          {:ok, content} <- File.read(path) do
-      {:ok, {stat.mtime, stat.size, :erlang.phash2(content)}}
+      {:ok, {mtime, size, :erlang.phash2(content)}}
     else
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp workflow_file_unchanged?(path, stamp) when is_binary(path) do
+    case current_stamp(path) do
+      {:ok, ^stamp} -> true
+      _ -> false
+    end
+  end
+
+  defp workflow_file_unchanged?(_path, _stamp), do: false
+
+  defp current_file_stamp(path) when is_binary(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, stat} -> {:ok, {stat.mtime, stat.size}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp reply_with_reload({:ok, new_state}), do: {:reply, {:ok, new_state.workflow}, new_state}
+  defp reply_with_reload({:error, _reason, new_state}), do: {:reply, {:ok, new_state.workflow}, new_state}
+
+  defp reply_with_validated_options({:ok, new_state}), do: {:reply, {:ok, new_state.validated_options}, new_state}
+
+  defp reply_with_validated_options({:error, _reason, new_state}),
+    do: {:reply, {:ok, new_state.validated_options}, new_state}
 
   defp log_reload_error(path, reason) do
     Logger.error("Failed to reload workflow path=#{path} reason=#{inspect(reason)}; keeping last known good configuration")

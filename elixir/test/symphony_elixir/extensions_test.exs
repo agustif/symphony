@@ -113,6 +113,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     end)
 
     File.write!(Workflow.workflow_file_path(), "---\ntracker: [\n---\nBroken prompt\n")
+    assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
     assert {:error, _reason} = WorkflowStore.force_reload()
     assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
 
@@ -147,28 +148,33 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, {:missing_workflow_file, ^missing_path, :enoent}} =
              WorkflowStore.force_reload()
 
-    write_workflow_file!(manual_path, prompt: "Manual workflow prompt")
+    write_workflow_file!(manual_path, prompt: "Manual workflow prompt", poll_interval_ms: 5_000)
     Workflow.set_workflow_file_path(manual_path)
 
     assert {:ok, manual_pid} = WorkflowStore.start_link()
     assert Process.alive?(manual_pid)
+    assert {:ok, %{polling: %{interval_ms: 5_000}}} = WorkflowStore.cached_validated_options()
 
     state = :sys.get_state(manual_pid)
+    assert state.validated_options.polling.interval_ms == 5_000
     File.write!(manual_path, "---\ntracker: [\n---\nBroken prompt\n")
     assert {:noreply, returned_state} = WorkflowStore.handle_info(:poll, state)
     assert returned_state.workflow.prompt == "Manual workflow prompt"
+    assert returned_state.validated_options.polling.interval_ms == 5_000
     refute returned_state.stamp == nil
     assert_receive :poll, 1_100
 
     Workflow.set_workflow_file_path(missing_path)
     assert {:noreply, path_error_state} = WorkflowStore.handle_info(:poll, returned_state)
     assert path_error_state.workflow.prompt == "Manual workflow prompt"
+    assert path_error_state.validated_options.polling.interval_ms == 5_000
     assert_receive :poll, 1_100
 
     Workflow.set_workflow_file_path(manual_path)
     File.rm!(manual_path)
     assert {:noreply, removed_state} = WorkflowStore.handle_info(:poll, path_error_state)
     assert removed_state.workflow.prompt == "Manual workflow prompt"
+    assert removed_state.validated_options.polling.interval_ms == 5_000
     assert_receive :poll, 1_100
 
     Process.exit(manual_pid, :normal)

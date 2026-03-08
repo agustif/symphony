@@ -270,6 +270,15 @@ impl StateSnapshot {
     pub fn task_maps(&self) -> TaskMapSnapshot {
         let running_rows = self.running_issues().len();
         let retrying_rows = self.retrying_issues().len();
+        self.task_maps_from_counts(running_rows, retrying_rows)
+    }
+
+    #[must_use]
+    pub fn task_maps_from_counts(
+        &self,
+        running_rows: usize,
+        retrying_rows: usize,
+    ) -> TaskMapSnapshot {
         let inactive_tracked = self
             .issues
             .len()
@@ -287,17 +296,40 @@ impl StateSnapshot {
     #[must_use]
     pub fn summary(&self) -> StateSummaryView {
         let sanitized = self.sanitized();
+        let running_issues = sanitized.running_issues();
+        let retrying_issues = sanitized.retrying_issues();
         let issue_totals = sanitized.issue_totals();
-        let task_maps = sanitized.task_maps();
-        let mut running_identifiers = sanitized
-            .running_issues()
-            .into_iter()
+        let task_maps =
+            sanitized.task_maps_from_counts(running_issues.len(), retrying_issues.len());
+
+        Self::summary_from_parts(&issue_totals, &task_maps, &running_issues, &retrying_issues)
+    }
+
+    #[must_use]
+    pub fn spec_view(&self) -> StateSpecView {
+        let sanitized = self.sanitized();
+        StateSpecView {
+            runtime: sanitized.runtime.spec_view(),
+            issue_totals: sanitized.issue_totals(),
+            task_maps: sanitized.task_maps(),
+            summary: sanitized.summary(),
+        }
+    }
+
+    pub fn summary_from_parts(
+        issue_totals: &IssueStatusTotalsSnapshot,
+        task_maps: &TaskMapSnapshot,
+        running_issues: &[&IssueSnapshot],
+        retrying_issues: &[&IssueSnapshot],
+    ) -> StateSummaryView {
+        let mut running_identifiers = running_issues
+            .iter()
             .map(|issue| issue.identifier.clone())
             .collect::<Vec<_>>();
         running_identifiers.sort();
-        let mut retrying_identifiers = sanitized
-            .retrying_issues()
-            .into_iter()
+
+        let mut retrying_identifiers = retrying_issues
+            .iter()
             .map(|issue| issue.identifier.clone())
             .collect::<Vec<_>>();
         retrying_identifiers.sort();
@@ -326,17 +358,6 @@ impl StateSnapshot {
             ),
             running_identifiers,
             retrying_identifiers,
-        }
-    }
-
-    #[must_use]
-    pub fn spec_view(&self) -> StateSpecView {
-        let sanitized = self.sanitized();
-        StateSpecView {
-            runtime: sanitized.runtime.spec_view(),
-            issue_totals: sanitized.issue_totals(),
-            task_maps: sanitized.task_maps(),
-            summary: sanitized.summary(),
         }
     }
 }

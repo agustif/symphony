@@ -1,0 +1,41 @@
+{
+  "codex_totals": {
+    "input_tokens": 4,
+    "output_tokens": 8,
+    "seconds_running": 42.5,
+    "total_tokens": 12
+  },
+  "counts": {
+    "retrying": 1,
+    "running": 1
+  },
+  "rate_limits": {
+    "primary": {
+      "remaining": 11
+    }
+  },
+  "retrying": [
+    {
+      "attempt": 2,
+      "error": "boom",
+      "issue_id": "issue-retry",
+      "issue_identifier": "MT-RETRY"
+    }
+  ],
+  "running": [
+    {
+      "issue_id": "issue-http",
+      "issue_identifier": "MT-HTTP",
+      "last_event": "notification",
+      "last_message": "rendered",
+      "session_id": "thread-http",
+      "state": "In Progress",
+      "tokens": {
+        "input_tokens": 4,
+        "output_tokens": 8,
+        "total_tokens": 12
+      },
+      "turn_count": 7
+    }
+  ]
+}

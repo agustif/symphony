@@ -344,17 +344,22 @@ impl StateApiView {
 impl From<&StateSnapshot> for StateApiView {
     fn from(snapshot: &StateSnapshot) -> Self {
         let snapshot = snapshot.sanitized();
+        let running_issues = snapshot.running_issues();
+        let retrying_issues = snapshot.retrying_issues();
         let runtime_spec = snapshot.runtime.spec_view();
         let issue_totals = snapshot.issue_totals();
-        let task_maps = snapshot.task_maps();
-        let state_summary = snapshot.summary();
-        let running = snapshot
-            .running_issues()
+        let task_maps = snapshot.task_maps_from_counts(running_issues.len(), retrying_issues.len());
+        let state_summary = StateSnapshot::summary_from_parts(
+            &issue_totals,
+            &task_maps,
+            &running_issues,
+            &retrying_issues,
+        );
+        let running = running_issues
             .into_iter()
             .map(RunningIssueView::from)
             .collect::<Vec<_>>();
-        let retrying = snapshot
-            .retrying_issues()
+        let retrying = retrying_issues
             .into_iter()
             .map(RetryIssueView::from)
             .collect::<Vec<_>>();

@@ -91,9 +91,12 @@ Check in a language-neutral fixture set:
 - `fixtures/issues/*.json`
 - `fixtures/events/*.json`
 - `fixtures/runtime_snapshot.json`
+- `fixtures/http_state/*.json`
 - `fixtures/workflow/WORKFLOW.md`
 
 Both implementations should deserialize or adapt the same corpus.
+
+Until full `/api/v1/state` wire parity exists, benchmark fairness should be enforced on a normalized benchmark projection. The shared golden should cover only the fields both implementations promise to compare in performance reports.
 
 ### Shared scenarios
 
