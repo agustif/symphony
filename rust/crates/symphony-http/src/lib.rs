@@ -8,9 +8,9 @@ mod state_handlers;
 
 pub use api_response::ApiResponse;
 pub use http_method::HttpMethod;
+pub use payloads::{StateApiView, summarize_codex_message};
 pub use routes::{
     API_V1_PREFIX, DASHBOARD_ROUTE, ISSUE_ROUTE_PREFIX, REFRESH_ROUTE, STATE_ROUTE, issue_route,
-    legacy_issue_route,
 };
 pub use state_handlers::{
     dashboard_envelope_to_html, dashboard_to_html, handle_get, handle_get_with_workspace,
@@ -28,7 +28,6 @@ mod tests {
         StateSnapshotEnvelope, ThroughputSnapshot,
     };
     use symphony_testkit::{issue_snapshot, runtime_snapshot, state_snapshot};
-    use symphony_workspace::workspace_path;
 
     #[test]
     fn serves_dashboard_route_with_html_document() {
@@ -72,6 +71,13 @@ mod tests {
         assert_eq!(response.content_type, "text/html; charset=utf-8");
         assert!(response.rendered_body.contains("<!doctype html>"));
         assert!(response.rendered_body.contains("Symphony Dashboard"));
+        assert!(response.rendered_body.contains("id=\"dashboard-root\""));
+        assert!(response.rendered_body.contains("const refreshUrl = \"/\";"));
+        assert!(
+            response
+                .rendered_body
+                .contains("X-Symphony-Dashboard-Refresh")
+        );
         assert!(response.rendered_body.contains("Metrics"));
         assert!(response.rendered_body.contains("Rate limits"));
         assert!(response.rendered_body.contains("Running sessions"));
@@ -87,6 +93,8 @@ mod tests {
                 .rendered_body
                 .contains("dynamic tool call completed: apply_patch")
         );
+        assert!(response.rendered_body.contains("Copy ID"));
+        assert!(response.rendered_body.contains("data-copy=\"session-123\""));
         assert!(response.rendered_body.contains("SYM-2&lt;script&gt;"));
     }
 
@@ -159,18 +167,15 @@ mod tests {
     }
 
     #[test]
-    fn serves_issue_endpoint_for_legacy_route() {
+    fn legacy_issue_route_is_not_supported() {
         let snapshot = state_snapshot(
             runtime_snapshot(1, 0),
             vec![issue_snapshot("SYM-1", "SYM-1", "Running", 0)],
         );
 
-        let response = handle_get(&legacy_issue_route("SYM-1"), &snapshot);
-        assert_eq!(response.status, 200);
-        assert_eq!(response.body["issue_id"], "SYM-1");
-        assert!(response.body["running"].get("issue_id").is_none());
-        assert!(response.body["running"]["last_message"].is_null());
-        assert!(response.body.get("issue").is_none());
+        let response = handle_get("/api/v1/issues/SYM-1", &snapshot);
+        assert_eq!(response.status, 404);
+        assert_eq!(response.body["error"]["code"], "not_found");
     }
 
     #[test]
@@ -202,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_detail_workspace_fallback_uses_sanitized_workspace_path() {
+    fn issue_detail_workspace_fallback_matches_elixir_presenter_join_behavior() {
         let identifier = "SYM/1";
         let snapshot = state_snapshot(
             runtime_snapshot(1, 0),
@@ -211,10 +216,7 @@ mod tests {
         let root = std::env::temp_dir().join("symphony-http-tests");
 
         let response = handle_get_with_workspace(&issue_route(identifier), &snapshot, Some(&root));
-        let expected = workspace_path(&root, identifier)
-            .expect("workspace path should sanitize identifier")
-            .to_string_lossy()
-            .into_owned();
+        let expected = root.join(identifier).to_string_lossy().into_owned();
 
         assert_eq!(response.status, 200);
         assert_eq!(response.body["workspace"]["path"], expected);

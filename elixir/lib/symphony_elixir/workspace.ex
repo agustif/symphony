@@ -68,10 +68,16 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  @spec path_for_issue_identifier(String.t()) :: Path.t()
+  def path_for_issue_identifier(identifier) when is_binary(identifier) do
+    identifier
+    |> safe_identifier()
+    |> workspace_path_for_issue()
+  end
+
   @spec remove_issue_workspaces(term()) :: :ok
   def remove_issue_workspaces(identifier) when is_binary(identifier) do
-    safe_id = safe_identifier(identifier)
-    workspace = Path.join(Config.workspace_root(), safe_id)
+    workspace = path_for_issue_identifier(identifier)
 
     remove(workspace)
     :ok

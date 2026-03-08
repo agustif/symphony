@@ -1,9 +1,9 @@
 # symphony-cli Tasks
 
-## Status Snapshot (2026-03-07)
+## Status Snapshot (2026-03-08)
 - Completion: 93%
-- Done: baseline flag parsing, startup diagnostics, workflow-driven startup validation, optional HTTP wiring, runtime-driven HTTP snapshot serving, refresh unavailable mapping, degraded snapshot timeout/stale caching, signal-handling shutdown paths, retained-invalid reload diagnostics, restart-required reload retention, supervised background-task failure mapping, end-to-end host lifecycle coverage for both HTTP-enabled and HTTP-disabled startup paths, missing-workflow and bind-failure startup errors, and host supervision shutdown test are implemented.
-- In Progress: last-mile host parity gaps around deeper production supervision semantics and startup-failure coverage.
+- Done: baseline flag parsing, startup diagnostics, workflow-driven startup validation, optional HTTP wiring, runtime-driven HTTP snapshot serving, refresh unavailable mapping, degraded snapshot timeout/stale caching, signal-handling shutdown paths, retained-invalid reload diagnostics, restart-required reload retention, supervised background-task failure mapping, end-to-end host lifecycle coverage for both HTTP-enabled and HTTP-disabled startup paths, missing-workflow and bind-failure startup errors, host supervision shutdown test, and live terminal rendering sourced from the shared HTTP operator view are implemented.
+- In Progress: last-mile host parity gaps around deeper production supervision semantics and startup-failure coverage, not terminal/web projection drift.
 - Remaining: full CLI and host behavior parity with the spec and the Elixir reference, especially stronger watcher implementation parity and a broader startup-failure matrix.
 
 ## Scope

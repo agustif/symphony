@@ -8,14 +8,17 @@ use axum::http::{Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use std::future::Future;
+use std::io;
 use std::net::IpAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use symphony_cli::{
-    CliStartupError, HostOwnedConfigChange, WorkflowReloadDisposition,
-    build_validated_startup_config_from_args, classify_workflow_reload,
+    CliStartupError, HostOwnedConfigChange, TerminalDashboardRenderContext,
+    WorkflowReloadDisposition, build_validated_startup_config_from_args, classify_workflow_reload,
+    dashboard_url, render_content_to_terminal, render_offline_status_to_terminal,
+    render_state_snapshot_content_for_test, stdout_supports_dashboard,
 };
 use symphony_config::{
     CliOverrides, ConfigError, ProcessEnv, RuntimeConfig, apply_cli_overrides,
@@ -48,6 +51,7 @@ const EXIT_WATCHER_TASK: i32 = 11;
 const EXIT_HTTP_TASK: i32 = 12;
 const EXIT_LOG_INIT: i32 = 13;
 const EXIT_RESTART_REQUIRED: i32 = 14;
+const EXIT_TERMINAL_DASHBOARD_TASK: i32 = 15;
 const HTTP_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
 const BACKGROUND_TASK_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 // Give cooperative shutdown a brief chance before force-aborting siblings after host failure.
@@ -87,6 +91,7 @@ enum BackgroundTaskKind {
     RuntimePollLoop,
     WorkflowWatcher,
     HttpServer,
+    TerminalDashboard,
 }
 
 impl BackgroundTaskKind {
@@ -95,6 +100,7 @@ impl BackgroundTaskKind {
             Self::RuntimePollLoop => EXIT_RUNTIME_TASK,
             Self::WorkflowWatcher => EXIT_WATCHER_TASK,
             Self::HttpServer => EXIT_HTTP_TASK,
+            Self::TerminalDashboard => EXIT_TERMINAL_DASHBOARD_TASK,
         }
     }
 
@@ -103,6 +109,7 @@ impl BackgroundTaskKind {
             Self::RuntimePollLoop => "runtime poll loop",
             Self::WorkflowWatcher => "workflow watcher",
             Self::HttpServer => "HTTP server",
+            Self::TerminalDashboard => "terminal dashboard",
         }
     }
 }
@@ -182,9 +189,13 @@ async fn run() -> Result<(), ExitError> {
                 format!("effective runtime config failed: {error}"),
             )
         })?;
+    let terminal_dashboard_supported = stdout_supports_dashboard();
+    let dashboard_owns_terminal =
+        terminal_dashboard_supported && initial_config.observability.enabled;
     let _log_guard = init_tracing(
         &initial_config.log_level.level,
         startup_config.logs_root.as_deref(),
+        !dashboard_owns_terminal,
     )
     .map_err(|error| exit_error(EXIT_LOG_INIT, format!("logging init failed: {error}")))?;
 
@@ -222,6 +233,7 @@ async fn run() -> Result<(), ExitError> {
     let (refresh_tx, refresh_rx) = mpsc::channel(1);
     let (shutdown_tx, _) = broadcast::channel(1);
     let (task_exit_tx, mut task_exit_rx) = mpsc::unbounded_channel();
+    let bound_http_port = Arc::new(RwLock::new(None));
 
     let shutdown_rx = shutdown_tx.subscribe();
     let runtime_poll = runtime.clone();
@@ -277,6 +289,7 @@ async fn run() -> Result<(), ExitError> {
     let http_handle = if let Some(port) = initial_config.server.port {
         let host = initial_config.server.host;
         let http_shutdown = shutdown_tx.subscribe();
+        let http_bound_port = bound_http_port.clone();
         let http_state = HttpServerState {
             runtime: runtime.clone(),
             config: config_arc.clone(),
@@ -285,7 +298,8 @@ async fn run() -> Result<(), ExitError> {
         };
         let task_exit_tx_http = task_exit_tx.clone();
         Some(tokio::spawn(async move {
-            let result = run_http_server(http_state, host, port, http_shutdown).await;
+            let result =
+                run_http_server(http_state, host, port, http_shutdown, http_bound_port).await;
             let _ = task_exit_tx_http
                 .send(BackgroundTaskSignal::Exited(BackgroundTaskKind::HttpServer));
             result
@@ -293,37 +307,83 @@ async fn run() -> Result<(), ExitError> {
     } else {
         None
     };
+    let dashboard_handle = if terminal_dashboard_supported {
+        let dashboard_runtime = runtime.clone();
+        let dashboard_config = config_arc.clone();
+        let dashboard_bound_http_port = bound_http_port.clone();
+        let dashboard_shutdown = shutdown_tx.subscribe();
+        let task_exit_tx_dashboard = task_exit_tx.clone();
+        Some(tokio::spawn(async move {
+            run_terminal_dashboard(
+                dashboard_runtime,
+                dashboard_config,
+                dashboard_bound_http_port,
+                dashboard_shutdown,
+            )
+            .await;
+            let _ = task_exit_tx_dashboard.send(BackgroundTaskSignal::Exited(
+                BackgroundTaskKind::TerminalDashboard,
+            ));
+        }))
+    } else {
+        None
+    };
     drop(task_exit_tx);
 
-    println!(
-        "Symphony Rust Runtime started (workflow: {})",
-        startup_config.workflow_path.display()
-    );
+    if !dashboard_owns_terminal {
+        println!(
+            "Symphony Rust Runtime started (workflow: {})",
+            startup_config.workflow_path.display()
+        );
+    }
 
     // 6. Supervise background tasks and handle shutdown
     let lifecycle_event = wait_for_host_lifecycle_event(
         &poll_handle,
         &watcher_handle,
         http_handle.as_ref(),
+        dashboard_handle.as_ref(),
         &mut task_exit_rx,
         wait_for_shutdown_signal(),
         BACKGROUND_TASK_PROBE_INTERVAL,
     )
     .await?;
-    println!("Shutting down...");
+    if !dashboard_owns_terminal {
+        println!("Shutting down...");
+    }
     let _ = shutdown_tx.send(());
 
     match lifecycle_event {
         HostLifecycleEvent::ShutdownRequested => {
-            await_background_tasks(poll_handle, watcher_handle, http_handle, None).await?;
+            await_background_tasks(
+                poll_handle,
+                watcher_handle,
+                http_handle,
+                dashboard_handle,
+                None,
+            )
+            .await?;
         }
         HostLifecycleEvent::BackgroundTaskExited(task_kind) => {
-            await_background_tasks(poll_handle, watcher_handle, http_handle, Some(task_kind))
-                .await?;
+            await_background_tasks(
+                poll_handle,
+                watcher_handle,
+                http_handle,
+                dashboard_handle,
+                Some(task_kind),
+            )
+            .await?;
             return Err(unexpected_background_task_exit(task_kind));
         }
         HostLifecycleEvent::RestartRequired(message) => {
-            await_background_tasks(poll_handle, watcher_handle, http_handle, None).await?;
+            await_background_tasks(
+                poll_handle,
+                watcher_handle,
+                http_handle,
+                dashboard_handle,
+                None,
+            )
+            .await?;
             return Err(exit_error(EXIT_RESTART_REQUIRED, message));
         }
     }
@@ -334,6 +394,7 @@ async fn run() -> Result<(), ExitError> {
 fn init_tracing(
     log_level: &str,
     logs_root: Option<&Path>,
+    console_enabled: bool,
 ) -> anyhow::Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
     let env_filter = EnvFilter::try_new(log_level)
         .or_else(|_| EnvFilter::try_new("info"))
@@ -356,10 +417,17 @@ fn init_tracing(
         return Ok(Some(guard));
     }
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
-        .init();
+    if console_enabled {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer.with_writer(io::sink).with_ansi(false))
+            .init();
+    }
     Ok(None)
 }
 
@@ -398,6 +466,7 @@ async fn run_http_server(
     host: IpAddr,
     port: u16,
     mut shutdown_rx: broadcast::Receiver<()>,
+    bound_http_port: Arc<RwLock<Option<u16>>>,
 ) -> anyhow::Result<()> {
     let app = Router::new().fallback(any(http_fallback)).with_state(state);
     let listener = tokio::net::TcpListener::bind((host, port))
@@ -406,6 +475,10 @@ async fn run_http_server(
     let listen_addr = listener
         .local_addr()
         .context("failed to resolve bound HTTP listener address")?;
+    {
+        let mut guard = bound_http_port.write().await;
+        *guard = Some(listen_addr.port());
+    }
     tracing::info!(http_listen_addr = %listen_addr, "HTTP server started");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -420,6 +493,7 @@ async fn await_background_tasks(
     mut poll_handle: JoinHandle<()>,
     mut watcher_handle: JoinHandle<()>,
     mut http_handle: Option<JoinHandle<anyhow::Result<()>>>,
+    mut dashboard_handle: Option<JoinHandle<()>>,
     unexpected_exit: Option<BackgroundTaskKind>,
 ) -> Result<(), ExitError> {
     if unexpected_exit.is_some() {
@@ -427,6 +501,11 @@ async fn await_background_tasks(
         abort_background_task_if_running(&mut poll_handle, unexpected_exit);
         abort_background_task_if_running(&mut watcher_handle, unexpected_exit);
         abort_http_task_if_running(http_handle.as_mut(), unexpected_exit);
+        abort_optional_unit_task_if_running(
+            dashboard_handle.as_mut(),
+            BackgroundTaskKind::TerminalDashboard,
+            unexpected_exit,
+        );
     }
 
     match unexpected_exit {
@@ -444,6 +523,13 @@ async fn await_background_tasks(
                 true,
             )?;
             await_http_task(http_handle, true, true).await?;
+            await_optional_unit_task(
+                BackgroundTaskKind::TerminalDashboard,
+                dashboard_handle,
+                true,
+                true,
+            )
+            .await?;
         }
         Some(BackgroundTaskKind::WorkflowWatcher) => {
             map_unit_task_result(
@@ -459,6 +545,13 @@ async fn await_background_tasks(
                 true,
             )?;
             await_http_task(http_handle, true, true).await?;
+            await_optional_unit_task(
+                BackgroundTaskKind::TerminalDashboard,
+                dashboard_handle,
+                true,
+                true,
+            )
+            .await?;
         }
         Some(BackgroundTaskKind::HttpServer) => {
             await_http_task(http_handle, false, false).await?;
@@ -474,6 +567,35 @@ async fn await_background_tasks(
                 true,
                 true,
             )?;
+            await_optional_unit_task(
+                BackgroundTaskKind::TerminalDashboard,
+                dashboard_handle,
+                true,
+                true,
+            )
+            .await?;
+        }
+        Some(BackgroundTaskKind::TerminalDashboard) => {
+            await_optional_unit_task(
+                BackgroundTaskKind::TerminalDashboard,
+                dashboard_handle,
+                false,
+                false,
+            )
+            .await?;
+            map_unit_task_result(
+                BackgroundTaskKind::RuntimePollLoop,
+                poll_handle.await,
+                true,
+                true,
+            )?;
+            map_unit_task_result(
+                BackgroundTaskKind::WorkflowWatcher,
+                watcher_handle.await,
+                true,
+                true,
+            )?;
+            await_http_task(http_handle, true, true).await?;
         }
         None => {
             let (poll_result, watcher_result) = tokio::join!(poll_handle, watcher_handle);
@@ -490,6 +612,13 @@ async fn await_background_tasks(
                 false,
             )?;
             await_http_task(http_handle, true, false).await?;
+            await_optional_unit_task(
+                BackgroundTaskKind::TerminalDashboard,
+                dashboard_handle,
+                true,
+                false,
+            )
+            .await?;
         }
     }
 
@@ -606,6 +735,7 @@ async fn wait_for_host_lifecycle_event<F>(
     poll_handle: &JoinHandle<()>,
     watcher_handle: &JoinHandle<()>,
     http_handle: Option<&JoinHandle<anyhow::Result<()>>>,
+    dashboard_handle: Option<&JoinHandle<()>>,
     task_exit_rx: &mut mpsc::UnboundedReceiver<BackgroundTaskSignal>,
     shutdown_signal: F,
     probe_interval: Duration,
@@ -655,6 +785,11 @@ where
                 if http_handle.is_some_and(|handle| handle.is_finished()) {
                     return Ok(HostLifecycleEvent::BackgroundTaskExited(
                         BackgroundTaskKind::HttpServer,
+                    ));
+                }
+                if dashboard_handle.is_some_and(|handle| handle.is_finished()) {
+                    return Ok(HostLifecycleEvent::BackgroundTaskExited(
+                        BackgroundTaskKind::TerminalDashboard,
                     ));
                 }
             }
@@ -739,6 +874,22 @@ fn abort_http_task_if_running(
     }
 }
 
+fn abort_optional_unit_task_if_running(
+    handle: Option<&mut JoinHandle<()>>,
+    task_kind: BackgroundTaskKind,
+    unexpected_exit: Option<BackgroundTaskKind>,
+) {
+    if matches!(unexpected_exit, Some(kind) if kind == task_kind) {
+        return;
+    }
+
+    if let Some(handle) = handle
+        && !handle.is_finished()
+    {
+        handle.abort();
+    }
+}
+
 fn unexpected_background_task_exit(task_kind: BackgroundTaskKind) -> ExitError {
     exit_error(
         task_kind.exit_code(),
@@ -747,6 +898,139 @@ fn unexpected_background_task_exit(task_kind: BackgroundTaskKind) -> ExitError {
             task_kind.task_label()
         ),
     )
+}
+
+async fn await_optional_unit_task(
+    task_kind: BackgroundTaskKind,
+    handle: Option<JoinHandle<()>>,
+    allow_clean_exit: bool,
+    allow_cancelled: bool,
+) -> Result<(), ExitError> {
+    if let Some(handle) = handle {
+        map_unit_task_result(task_kind, handle.await, allow_clean_exit, allow_cancelled)?;
+    }
+
+    Ok(())
+}
+
+async fn run_terminal_dashboard(
+    runtime: Arc<Runtime<LinearTracker>>,
+    config: Arc<RwLock<RuntimeConfig>>,
+    bound_http_port: Arc<RwLock<Option<u16>>>,
+    mut shutdown_rx: broadcast::Receiver<()>,
+) {
+    let mut snapshot_rx = runtime.subscribe_snapshots();
+    let mut pending_render = true;
+    let mut last_rendered_at: Option<Instant> = None;
+    let mut last_rendered_content: Option<String> = None;
+    let mut rendered_live_frame = false;
+
+    loop {
+        let current_config = config.read().await.clone();
+        let refresh_interval =
+            Duration::from_millis(current_config.observability.refresh_ms.max(1));
+        let render_interval =
+            Duration::from_millis(current_config.observability.render_interval_ms.max(1));
+        let enabled = current_config.observability.enabled;
+
+        if enabled && pending_render && render_due(last_rendered_at, render_interval) {
+            let snapshot = runtime.state_snapshot().await;
+            let bound_port = *bound_http_port.read().await;
+            let content = render_state_snapshot_content_for_test(
+                &snapshot,
+                snapshot.runtime.activity.throughput.total_tokens_per_second,
+                &TerminalDashboardRenderContext {
+                    max_agents: current_config.agent.max_concurrent_agents,
+                    project_slug: current_config.tracker.project_slug.clone(),
+                    dashboard_url: dashboard_url(
+                        current_config.server.host,
+                        current_config.server.port,
+                        bound_port,
+                    ),
+                    terminal_columns: None,
+                    now_unix_seconds: current_unix_timestamp_secs(),
+                },
+            );
+
+            if last_rendered_content.as_ref() != Some(&content)
+                && let Err(error) = render_content_to_terminal(&content)
+            {
+                tracing::warn!(error = %error, "terminal dashboard render failed");
+                return;
+            }
+
+            pending_render = false;
+            rendered_live_frame = true;
+            last_rendered_at = Some(Instant::now());
+            last_rendered_content = Some(content);
+            continue;
+        }
+
+        if !enabled && rendered_live_frame {
+            if let Err(error) = render_offline_status_to_terminal() {
+                tracing::warn!(error = %error, "terminal dashboard offline render failed");
+                return;
+            }
+            rendered_live_frame = false;
+            last_rendered_at = Some(Instant::now());
+            last_rendered_content = None;
+            pending_render = true;
+        }
+
+        let wait_duration = next_dashboard_wait_duration(
+            pending_render,
+            last_rendered_at,
+            refresh_interval,
+            render_interval,
+        );
+
+        tokio::select! {
+            _ = tokio::time::sleep(wait_duration) => {
+                pending_render = true;
+            }
+            changed = snapshot_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                pending_render = true;
+            }
+            _ = shutdown_rx.recv() => {
+                if rendered_live_frame {
+                    let _ = render_offline_status_to_terminal();
+                }
+                break;
+            }
+        }
+    }
+}
+
+fn next_dashboard_wait_duration(
+    pending_render: bool,
+    last_rendered_at: Option<Instant>,
+    refresh_interval: Duration,
+    render_interval: Duration,
+) -> Duration {
+    if pending_render
+        && let Some(last_rendered_at) = last_rendered_at
+        && last_rendered_at.elapsed() < render_interval
+    {
+        return render_interval - last_rendered_at.elapsed();
+    }
+
+    refresh_interval
+}
+
+fn render_due(last_rendered_at: Option<Instant>, render_interval: Duration) -> bool {
+    last_rendered_at
+        .map(|last_rendered_at| last_rendered_at.elapsed() >= render_interval)
+        .unwrap_or(true)
+}
+
+fn current_unix_timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn increment_runtime_config_version(
@@ -953,12 +1237,14 @@ async fn get_http_get_response(
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
     use symphony_http::issue_route;
     use symphony_testkit::{issue_snapshot, runtime_snapshot, state_snapshot};
-    use symphony_workspace::workspace_path;
+
+    static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn startup_effective_config_uses_cli_overrides_over_front_matter() {
@@ -1116,7 +1402,7 @@ mod tests {
         });
         let watcher_handle = tokio::spawn(async {});
 
-        let error = await_background_tasks(poll_handle, watcher_handle, None, None)
+        let error = await_background_tasks(poll_handle, watcher_handle, None, None, None)
             .await
             .expect_err("runtime task failure should surface");
 
@@ -1130,9 +1416,10 @@ mod tests {
         let watcher_handle = tokio::spawn(async {});
         let http_handle = tokio::spawn(async { Err(anyhow::anyhow!("bind failed")) });
 
-        let error = await_background_tasks(poll_handle, watcher_handle, Some(http_handle), None)
-            .await
-            .expect_err("http task failure should surface");
+        let error =
+            await_background_tasks(poll_handle, watcher_handle, Some(http_handle), None, None)
+                .await
+                .expect_err("http task failure should surface");
 
         assert_eq!(error.code, EXIT_HTTP_TASK);
         assert!(error.message.contains("HTTP server task failed"));
@@ -1145,7 +1432,7 @@ mod tests {
             panic!("watcher failed");
         });
 
-        let error = await_background_tasks(poll_handle, watcher_handle, None, None)
+        let error = await_background_tasks(poll_handle, watcher_handle, None, None, None)
             .await
             .expect_err("watcher task failure should surface");
 
@@ -1183,6 +1470,7 @@ mod tests {
             IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             port,
             shutdown_rx,
+            Arc::new(RwLock::new(None)),
         )
         .await
         .expect_err("bind conflict should fail startup");
@@ -1201,6 +1489,7 @@ mod tests {
         let event = wait_for_host_lifecycle_event(
             &poll_handle,
             &watcher_handle,
+            None,
             None,
             &mut task_exit_rx,
             std::future::pending::<anyhow::Result<()>>(),
@@ -1237,6 +1526,7 @@ mod tests {
             wait_for_host_lifecycle_event(
                 &poll_handle,
                 &watcher_handle,
+                None,
                 None,
                 &mut task_exit_rx,
                 std::future::pending::<anyhow::Result<()>>(),
@@ -1277,6 +1567,7 @@ mod tests {
                 &poll_handle,
                 &watcher_handle,
                 None,
+                None,
                 &mut task_exit_rx,
                 std::future::pending::<anyhow::Result<()>>(),
                 Duration::from_secs(60),
@@ -1312,6 +1603,7 @@ mod tests {
             &poll_handle,
             &watcher_handle,
             Some(&http_handle),
+            None,
             &mut task_exit_rx,
             std::future::pending::<anyhow::Result<()>>(),
             Duration::from_millis(1),
@@ -1352,6 +1644,7 @@ mod tests {
                 &poll_handle,
                 &watcher_handle,
                 Some(&http_handle),
+                None,
                 &mut task_exit_rx,
                 std::future::pending::<anyhow::Result<()>>(),
                 Duration::from_secs(60),
@@ -1380,6 +1673,7 @@ mod tests {
             poll_handle,
             watcher_handle,
             None,
+            None,
             Some(BackgroundTaskKind::WorkflowWatcher),
         )
         .await
@@ -1405,6 +1699,7 @@ mod tests {
             await_background_tasks(
                 poll_handle,
                 watcher_handle,
+                None,
                 None,
                 Some(BackgroundTaskKind::WorkflowWatcher),
             ),
@@ -1437,6 +1732,7 @@ mod tests {
                 poll_handle,
                 watcher_handle,
                 Some(http_handle),
+                None,
                 Some(BackgroundTaskKind::HttpServer),
             ),
         )
@@ -1465,6 +1761,7 @@ mod tests {
                 poll_handle,
                 watcher_handle,
                 Some(http_handle),
+                None,
                 Some(BackgroundTaskKind::RuntimePollLoop),
             ),
         )
@@ -1629,8 +1926,7 @@ mod tests {
 
         let route = issue_route("SYM-9");
         let response = get_http_get_response(&route, &snapshot, &config).await;
-        let expected = workspace_path(&reloaded_root, "SYM-9")
-            .expect("workspace path should resolve for reloaded root");
+        let expected = reloaded_root.join("SYM-9");
 
         assert_eq!(
             response.body["workspace"]["path"],
@@ -2232,7 +2528,8 @@ Updated prompt body.
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("symphony-cli-main-{name}-{nonce}"));
+        let counter = UNIQUE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("symphony-cli-main-{name}-{nonce}-{counter}"));
         fs::create_dir_all(&path).expect("temp directory should be creatable");
         path
     }

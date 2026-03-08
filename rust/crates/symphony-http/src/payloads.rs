@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::Value;
@@ -8,7 +8,6 @@ use symphony_observability::{
     RuntimeSummaryView, StateSnapshot, StateSummaryView, TaskMapSnapshot,
     format_json_compact_sorted, sanitize_json_value, sanitize_summary_text,
 };
-use symphony_workspace::workspace_path;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeLegacyView {
@@ -200,6 +199,8 @@ pub struct RunningIssueView {
     pub issue_identifier: String,
     pub state: String,
     pub session_id: Option<String>,
+    pub codex_app_server_pid: Option<u32>,
+    pub runtime_seconds: u64,
     pub turn_count: u32,
     pub last_event: Option<String>,
     pub last_message: Option<String>,
@@ -223,15 +224,18 @@ impl RunningIssueView {
             "tokens": self.tokens.to_json(),
         })
     }
-}
 
-impl From<&IssueSnapshot> for RunningIssueView {
-    fn from(issue: &IssueSnapshot) -> Self {
+    fn from_issue(issue: &IssueSnapshot, now_unix_seconds: u64) -> Self {
         Self {
             issue_id: issue.id.0.clone(),
             issue_identifier: issue.identifier.clone(),
             state: issue.state.clone(),
             session_id: issue.session_id.clone(),
+            codex_app_server_pid: issue.codex_app_server_pid,
+            runtime_seconds: issue
+                .started_at
+                .map(|started_at| now_unix_seconds.saturating_sub(started_at))
+                .unwrap_or(0),
             turn_count: issue.turn_count,
             last_event: issue.last_event.clone(),
             last_message: summarize_codex_message(
@@ -249,12 +253,19 @@ impl From<&IssueSnapshot> for RunningIssueView {
     }
 }
 
+impl From<&IssueSnapshot> for RunningIssueView {
+    fn from(issue: &IssueSnapshot) -> Self {
+        Self::from_issue(issue, current_unix_timestamp_secs())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RetryIssueView {
     pub issue_id: String,
     pub issue_identifier: String,
     pub attempt: u32,
     pub due_at: Option<String>,
+    pub due_in_ms: u64,
     pub error: Option<String>,
 }
 
@@ -268,18 +279,32 @@ impl RetryIssueView {
             "error": self.error,
         })
     }
-}
 
-impl From<&IssueSnapshot> for RetryIssueView {
-    fn from(issue: &IssueSnapshot) -> Self {
+    fn from_issue(issue: &IssueSnapshot, now_unix_seconds: u64) -> Self {
         Self {
             issue_id: issue.id.0.clone(),
             issue_identifier: issue.identifier.clone(),
             attempt: issue.retry_attempts,
             due_at: iso8601(issue.retry_due_at),
+            due_in_ms: issue
+                .retry_due_at
+                .map(|due_at| due_at.saturating_sub(now_unix_seconds) * 1_000)
+                .unwrap_or(0),
             error: issue.retry_error.clone(),
         }
     }
+}
+
+impl From<&IssueSnapshot> for RetryIssueView {
+    fn from(issue: &IssueSnapshot) -> Self {
+        Self::from_issue(issue, current_unix_timestamp_secs())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PollingStatusView {
+    pub checking: bool,
+    pub next_poll_in_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -291,6 +316,7 @@ pub struct StateApiView {
     pub codex_totals: CodexTotalsView,
     pub rate_limits: Option<serde_json::Value>,
     pub activity: RuntimeActivityView,
+    pub polling: Option<PollingStatusView>,
     pub health: RuntimeHealthView,
     pub issue_totals: IssueStatusTotalsSnapshot,
     pub task_maps: TaskMapSnapshot,
@@ -313,6 +339,17 @@ impl StateOperatorSummaryView {
 }
 
 impl StateApiView {
+    pub fn from_snapshot_with_now_unix_seconds(
+        snapshot: &StateSnapshot,
+        now_unix_seconds: u64,
+    ) -> Self {
+        Self::from_snapshot_internal(
+            snapshot,
+            iso8601_at(SystemTime::UNIX_EPOCH + Duration::from_secs(now_unix_seconds)),
+            now_unix_seconds,
+        )
+    }
+
     pub fn to_json(&self) -> serde_json::Value {
         let running = self
             .running
@@ -339,10 +376,12 @@ impl StateApiView {
             "summary": self.summary.to_json(),
         })
     }
-}
 
-impl From<&StateSnapshot> for StateApiView {
-    fn from(snapshot: &StateSnapshot) -> Self {
+    fn from_snapshot_internal(
+        snapshot: &StateSnapshot,
+        generated_at: String,
+        now_unix_seconds: u64,
+    ) -> Self {
         let snapshot = snapshot.sanitized();
         let running_issues = snapshot.running_issues();
         let retrying_issues = snapshot.retrying_issues();
@@ -357,15 +396,32 @@ impl From<&StateSnapshot> for StateApiView {
         );
         let running = running_issues
             .into_iter()
-            .map(RunningIssueView::from)
+            .map(|issue| RunningIssueView::from_issue(issue, now_unix_seconds))
             .collect::<Vec<_>>();
         let retrying = retrying_issues
             .into_iter()
-            .map(RetryIssueView::from)
+            .map(|issue| RetryIssueView::from_issue(issue, now_unix_seconds))
             .collect::<Vec<_>>();
+        let polling = if snapshot.runtime.activity.poll_in_progress {
+            Some(PollingStatusView {
+                checking: true,
+                next_poll_in_ms: None,
+            })
+        } else {
+            snapshot
+                .runtime
+                .activity
+                .next_poll_due_at
+                .map(|next_poll_due_at| PollingStatusView {
+                    checking: false,
+                    next_poll_in_ms: Some(
+                        next_poll_due_at.saturating_sub(now_unix_seconds) * 1_000,
+                    ),
+                })
+        };
 
         Self {
-            generated_at: now_iso8601_utc(),
+            generated_at,
             counts: StateCountsView {
                 running: snapshot.runtime.running,
                 retrying: snapshot.runtime.retrying,
@@ -375,6 +431,7 @@ impl From<&StateSnapshot> for StateApiView {
             codex_totals: CodexTotalsView::from(&snapshot.runtime),
             rate_limits: snapshot.runtime.rate_limits.clone(),
             activity: RuntimeActivityView::from(&snapshot.runtime),
+            polling,
             health: runtime_spec.health,
             issue_totals,
             task_maps,
@@ -383,6 +440,13 @@ impl From<&StateSnapshot> for StateApiView {
                 state: state_summary,
             },
         }
+    }
+}
+
+impl From<&StateSnapshot> for StateApiView {
+    fn from(snapshot: &StateSnapshot) -> Self {
+        let now = SystemTime::now();
+        Self::from_snapshot_internal(snapshot, iso8601_at(now), unix_timestamp_secs(now))
     }
 }
 
@@ -590,11 +654,8 @@ impl IssueApiView {
             },
             workspace: WorkspaceView {
                 path: issue.workspace_path.clone().or_else(|| {
-                    workspace_root.and_then(|root| {
-                        workspace_path(root, &issue.identifier)
-                            .ok()
-                            .map(|path| path.to_string_lossy().into_owned())
-                    })
+                    workspace_root
+                        .and_then(|root| Some(presenter_workspace_path(root, &issue.identifier)))
                 }),
             },
             attempts: AttemptsView {
@@ -644,12 +705,25 @@ impl Default for RefreshAcceptedView {
 }
 
 pub fn now_iso8601_utc() -> String {
-    let now = DateTime::<Utc>::from(SystemTime::now());
-    now.to_rfc3339_opts(SecondsFormat::Secs, true)
+    iso8601_at(SystemTime::now())
 }
 
 fn normalize_operator_float(value: f64) -> f64 {
     if value == 0.0 { 0.0 } else { value }
+}
+
+fn iso8601_at(timestamp: SystemTime) -> String {
+    DateTime::<Utc>::from(timestamp).to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn current_unix_timestamp_secs() -> u64 {
+    unix_timestamp_secs(SystemTime::now())
+}
+
+fn unix_timestamp_secs(timestamp: SystemTime) -> u64 {
+    timestamp
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn iso8601(timestamp_secs: Option<u64>) -> Option<String> {
@@ -658,7 +732,7 @@ fn iso8601(timestamp_secs: Option<u64>) -> Option<String> {
     Some(timestamp.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
-fn summarize_codex_message(event: Option<&str>, message: Option<&str>) -> Option<String> {
+pub fn summarize_codex_message(event: Option<&str>, message: Option<&str>) -> Option<String> {
     let sanitized = message.map(sanitize_summary_text);
     let trimmed = sanitized
         .as_deref()
@@ -724,7 +798,7 @@ fn humanize_codex_event(event: Option<&str>, message: Option<&Value>) -> Option<
         )),
         "turn_failed" => Some(format_reason_prefix("turn failed", message)),
         "turn_cancelled" => Some("turn cancelled".to_owned()),
-        "turn_completed" => Some("turn completed".to_owned()),
+        "turn_completed" => Some(humanize_turn_completed(message)),
         "approval_required" | "approval_requested" => Some(format_approval_required(message)),
         "startup_failed" => Some(format_reason_prefix("startup failed", message)),
         "turn_ended_with_error" => Some(format_reason_prefix("turn ended with error", message)),
@@ -776,6 +850,37 @@ fn humanize_codex_method(method: &str, message: Option<&Value>) -> Option<String
         }),
         "item_tool_requestuserinput" => Some("tool input request".to_owned()),
         "item_tool_call" => Some(humanize_dynamic_tool_event("dynamic tool call", message)),
+        "item_agentmessage_delta" | "agent_message_delta" => {
+            Some(humanize_streaming_event("agent message streaming", message))
+        }
+        "item_plan_delta" => Some(humanize_streaming_event("plan streaming", message)),
+        "item_reasoning_summarytextdelta" => Some(humanize_streaming_event(
+            "reasoning summary streaming",
+            message,
+        )),
+        "item_reasoning_summarypartadded" => Some(humanize_streaming_event(
+            "reasoning summary section added",
+            message,
+        )),
+        "item_reasoning_textdelta" => Some(humanize_streaming_event(
+            "reasoning text streaming",
+            message,
+        )),
+        "item_commandexecution_outputdelta" => Some(humanize_streaming_event(
+            "command output streaming",
+            message,
+        )),
+        "item_filechange_outputdelta" => Some(humanize_streaming_event(
+            "file change output streaming",
+            message,
+        )),
+        "thread_tokenusage_updated" => Some(humanize_thread_token_usage_update(message)),
+        "exec_command_begin" | "codex_event_exec_command_begin" => {
+            Some(humanize_exec_command_begin(message))
+        }
+        "exec_command_end" | "codex_event_exec_command_end" => {
+            Some(humanize_exec_command_end(message))
+        }
         "thread_start" => Some("thread started".to_owned()),
         "turn_start" => Some("turn started".to_owned()),
         "turn_completed" => Some("turn completed".to_owned()),
@@ -845,6 +950,221 @@ fn humanize_dynamic_tool_event(prefix: &str, message: Option<&Value>) -> String 
     match humanize_structured_error(message) {
         Some(detail) if !base.contains(&detail) => format!("{base} ({detail})"),
         _ => base,
+    }
+}
+
+fn humanize_streaming_event(label: &str, message: Option<&Value>) -> String {
+    match extract_delta_preview(message) {
+        Some(preview) => format!("{label}: {preview}"),
+        None => label.to_owned(),
+    }
+}
+
+fn extract_delta_preview(message: Option<&Value>) -> Option<String> {
+    extract_first_path_string(
+        message,
+        &[
+            &["params", "delta"],
+            &["params", "msg", "delta"],
+            &["params", "textDelta"],
+            &["params", "msg", "textDelta"],
+            &["params", "outputDelta"],
+            &["params", "msg", "outputDelta"],
+            &["params", "text"],
+            &["params", "msg", "text"],
+            &["params", "summaryText"],
+            &["params", "msg", "summaryText"],
+            &["params", "msg", "content"],
+            &["params", "msg", "payload", "delta"],
+            &["params", "msg", "payload", "textDelta"],
+            &["params", "msg", "payload", "outputDelta"],
+            &["params", "msg", "payload", "text"],
+        ],
+    )
+    .map(|preview| inline_text(&preview))
+    .filter(|preview| !preview.is_empty())
+}
+
+fn humanize_exec_command_begin(message: Option<&Value>) -> String {
+    normalize_command_value(
+        extract_first_path_value(
+            message,
+            &[
+                &["params", "msg", "command"],
+                &["params", "msg", "parsed_cmd"],
+                &["params", "msg", "parsedCmd"],
+                &["params", "command"],
+                &["params", "parsed_cmd"],
+                &["params", "parsedCmd"],
+                &["command"],
+                &["parsed_cmd"],
+                &["parsedCmd"],
+            ],
+        )
+        .or_else(|| map_value(message, &["params", "msg"]))
+        .or_else(|| map_value(message, &["params"])),
+    )
+    .unwrap_or_else(|| "command started".to_owned())
+}
+
+fn humanize_exec_command_end(message: Option<&Value>) -> String {
+    let exit_code = extract_first_path_string(
+        message,
+        &[
+            &["params", "msg", "exit_code"],
+            &["params", "msg", "exitCode"],
+            &["params", "exit_code"],
+            &["params", "exitCode"],
+            &["exit_code"],
+            &["exitCode"],
+        ],
+    );
+
+    match exit_code {
+        Some(exit_code) => format!("command completed (exit {exit_code})"),
+        None => "command completed".to_owned(),
+    }
+}
+
+fn humanize_turn_completed(message: Option<&Value>) -> String {
+    let status = extract_first_path_string(
+        message,
+        &[
+            &["params", "turn", "status"],
+            &["turn", "status"],
+            &["status"],
+        ],
+    );
+    let usage = format_usage_counts(extract_first_path_value(
+        message,
+        &[
+            &["params", "usage"],
+            &["params", "tokenUsage"],
+            &["params", "tokenUsage", "total"],
+            &["usage"],
+        ],
+    ));
+
+    match (status, usage) {
+        (Some(status), Some(usage)) => format!("turn completed ({status}, {usage})"),
+        (Some(status), None) => format!("turn completed ({status})"),
+        (None, Some(usage)) => format!("turn completed ({usage})"),
+        (None, None) => "turn completed".to_owned(),
+    }
+}
+
+fn normalize_command_value(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    match value {
+        Value::String(command) => Some(inline_text(command)),
+        Value::Array(parts) => {
+            let joined = parts
+                .iter()
+                .map(|part| part.as_str())
+                .collect::<Option<Vec<_>>>()?
+                .join(" ");
+            Some(inline_text(&joined))
+        }
+        Value::Object(_) => {
+            let command = extract_first_path_string(
+                Some(value),
+                &[&["parsedCmd"], &["parsed_cmd"], &["command"], &["cmd"]],
+            );
+            let args = extract_first_path_string(Some(value), &[&["args"], &["argv"]]);
+
+            match (command, args) {
+                (Some(command), Some(args)) => Some(inline_text(&format!("{command} {args}"))),
+                (Some(command), None) => Some(inline_text(&command)),
+                (None, Some(args)) => Some(inline_text(&args)),
+                (None, None) => None,
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => None,
+    }
+}
+
+fn humanize_thread_token_usage_update(message: Option<&Value>) -> String {
+    match format_usage_counts(extract_first_path_value(
+        message,
+        &[
+            &["params", "msg", "payload", "info", "total_token_usage"],
+            &["params", "msg", "info", "total_token_usage"],
+            &["params", "tokenUsage", "total"],
+            &["usage"],
+        ],
+    )) {
+        Some(usage) => format!("thread token usage updated ({usage})"),
+        None => "thread token usage updated".to_owned(),
+    }
+}
+
+fn format_usage_counts(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    let input = extract_integer_field(
+        value,
+        &[
+            "input_tokens",
+            "prompt_tokens",
+            "inputTokens",
+            "promptTokens",
+        ],
+    );
+    let output = extract_integer_field(
+        value,
+        &[
+            "output_tokens",
+            "completion_tokens",
+            "outputTokens",
+            "completionTokens",
+        ],
+    );
+    let total = extract_integer_field(value, &["total_tokens", "total", "totalTokens"]);
+
+    let mut parts = Vec::new();
+    append_usage_part(&mut parts, "in", input);
+    append_usage_part(&mut parts, "out", output);
+    append_usage_part(&mut parts, "total", total);
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+fn append_usage_part(parts: &mut Vec<String>, label: &str, value: Option<u64>) {
+    if let Some(value) = value {
+        parts.push(format!("{label} {}", format_count(value)));
+    }
+}
+
+fn format_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, character) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(character);
+    }
+    grouped.chars().rev().collect()
+}
+
+fn extract_integer_field(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(parse_u64_value)
+}
+
+fn parse_u64_value(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(number) => number.as_u64().or_else(|| {
+            number
+                .as_i64()
+                .and_then(|parsed| u64::try_from(parsed).ok())
+        }),
+        Value::String(text) => text.trim().parse::<u64>().ok(),
+        Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) => None,
     }
 }
 
@@ -1048,6 +1368,14 @@ fn map_first_array_object_string(
     })
 }
 
+fn extract_first_path_value<'a>(value: Option<&'a Value>, paths: &[&[&str]]) -> Option<&'a Value> {
+    paths.iter().find_map(|path| map_value(value, path))
+}
+
+fn extract_first_path_string(value: Option<&Value>, paths: &[&[&str]]) -> Option<String> {
+    paths.iter().find_map(|path| map_string(value, path))
+}
+
 fn parse_summary_value(message: &str) -> Option<Value> {
     if !matches!(message.chars().next(), Some('{' | '[')) {
         return None;
@@ -1070,6 +1398,14 @@ fn sanitize_single_issue(issue: &IssueSnapshot) -> IssueSnapshot {
     .expect("single issue sanitization should preserve one issue")
 }
 
+fn presenter_workspace_path(workspace_root: &Path, issue_identifier: &str) -> String {
+    let relative_issue_identifier = issue_identifier.trim_start_matches(['/', '\\']);
+    workspace_root
+        .join(relative_issue_identifier)
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn format_reason_prefix(prefix: &str, message: Option<&Value>) -> String {
     match extract_reason(message) {
         Some(reason) => format!("{prefix}: {}", inline_text(&reason)),
@@ -1085,21 +1421,31 @@ fn extract_reason(message: Option<&Value>) -> Option<String> {
 }
 
 fn map_string(value: Option<&Value>, path: &[&str]) -> Option<String> {
-    let mut current = value?;
-    for segment in path {
-        current = current.get(*segment)?;
-    }
-
-    match current {
+    match map_value(value, path)? {
         Value::String(text) => Some(text.clone()),
         Value::Number(number) => Some(number.to_string()),
         Value::Bool(boolean) => Some(boolean.to_string()),
+        Value::Array(values) => {
+            let parts = values
+                .iter()
+                .map(|value| value.as_str())
+                .collect::<Option<Vec<_>>>()?;
+            Some(parts.join(" "))
+        }
         _ => None,
     }
 }
 
 fn map_nested_string(value: Option<&Value>, path: &[&str]) -> Option<String> {
     map_string(value, path)
+}
+
+fn map_value<'a>(value: Option<&'a Value>, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value?;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    Some(current)
 }
 
 fn normalize_key(value: Option<&str>) -> Option<String> {
@@ -1149,9 +1495,11 @@ fn truncate_message(message: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CodexTotalsView, ThroughputView, normalize_operator_float, summarize_codex_message,
+        CodexTotalsView, StateApiView, ThroughputView, normalize_operator_float,
+        summarize_codex_message,
     };
     use symphony_observability::{RuntimeActivitySnapshot, RuntimeSnapshot, ThroughputSnapshot};
+    use symphony_testkit::{issue_snapshot, runtime_snapshot, state_snapshot};
 
     #[test]
     fn summarizes_session_started_messages() {
@@ -1318,6 +1666,74 @@ mod tests {
         );
 
         assert_eq!(message.as_deref(), Some("syncing tracker state"));
+    }
+
+    #[test]
+    fn humanizes_dashboard_parity_protocol_events() {
+        let exec_command = summarize_codex_message(
+            Some("codex/event/task_started"),
+            Some(
+                r#"{"method":"codex/event/exec_command_begin","params":{"msg":{"command":"mix test --cover"}}}"#,
+            ),
+        );
+        let streaming = summarize_codex_message(
+            Some("notification"),
+            Some(
+                r#"{"method":"item/agentMessage/delta","params":{"msg":{"payload":{"delta":"waiting on rate-limit backoff window"}}}}"#,
+            ),
+        );
+        let token_usage = summarize_codex_message(
+            Some("codex/event/token_count"),
+            Some(
+                r#"{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":90,"outputTokens":12,"totalTokens":102}}}}"#,
+            ),
+        );
+        let turn_completed = summarize_codex_message(
+            Some("turn_completed"),
+            Some(r#"{"method":"turn/completed","params":{"turn":{"status":"completed"}}}"#),
+        );
+
+        assert_eq!(exec_command.as_deref(), Some("mix test --cover"));
+        assert_eq!(
+            streaming.as_deref(),
+            Some("agent message streaming: waiting on rate-limit backoff window")
+        );
+        assert_eq!(
+            token_usage.as_deref(),
+            Some("thread token usage updated (in 90, out 12, total 102)")
+        );
+        assert_eq!(
+            turn_completed.as_deref(),
+            Some("turn completed (completed)")
+        );
+    }
+
+    #[test]
+    fn computes_terminal_derived_fields_from_snapshot_clock() {
+        let mut running = issue_snapshot("SYM-1", "SYM-1", "running", 0);
+        running.started_at = Some(1_700_000_000);
+        running.codex_app_server_pid = Some(4242);
+
+        let mut retrying = issue_snapshot("SYM-2", "SYM-2", "retrying", 3);
+        retrying.retry_due_at = Some(1_700_000_045);
+
+        let mut runtime = runtime_snapshot(1, 1);
+        runtime.activity.next_poll_due_at = Some(1_700_000_030);
+
+        let view = StateApiView::from_snapshot_with_now_unix_seconds(
+            &state_snapshot(runtime, vec![running, retrying]),
+            1_700_000_010,
+        );
+
+        assert_eq!(view.running[0].codex_app_server_pid, Some(4242));
+        assert_eq!(view.running[0].runtime_seconds, 10);
+        assert_eq!(view.retrying[0].due_in_ms, 35_000);
+        assert_eq!(
+            view.polling
+                .as_ref()
+                .and_then(|polling| polling.next_poll_in_ms),
+            Some(20_000)
+        );
     }
 
     #[test]

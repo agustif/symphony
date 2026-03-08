@@ -4,6 +4,7 @@ mod cli_args;
 mod reload_classification;
 mod startup_config;
 mod startup_error;
+mod terminal_dashboard;
 
 pub use clap::Parser;
 pub use cli_args::CliArgs;
@@ -16,3 +17,10 @@ pub use startup_config::{
     validate_startup_config,
 };
 pub use startup_error::{CliStartupError, StartupConfigError};
+pub use terminal_dashboard::{
+    DashboardCodexTotals, DashboardPollingStatus, DashboardRetryEntry, DashboardRunningEntry,
+    RenderContext as TerminalDashboardRenderContext, TerminalDashboardSnapshot, dashboard_url,
+    render_content_to_terminal, render_offline_status_to_terminal,
+    render_snapshot_content_for_test, render_state_snapshot_content_for_test,
+    stdout_supports_dashboard,
+};

@@ -181,6 +181,7 @@ impl RuntimeConfigBuilder {
                 host: IpAddr::V4(Ipv4Addr::LOCALHOST),
                 port: self.server_port,
             },
+            observability: symphony_config::ObservabilityConfig::default(),
             version: 0,
         }
     }

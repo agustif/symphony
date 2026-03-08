@@ -14,7 +14,7 @@ pub use loader::{
     from_front_matter_with_env, parse_json_with_path, parse_yaml_with_path,
 };
 pub use model::{
-    AgentConfig, CliOverrides, CodexConfig, HooksConfig, LogLevelConfig, PollingConfig,
-    RuntimeConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
+    AgentConfig, CliOverrides, CodexConfig, HooksConfig, LogLevelConfig, ObservabilityConfig,
+    PollingConfig, RuntimeConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
 };
 pub use validate::validate;

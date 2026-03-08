@@ -23,6 +23,8 @@ pub struct IssueSnapshot {
     #[serde(default)]
     pub last_event_at: Option<u64>,
     #[serde(default)]
+    pub codex_app_server_pid: Option<u32>,
+    #[serde(default)]
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
@@ -151,6 +153,7 @@ mod tests {
             last_message: None,
             started_at: None,
             last_event_at: None,
+            codex_app_server_pid: None,
             input_tokens: 0,
             output_tokens: 0,
             total_tokens: 0,
@@ -177,6 +180,7 @@ mod tests {
             last_message: None,
             started_at: None,
             last_event_at: None,
+            codex_app_server_pid: None,
             input_tokens: 0,
             output_tokens: 0,
             total_tokens: 0,
@@ -195,6 +199,7 @@ mod tests {
             last_message: None,
             started_at: None,
             last_event_at: None,
+            codex_app_server_pid: None,
             input_tokens: 0,
             output_tokens: 0,
             total_tokens: 0,

@@ -6,8 +6,8 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::{
-    API_V1_PREFIX, ApiResponse, DASHBOARD_ROUTE, HttpMethod, ISSUE_ROUTE_PREFIX, REFRESH_ROUTE,
-    STATE_ROUTE, issue_route,
+    ApiResponse, DASHBOARD_ROUTE, HttpMethod, ISSUE_ROUTE_PREFIX, REFRESH_ROUTE, STATE_ROUTE,
+    issue_route,
 };
 use symphony_observability::{
     IssueSnapshot, RuntimeHealthStatus, RuntimeSnapshot, SnapshotStatus, StateSnapshot,
@@ -89,6 +89,7 @@ pub fn dashboard_to_html(snapshot: &StateSnapshot) -> String {
 }
 
 pub fn dashboard_envelope_to_html(envelope: &StateSnapshotEnvelope) -> String {
+    let refresh_script = dashboard_live_refresh_script(DASHBOARD_ROUTE);
     let snapshot_available = envelope.snapshot.is_some();
     let snapshot = envelope.snapshot.as_ref().cloned().unwrap_or_default();
     let view = StateApiView::from(&snapshot);
@@ -100,61 +101,52 @@ pub fn dashboard_envelope_to_html(envelope: &StateSnapshotEnvelope) -> String {
     };
     let (
         running_value,
-        running_detail,
         retrying_value,
-        retrying_detail,
         token_value,
-        token_detail,
+        token_input_value,
+        token_output_value,
         runtime_value,
-        runtime_detail,
         poll_status,
         poll_status_detail_text,
         last_activity,
         last_activity_detail_text,
         throughput_value,
-        throughput_detail,
+        throughput_window_value,
+        throughput_input_value,
+        throughput_output_value,
     ) = if snapshot_available {
         (
             view.counts.running.to_string(),
-            "Active issue sessions in the current runtime.".to_owned(),
             view.counts.retrying.to_string(),
-            "Issues waiting for the next retry window.".to_owned(),
             format_token_count(view.codex_totals.total_tokens),
-            format!(
-                "In {} / Out {}",
-                format_token_count(view.codex_totals.input_tokens),
-                format_token_count(view.codex_totals.output_tokens),
-            ),
+            format_token_count(view.codex_totals.input_tokens),
+            format_token_count(view.codex_totals.output_tokens),
             format_duration_seconds(total_runtime_seconds(&view, &now)),
-            "Total Codex runtime across completed and active sessions.".to_owned(),
             poll_status_value(&view),
             poll_status_detail(&view, &now),
             last_activity_value(&view, &now),
             last_activity_detail(&view),
             format_tps(view.activity.throughput.total_tokens_per_second),
-            format!(
-                "{} · In {} / Out {}",
-                format_throughput_window(view.activity.throughput.window_seconds),
-                format_tps(view.activity.throughput.input_tokens_per_second),
-                format_tps(view.activity.throughput.output_tokens_per_second),
-            ),
+            format_throughput_window(view.activity.throughput.window_seconds),
+            format_tps(view.activity.throughput.input_tokens_per_second),
+            format_tps(view.activity.throughput.output_tokens_per_second),
         )
     } else {
         (
             "n/a".to_owned(),
-            "Snapshot unavailable; live running counts are not available yet.".to_owned(),
             "n/a".to_owned(),
-            "Snapshot unavailable; retry backlog counts are not available yet.".to_owned(),
             "n/a".to_owned(),
-            "Snapshot unavailable; Codex usage totals are not available yet.".to_owned(),
             "n/a".to_owned(),
-            "Snapshot unavailable; total Codex runtime is not available yet.".to_owned(),
+            "n/a".to_owned(),
+            "n/a".to_owned(),
             "unavailable".to_owned(),
             "No cached snapshot is available yet. JSON routes return error envelopes until the runtime recovers.".to_owned(),
             "n/a".to_owned(),
             "No cached snapshot is available yet, so recent activity cannot be summarized.".to_owned(),
             "n/a".to_owned(),
-            "Snapshot unavailable; throughput is not available yet.".to_owned(),
+            "n/a".to_owned(),
+            "n/a".to_owned(),
+            "n/a".to_owned(),
         )
     };
 
@@ -189,7 +181,7 @@ pub fn dashboard_envelope_to_html(envelope: &StateSnapshotEnvelope) -> String {
             "table {{ width: 100%; border-collapse: collapse; min-width: 44rem; }}",
             "th, td {{ padding: 0.75rem 0.5rem; border-top: 1px solid #e2e8f0; vertical-align: top; text-align: left; }}",
             "th {{ color: #475569; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; border-top: none; padding-top: 0; }}",
-            ".issue-stack, .detail-stack, .token-stack {{ display: grid; gap: 0.25rem; }}",
+            ".issue-stack, .detail-stack, .token-stack, .session-stack {{ display: grid; gap: 0.25rem; }}",
             ".issue-link {{ color: #2563eb; text-decoration: none; font-size: 0.9rem; }}",
             ".issue-id {{ font-weight: 700; }}",
             ".muted {{ color: #64748b; }}",
@@ -204,10 +196,20 @@ pub fn dashboard_envelope_to_html(envelope: &StateSnapshotEnvelope) -> String {
             ".status-live {{ background: #dcfce7; color: #166534; }}",
             ".status-stale {{ background: #fef3c7; color: #92400e; }}",
             ".status-offline {{ background: #fee2e2; color: #991b1b; }}",
+            ".subtle-button {{ border: 1px solid #cbd5e1; border-radius: 0.5rem; background: #ffffff; color: #0f172a; padding: 0.4rem 0.7rem; cursor: pointer; font: inherit; }}",
+            ".subtle-button:hover {{ background: #f8fafc; }}",
             "</style>",
+            "<script>{}</script>",
             "</head>",
-            "<body>",
-            "<main>",
+            "<body>"
+        ),
+        refresh_script,
+    );
+
+    let _ = write!(
+        html,
+        concat!(
+            "<main id=\"dashboard-root\" data-refresh-url=\"{}\">",
             "<header>",
             "<h1>Symphony Dashboard</h1>",
             "<p>Current orchestration snapshot from in-memory runtime state.</p>",
@@ -257,24 +259,25 @@ pub fn dashboard_envelope_to_html(envelope: &StateSnapshotEnvelope) -> String {
             "<p class=\"metric-detail\">{} · In {} / Out {}</p>",
             "</article>",
             "</div>",
-            "</section>",
+            "</section>"
         ),
+        escape_html(DASHBOARD_ROUTE),
         health_class,
         health_label,
         escape_html(&running_value),
-        escape_html(&running_detail),
         escape_html(&retrying_value),
-        escape_html(&retrying_detail),
         escape_html(&token_value),
-        escape_html(&token_detail),
+        escape_html(&token_input_value),
+        escape_html(&token_output_value),
         escape_html(&runtime_value),
-        escape_html(&runtime_detail),
         escape_html(&poll_status),
         escape_html(&poll_status_detail_text),
         escape_html(&last_activity),
         escape_html(&last_activity_detail_text),
         escape_html(&throughput_value),
-        escape_html(&throughput_detail),
+        escape_html(&throughput_window_value),
+        escape_html(&throughput_input_value),
+        escape_html(&throughput_output_value),
     );
 
     push_operator_briefing_panel(&mut html, &view, envelope, &now, snapshot_available);
@@ -319,6 +322,44 @@ pub fn dashboard_envelope_to_html(envelope: &StateSnapshotEnvelope) -> String {
     ));
 
     html
+}
+
+fn dashboard_live_refresh_script(refresh_route: &str) -> String {
+    let refresh_route_json =
+        serde_json::to_string(refresh_route).unwrap_or_else(|_| "\"/\"".to_owned());
+
+    format!(
+        concat!(
+            "(function() {{",
+            "const refreshUrl = {0};",
+            "const parser = new DOMParser();",
+            "let inFlight = false;",
+            "let stopped = false;",
+            "async function refreshDashboard() {{",
+            "if (inFlight || stopped) return;",
+            "const currentRoot = document.getElementById('dashboard-root');",
+            "if (!currentRoot) return;",
+            "inFlight = true;",
+            "try {{",
+            "const response = await fetch(refreshUrl, {{ cache: 'no-store', headers: {{ 'X-Symphony-Dashboard-Refresh': '1' }} }});",
+            "if (!response.ok) return;",
+            "const documentHtml = await response.text();",
+            "const nextDocument = parser.parseFromString(documentHtml, 'text/html');",
+            "const nextRoot = nextDocument.getElementById('dashboard-root');",
+            "if (nextRoot && currentRoot.isConnected) currentRoot.replaceWith(nextRoot);",
+            "}} catch (_error) {{",
+            "}} finally {{",
+            "inFlight = false;",
+            "}}",
+            "}}",
+            "const intervalId = window.setInterval(function() {{ void refreshDashboard(); }}, 1000);",
+            "document.addEventListener('visibilitychange', function() {{ if (!document.hidden) void refreshDashboard(); }});",
+            "window.addEventListener('focus', function() {{ void refreshDashboard(); }});",
+            "window.addEventListener('beforeunload', function() {{ stopped = true; window.clearInterval(intervalId); }});",
+            "}})();"
+        ),
+        refresh_route_json
+    )
 }
 
 pub fn handle_request(method: HttpMethod, path: &str, snapshot: &StateSnapshot) -> ApiResponse {
@@ -407,16 +448,12 @@ pub fn handle_post(path: &str, snapshot: &StateSnapshot) -> ApiResponse {
 }
 
 fn issue_identifier_from_path(path: &str) -> Option<String> {
-    if let Some(issue_identifier) = path.strip_prefix(ISSUE_ROUTE_PREFIX) {
-        return normalize_issue_identifier(issue_identifier);
-    }
-
-    let short_route = path.strip_prefix(API_V1_PREFIX)?.strip_prefix('/')?;
-    if matches!(short_route, "state" | "refresh") || short_route.starts_with("issues/") {
+    let issue_identifier = path.strip_prefix(ISSUE_ROUTE_PREFIX)?;
+    if matches!(issue_identifier, "state" | "refresh") {
         return None;
     }
 
-    normalize_issue_identifier(short_route)
+    normalize_issue_identifier(issue_identifier)
 }
 
 fn normalize_issue_identifier(issue_identifier: &str) -> Option<String> {
@@ -765,7 +802,6 @@ fn push_running_sessions_table(
 
     for entry in running {
         let issue_href = issue_route(&entry.issue_identifier);
-        let session = entry.session_id.as_deref().unwrap_or("n/a");
         let last_update = entry
             .last_message
             .as_deref()
@@ -785,7 +821,7 @@ fn push_running_sessions_table(
                 "</div>",
                 "</td>",
                 "<td><span class=\"state-badge {}\">{}</span></td>",
-                "<td class=\"mono\" title=\"{}\">{}</td>",
+                "<td>{}</td>",
                 "<td class=\"numeric\">{}</td>",
                 "<td>",
                 "<div class=\"detail-stack\">",
@@ -805,8 +841,7 @@ fn push_running_sessions_table(
             issue_href,
             state_badge_class(&entry.state),
             escape_html(&entry.state),
-            escape_html(session),
-            escape_html(session),
+            render_session_cell(entry.session_id.as_deref()),
             format_runtime_and_turns(entry.started_at.as_deref(), entry.turn_count, now),
             escape_html(last_update),
             escape_html(last_update),
@@ -820,6 +855,28 @@ fn push_running_sessions_table(
     }
 
     html.push_str("</tbody></table></div></section>");
+}
+
+fn render_session_cell(session_id: Option<&str>) -> String {
+    match session_id {
+        Some(session_id) => format!(
+            concat!(
+                "<div class=\"session-stack\">",
+                "<button",
+                " type=\"button\"",
+                " class=\"subtle-button\"",
+                " data-label=\"Copy ID\"",
+                " data-copy=\"{}\"",
+                " onclick=\"navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => {{ this.textContent = this.dataset.label; }}, 1200);\"",
+                ">",
+                "Copy ID",
+                "</button>",
+                "</div>"
+            ),
+            escape_html(session_id)
+        ),
+        None => "<span class=\"muted\">n/a</span>".to_owned(),
+    }
 }
 
 fn push_retry_queue_table(

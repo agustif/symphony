@@ -53,6 +53,19 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Path.basename(first_workspace) == "MT_Det"
   end
 
+  test "workspace path helper uses the same sanitized identifier as workspace creation" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-path-helper-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    assert {:ok, workspace} = Workspace.create_for_issue("MT/Det")
+    assert Workspace.path_for_issue_identifier("MT/Det") == workspace
+  end
+
   test "workspace reuses existing issue directory without deleting local changes" do
     workspace_root =
       Path.join(

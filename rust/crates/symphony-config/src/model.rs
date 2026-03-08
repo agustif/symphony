@@ -18,6 +18,9 @@ pub const DEFAULT_CODEX_COMMAND: &str = "codex app-server";
 pub const DEFAULT_CODEX_TURN_TIMEOUT_MS: u64 = 3_600_000;
 pub const DEFAULT_CODEX_READ_TIMEOUT_MS: u64 = 5_000;
 pub const DEFAULT_CODEX_STALL_TIMEOUT_MS: i64 = 300_000;
+pub const DEFAULT_OBSERVABILITY_ENABLED: bool = true;
+pub const DEFAULT_OBSERVABILITY_REFRESH_MS: u64 = 1_000;
+pub const DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS: u64 = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackerConfig {
@@ -167,6 +170,23 @@ impl Default for ServerConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservabilityConfig {
+    pub enabled: bool,
+    pub refresh_ms: u64,
+    pub render_interval_ms: u64,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: DEFAULT_OBSERVABILITY_ENABLED,
+            refresh_ms: DEFAULT_OBSERVABILITY_REFRESH_MS,
+            render_interval_ms: DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 pub struct RuntimeConfig {
     pub tracker: TrackerConfig,
@@ -177,6 +197,7 @@ pub struct RuntimeConfig {
     pub codex: CodexConfig,
     pub log_level: LogLevelConfig,
     pub server: ServerConfig,
+    pub observability: ObservabilityConfig,
     /// Monotonically increasing version to detect config changes for hot-reload
     #[serde(default)]
     pub version: u64,

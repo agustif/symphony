@@ -11,6 +11,7 @@ pub enum HostOwnedConfigChange {
     ServerHost,
     ServerPort,
     LogLevel,
+    ObservabilityEnabled,
 }
 
 impl HostOwnedConfigChange {
@@ -26,6 +27,7 @@ impl HostOwnedConfigChange {
             Self::ServerHost => "server.host",
             Self::ServerPort => "server.port",
             Self::LogLevel => "log_level.level",
+            Self::ObservabilityEnabled => "observability.dashboard_enabled",
         }
     }
 }
@@ -85,6 +87,9 @@ pub fn classify_workflow_reload(
     if current.log_level.level != next.log_level.level {
         reasons.push(HostOwnedConfigChange::LogLevel);
     }
+    if current.observability.enabled != next.observability.enabled {
+        reasons.push(HostOwnedConfigChange::ObservabilityEnabled);
+    }
 
     if reasons.is_empty() {
         WorkflowReloadDisposition::LiveApply
@@ -105,6 +110,8 @@ mod tests {
         let mut next = current.clone();
         next.polling.interval_ms = 45_000;
         next.agent.max_turns = 42;
+        next.observability.refresh_ms = 2_000;
+        next.observability.render_interval_ms = 33;
         next.version = 99;
 
         assert_eq!(
@@ -180,6 +187,20 @@ mod tests {
     }
 
     #[test]
+    fn classifies_observability_enablement_change_as_restart_required() {
+        let current = RuntimeConfig::default();
+        let mut next = current.clone();
+        next.observability.enabled = !current.observability.enabled;
+
+        let disposition = classify_workflow_reload(&current, &next);
+        assert!(disposition.requires_restart());
+        assert_eq!(
+            disposition.restart_reasons(),
+            &[HostOwnedConfigChange::ObservabilityEnabled]
+        );
+    }
+
+    #[test]
     fn classifies_workspace_root_change_as_restart_required() {
         let current = RuntimeConfig::default();
         let mut next = current.clone();
@@ -206,6 +227,7 @@ mod tests {
                 HostOwnedConfigChange::ServerHost,
                 HostOwnedConfigChange::ServerPort,
                 HostOwnedConfigChange::LogLevel,
+                HostOwnedConfigChange::ObservabilityEnabled,
             ]
             .map(HostOwnedConfigChange::field_path),
             [
@@ -218,6 +240,7 @@ mod tests {
                 "server.host",
                 "server.port",
                 "log_level.level",
+                "observability.dashboard_enabled",
             ]
         );
     }

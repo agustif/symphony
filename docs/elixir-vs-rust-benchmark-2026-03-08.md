@@ -2,7 +2,7 @@
 
 2026-03-08
 
-The earlier benchmark story in this repo was not good enough.
+The earlier benchmark story in this repo was not good enough, and this updated pass replaces the previous 2026-03-08 numbers.
 
 It mixed theory with measurement, gave Rust real microbench coverage without Elixir parity, and leaned on load tests that were not strict enough about offered load. This pass fixes the harness first, then reports only what the harness can honestly support.
 
@@ -13,7 +13,7 @@ It mixed theory with measurement, gave Rust real microbench coverage without Eli
 - Both implementations run against the same fake local Linear GraphQL server.
 - The fake tracker serves a shared synthetic corpus of 200 issues.
 - Both implementations read the same workflow file: [`benchmarks/workflows/common-workflow.md`](../benchmarks/workflows/common-workflow.md).
-- The benchmark driver records structured JSON artifacts under `/tmp/symphony-benchmark-results-20260308-024603`.
+- The benchmark driver records structured JSON artifacts under `/tmp/symphony-benchmark-results-20260308-061606`.
 - The benchmark driver now also has a shared golden benchmark projection fixture at [`../fixtures/http_state/benchmark_state_small.json`](../fixtures/http_state/benchmark_state_small.json).
 
 That gives us a much better answer to one narrow question:
@@ -43,10 +43,10 @@ How do the current Rust and Elixir Symphony implementations behave on the same m
 
 | Implementation | Mean | Stddev | Min | Max |
 | --- | --- | --- | --- | --- |
-| Rust | `80.1 ms` | `3.0 ms` | `77.3 ms` | `84.9 ms` |
-| Elixir | `554.9 ms` | `6.0 ms` | `547.9 ms` | `563.0 ms` |
+| Rust | `118.9 ms` | `4.0 ms` | `112.6 ms` | `122.4 ms` |
+| Elixir | `816.1 ms` | `16.5 ms` | `798.2 ms` | `840.3 ms` |
 
-On this host, Rust started `6.93x` faster.
+On this host, Rust started `6.86x` faster.
 
 ### Shared HTTP Path
 
@@ -54,14 +54,14 @@ All HTTP scenarios used the same route and held the offered load constant.
 
 | Scenario | Offered load | Rust avg / p95 / p99 | Elixir avg / p95 / p99 | Failures |
 | --- | --- | --- | --- | --- |
-| Load | `80 rps` for `20s` | `0.360 / 0.686 / 1.035 ms` | `1.349 / 2.633 / 8.882 ms` | `0` for both |
-| Stress | `40 -> 100 -> 180 -> 260 rps` over `55s` | `0.324 / 0.767 / 1.185 ms` | `1.196 / 2.793 / 4.464 ms` | `0` for both |
-| Soak | `40 rps` for `45s` | `0.380 / 0.693 / 1.482 ms` | `1.138 / 1.727 / 2.185 ms` | `0` for both |
-| Spike | `20 -> 220 -> 20 rps` over `30s` | `0.295 / 0.547 / 0.962 ms` | `1.026 / 1.850 / 2.507 ms` | `0` for both |
+| Load | `80 rps` for `20s` | `0.303 / 0.342 / 0.426 ms` | `0.642 / 0.754 / 3.138 ms` | `0` for both |
+| Stress | `40 -> 100 -> 180 -> 260 rps` over `55s` | `0.264 / 0.331 / 0.527 ms` | `1.116 / 1.397 / 5.741 ms` | `0` for both |
+| Soak | `40 rps` for `45s` | `0.292 / 0.346 / 0.403 ms` | `1.153 / 1.321 / 2.789 ms` | `0` for both |
+| Spike | `20 -> 220 -> 20 rps` over `30s` | `0.265 / 0.351 / 0.429 ms` | `1.056 / 1.297 / 2.309 ms` | `0` for both |
 
 The steady-state story is still straightforward: Rust was consistently lower-latency on the current state API implementation.
 
-The interesting change from the previous run is Elixir soak behavior. The earlier long-tail blow-up disappeared after the headless-path cleanup, which strongly suggests the terminal dashboard path was contaminating non-interactive runs.
+The interesting change from the previous run is that the control-plane story is now stable across all four HTTP profiles. There is no longer a single soak outlier carrying the narrative.
 
 ## What I Trust
 
@@ -78,7 +78,9 @@ Why not:
 
 - `/api/v1/state` is not yet a schema-normalized contract across the two implementations.
 - A manual payload spot-check after startup still showed different response shapes.
-- The long-run `data_received` totals still diverged substantially, which suggests the returned state evolves differently over time as well.
+- The startup snapshots were different sizes: `1871` bytes for Rust and `1541` bytes for Elixir.
+- Rust still returns extra top-level fields such as `activity`, `health`, `issue_totals`, `summary`, and `task_maps`.
+- The suite still does not emulate actual Codex session traffic, streamed tool events, or transcript-heavy agent turns.
 - There is still no matching Elixir Benchee suite for reducer and workspace primitives.
 - The new shared golden only covers the common benchmark projection, not the full raw wire payload.
 
@@ -96,14 +98,14 @@ These are useful, but only as Rust-internal tracking until Elixir gets matching 
 
 | Benchmark | Result |
 | --- | --- |
-| `reducer_claim/10` | `1.245 us` |
-| `reducer_claim/100` | `12.232 us` |
-| `reducer_claim/1000` | `133.87 us` |
-| `reducer_full_lifecycle` | `602.63 ns` |
-| `state_clone_100_issues` | `32.276 ns` |
-| `state_serialize_100_issues` | `2.936 us` |
-| `state_deserialize_100_issues` | `10.186 us` |
-| `sanitize_workspace_key` | `209.22 ns` |
+| `reducer_claim/10` | `1.5688 us` |
+| `reducer_claim/100` | `15.996 us` |
+| `reducer_claim/1000` | `171.93 us` |
+| `reducer_full_lifecycle` | `845.21 ns` |
+| `state_clone_100_issues` | `43.316 ns` |
+| `state_serialize_100_issues` | `3.9428 us` |
+| `state_deserialize_100_issues` | `14.960 us` |
+| `sanitize_workspace_key` | `295.07 ns` |
 
 ## The Real Takeaway
 
@@ -111,9 +113,9 @@ Three things are true at once.
 
 Rust currently wins on startup time and on the shared state endpoint latency numbers from this run.
 
-Elixir still remains the more mature reference runtime in this repo.
+Elixir still remains the more mature behavior reference runtime in this repo.
 
-The benchmark harness is finally good enough to publish the measurements above, but not yet good enough to collapse the whole story into a single headline like "Rust wins" or "Elixir scales better."
+The benchmark harness is good enough to publish the measurements above, but not yet good enough to collapse the whole story into a single headline like "Rust wins everything" or "Elixir scales better."
 
 ## V2
 

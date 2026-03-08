@@ -6,6 +6,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Tracker.Memory
+  alias SymphonyElixir.Workspace
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -388,7 +389,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "issue_identifier" => "MT-HTTP",
              "issue_id" => "issue-http",
              "status" => "running",
-             "workspace" => %{"path" => Path.join(Config.workspace_root(), "MT-HTTP")},
+             "workspace" => %{"path" => Workspace.path_for_issue_identifier("MT-HTTP")},
              "attempts" => %{"restart_count" => 0, "current_retry_attempt" => 0},
              "running" => %{
                "session_id" => "thread-http",

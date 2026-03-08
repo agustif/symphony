@@ -15,7 +15,8 @@ use crate::{
     env::{expand_workspace_root, resolve_env_reference},
     model::{
         AgentConfig, CliOverrides, CodexConfig, DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT,
-        HooksConfig, LogLevelConfig, PollingConfig, ServerConfig, TrackerConfig, WorkspaceConfig,
+        HooksConfig, LogLevelConfig, ObservabilityConfig, PollingConfig, ServerConfig,
+        TrackerConfig, WorkspaceConfig,
     },
     normalize::{normalize_state_list, normalize_state_name},
     validate,
@@ -57,6 +58,10 @@ pub fn from_front_matter_with_env(
 
     if let Some(section) = section(front_matter, "server")? {
         config.server = parse_server_config(section, config.server)?;
+    }
+
+    if let Some(section) = section(front_matter, "observability")? {
+        config.observability = parse_observability_config(section, config.observability)?;
     }
 
     apply_tracker_defaults(&mut config.tracker, env);
@@ -238,6 +243,37 @@ fn parse_server_config(
         server.port = Some(port);
     }
     Ok(server)
+}
+
+fn parse_observability_config(
+    section: &Mapping,
+    mut observability: ObservabilityConfig,
+) -> Result<ObservabilityConfig, ConfigError> {
+    if let Some(enabled) = optional_bool(
+        section,
+        "dashboard_enabled",
+        "observability.dashboard_enabled",
+    )? {
+        observability.enabled = enabled;
+    } else if let Some(enabled) = optional_bool(section, "enabled", "observability.enabled")? {
+        observability.enabled = enabled;
+    }
+
+    if let Some(refresh_ms) =
+        optional_positive_u64(section, "refresh_ms", "observability.refresh_ms")?
+    {
+        observability.refresh_ms = refresh_ms;
+    }
+
+    if let Some(render_interval_ms) = optional_positive_u64(
+        section,
+        "render_interval_ms",
+        "observability.render_interval_ms",
+    )? {
+        observability.render_interval_ms = render_interval_ms;
+    }
+
+    Ok(observability)
 }
 
 fn apply_tracker_defaults(tracker: &mut TrackerConfig, env: &dyn EnvProvider) {
@@ -452,6 +488,21 @@ fn optional_string_allow_empty(
     }
 }
 
+fn optional_bool(
+    map: &Mapping,
+    key: &'static str,
+    field: &'static str,
+) -> Result<Option<bool>, ConfigError> {
+    match map.get(yaml_key(key)) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(ConfigError::InvalidType {
+            field,
+            expected: "boolean",
+        }),
+    }
+}
+
 fn optional_string_list(
     map: &Mapping,
     key: &'static str,
@@ -622,7 +673,7 @@ mod tests {
     };
 
     use crate::{
-        ConfigError, EnvProvider,
+        ConfigError, EnvProvider, RuntimeConfig,
         loader::{from_front_matter_with_env, parse_yaml, yaml_key},
         model::{DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT},
     };
@@ -773,6 +824,101 @@ server:
         assert_eq!(
             config.server.host,
             std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        );
+    }
+
+    #[test]
+    fn defaults_observability_extension_to_elixir_compatible_values() {
+        let config = RuntimeConfig::default();
+
+        assert!(config.observability.enabled);
+        assert_eq!(config.observability.refresh_ms, 1_000);
+        assert_eq!(config.observability.render_interval_ms, 16);
+    }
+
+    #[test]
+    fn parses_optional_observability_extension() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+observability:
+  dashboard_enabled: false
+  refresh_ms: 250
+  render_interval_ms: 32
+"#,
+        );
+
+        let config = from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[]))
+            .expect("config should parse");
+
+        assert!(!config.observability.enabled);
+        assert_eq!(config.observability.refresh_ms, 250);
+        assert_eq!(config.observability.render_interval_ms, 32);
+    }
+
+    #[test]
+    fn rejects_invalid_observability_enabled_type() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+observability:
+  dashboard_enabled: nope
+"#,
+        );
+
+        assert_eq!(
+            from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[])),
+            Err(ConfigError::InvalidType {
+                field: "observability.dashboard_enabled",
+                expected: "boolean",
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_legacy_observability_enabled_alias() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+observability:
+  enabled: false
+"#,
+        );
+
+        let config = from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[]))
+            .expect("config should parse");
+
+        assert!(!config.observability.enabled);
+    }
+
+    #[test]
+    fn rejects_non_positive_observability_refresh_interval() {
+        let front_matter = parse_yaml(
+            r#"
+tracker:
+  kind: linear
+  api_key: token
+  project_slug: symphony
+observability:
+  refresh_ms: 0
+"#,
+        );
+
+        assert_eq!(
+            from_front_matter_with_env(&front_matter, &TestEnv::from_entries(&[])),
+            Err(ConfigError::InvalidInteger {
+                field: "observability.refresh_ms",
+                value: "0".to_owned(),
+            })
         );
     }
 

@@ -33,6 +33,7 @@ pub fn issue_snapshot(
         last_message: None,
         started_at: None,
         last_event_at: None,
+        codex_app_server_pid: None,
         input_tokens: 0,
         output_tokens: 0,
         total_tokens: 0,

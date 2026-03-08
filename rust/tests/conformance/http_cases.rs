@@ -11,7 +11,6 @@ use symphony_http::{
 };
 use symphony_observability::{SnapshotErrorView, StateSnapshotEnvelope};
 use symphony_testkit::{issue_snapshot, runtime_snapshot, state_snapshot};
-use symphony_workspace::workspace_path;
 
 #[test]
 fn http_state_route_returns_runtime_and_issue_data() {
@@ -489,8 +488,7 @@ fn http_issue_route_exposes_workspace_and_recent_event_contract_fields() {
     assert_eq!(response.body["issue_identifier"], "SYM-55");
     assert_eq!(response.body["issue_id"], "SYM-55");
     assert_eq!(response.body["status"], "running");
-    let expected_workspace = workspace_path(&root, "SYM-55")
-        .expect("workspace path should resolve for conformance root");
+    let expected_workspace = root.join("SYM-55");
     assert_eq!(
         response.body["workspace"]["path"],
         expected_workspace.to_string_lossy().as_ref()
@@ -701,6 +699,8 @@ fn http_dashboard_route_renders_live_activity_and_rate_limit_panels() {
     );
 
     assert_eq!(response.status, 200);
+    assert!(response.rendered_body.contains("id=\"dashboard-root\""));
+    assert!(response.rendered_body.contains("const refreshUrl = \"/\";"));
     assert!(response.rendered_body.contains("Metrics"));
     assert!(response.rendered_body.contains("Poll Status"));
     assert!(response.rendered_body.contains("Last Activity"));
