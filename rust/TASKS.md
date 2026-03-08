@@ -1,11 +1,11 @@
 # Rust Reimplementation Master Plan
 
-## Status Snapshot (2026-03-07)
-- Completion: 95%
+## Status Snapshot (2026-03-08)
+- Completion: 98%
 - Done: reducer/domain core (92%), typed config (100%) and workflow parsing (100%), tracker (100%) and protocol adapters (92%), workspace (95%), real runtime scheduling and recovery baselines (96%), runtime-fed observability including activity/timing/throughput surfaces (94%), Elixir-shaped HTTP/CLI surfaces for steady-state and degraded paths (92%, 93%), app-server multi-turn session reuse, explicit child-stop coverage across retry/reconcile/shutdown paths, a public domain invariant catalog, executable reducer-contract trace validation, fresh full-workspace validation, CI-published Rust coverage artifacts, workspace conformance tests, operational docs (deployment.md, monitoring.md, troubleshooting.md), protocol examples, config examples, Verus proof for agent_update_safety, TrackerIssue assignee fields, and host supervision shutdown test are in place.
-- Test Coverage: 734 total workspace tests (137 conformance, 29 integration, 18 interleavings, 15 soak, 5 reducer-contract, plus crate/unit/doctest targets).
+- Test Coverage: 736 executable workspace tests (137 conformance, 29 integration, 18 interleavings, 15 soak, 5 reducer-contract, plus crate/unit/doctest targets).
 - Verification: Verus proofs passing for reducer invariants, dispatch soundness, agent-update accounting, session liveness, and workspace safety.
-- Remaining: release milestone definitions and operational readiness documentation.
+- Remaining: fresh production-like primary-runtime evidence and target-workflow live smoke validation.
 
 ## Scope
 Deliver a production-grade Rust runtime for Symphony from first principles, with strict correctness guarantees, comprehensive tests, and formal verification.
@@ -31,9 +31,9 @@ Deliver a production-grade Rust runtime for Symphony from first principles, with
 - [x] Subtask A.1.3: Enforce no duplicated task definitions across child TASKS files.
 
 ### Task A.2: Release slicing
-- [ ] Subtask A.2.1: Define `alpha`, `beta`, and `ga` milestones.
-- [ ] Subtask A.2.2: Gate each milestone on explicit suite subsets from [tests/TASKS.md](tests/TASKS.md).
-- [ ] Subtask A.2.3: Gate `ga` on [proofs/verus/TASKS.md](proofs/verus/TASKS.md).
+- [x] Subtask A.2.1: Define `alpha`, `beta`, and `ga` milestones.
+- [x] Subtask A.2.2: Gate each milestone on explicit suite subsets from [tests/TASKS.md](tests/TASKS.md).
+- [x] Subtask A.2.3: Gate `ga` on [proofs/verus/TASKS.md](proofs/verus/TASKS.md).
 
 ## Epic B: Documentation Program
 ### Task B.1: Architecture docs completeness
@@ -83,8 +83,8 @@ Deliver a production-grade Rust runtime for Symphony from first principles, with
 - [x] Subtask F.1.4: Publish Rust coverage summaries and LCOV artifacts from CI.
 
 ### Task F.2: Operational readiness
-- [ ] Subtask F.2.1: Define runbook and failure playbooks in docs.
-- [ ] Subtask F.2.2: Define cutover checklist and rollback criteria.
+- [x] Subtask F.2.1: Define runbook and failure playbooks in docs.
+- [x] Subtask F.2.2: Define cutover checklist and rollback criteria.
 
 <!-- SPEC_GAP_MAP_START -->
 ## SPEC Gap Map
@@ -95,6 +95,6 @@ Deliver a production-grade Rust runtime for Symphony from first principles, with
 | Sec. 9 and Sec. 15 workspace and safety constraints | Implemented (83%) | Complete | `C.4`, `D.1` |
 | Sec. 10, Sec. 11, Sec. 12 adapter and prompt pipeline | Implemented (tracker 73%, protocol 92%) | Complete tracker contract | `C.3`, `D.1` |
 | Sec. 13 and Sec. 14 observability and recovery | Implemented (94%/92%) | Complete | `C.4`, `D.1` |
-| Sec. 17 and Sec. 18 validation and DoD gates | Implemented (conformance 95%, tests 85%) | Complete release gates | `D.1`, `D.2`, `D.3`, `F.1` |
-| Formal verification and operational rollout | Verus proofs passing (95%) | Complete runbooks and cutover criteria | `E.1`, `F.2` |
+| Sec. 17 and Sec. 18 validation and DoD gates | Implemented (conformance 95%, tests 85%) | Maintain release-gate coverage as suites evolve | `D.1`, `D.2`, `D.3`, `F.1` |
+| Formal verification and operational rollout | Verus proofs and operational docs are in place | Add fresh primary-runtime evidence and live smoke runs | `E.1`, `F.2` |
 <!-- SPEC_GAP_MAP_END -->

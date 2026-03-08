@@ -1,8 +1,8 @@
 # Test Program Master Tasks
 
-## Status Snapshot (2026-03-07)
+## Status Snapshot (2026-03-08)
 - Completion: 93%
-- Done: shared deterministic harnesses landed in `symphony-testkit`, conformance/interleaving/soak suites are wired into CI, CI now publishes Rust coverage summaries and LCOV artifacts, the conformance matrix now covers workflow/config, tracker normalization, protocol compatibility, runtime retry/reconcile paths, degraded HTTP, and HTTP-enabled host lifecycle, the current tree has fresh local evidence from `cargo test --workspace` plus `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace -- --list` currently reports `572` Rust test cases.
+- Done: shared deterministic harnesses landed in `symphony-testkit`, conformance/interleaving/soak suites are wired into CI, CI now publishes Rust coverage summaries and LCOV artifacts, the conformance matrix now covers workflow/config, tracker normalization, protocol compatibility, runtime retry/reconcile paths, degraded HTTP, and HTTP-enabled host lifecycle, the current tree has fresh local evidence from `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace -- --list`, and the executable workspace surface currently reports `736` tests.
 - Interleavings suite complete: 18 tests covering scheduler interleavings, worker lifecycle races, and concurrency safety.
 - Soak suite complete: 15 tests covering long-running stress profiles.
 - Conformance suite: 132 tests covering SPEC sections 17 and 18 requirements.

@@ -1,10 +1,10 @@
 # Formal Verification Program
 
-## Status Snapshot (2026-03-07)
-- Completion: 93%
-- Done: task map defined, proof runner wired, printable guide snapshot vendor flow added, stale-snapshot CI guard wired, reducer/workspace proof modules implemented, slot-accounting and rejection-case preservation lemmas landed, reducer command-taxonomy lemmas landed, dedicated `UpdateAgent` accounting proofs landed, fair-step liveness assumptions were added for dispatch/retry/release, workspace separator/fixed-point safety lemmas landed, and both quick and full profiles passed during this milestone on the current proof sources.
-- In Progress: stronger fairness models, proof-to-spec traceability depth, and making the proof evidence part of a stricter release policy.
-- Remaining: full SPEC parity for policy-composition edge cases and production rollout gates.
+## Status Snapshot (2026-03-08)
+- Completion: 96%
+- Done: task map defined, proof runner wired, printable guide snapshot vendor flow added, stale-snapshot CI guard wired, reducer/workspace proof modules implemented, slot-accounting and rejection-case preservation lemmas landed, reducer command-taxonomy lemmas landed, dedicated `UpdateAgent` accounting proofs landed, fair-step liveness assumptions were added for dispatch/retry/release, workspace separator/fixed-point safety lemmas landed, quick/full profiles passed on the current tree, the emergency bypass policy is documented, and the proof-touch guard script is checked in.
+- In Progress: stronger fairness models and proof-to-spec traceability depth.
+- Remaining: full SPEC parity for policy-composition edge cases and stronger production-rollout evidence.
 
 ## Scope
 Define, implement, and enforce formal proofs for orchestrator invariants.
@@ -23,12 +23,12 @@ Define, implement, and enforce formal proofs for orchestrator invariants.
 
 ### Task P1.2: CI policy
 - [x] Subtask P1.2.1: Define required proof jobs for merge.
-- [ ] Subtask P1.2.2: Define acceptable bypass policy for emergencies.
+- [x] Subtask P1.2.2: Define acceptable bypass policy for emergencies.
 
 ## Epic P2: Proof Operations
 ### Task P2.1: Regression maintenance
 - [x] Subtask P2.1.1: Track proof breakages by commit.
-- [ ] Subtask P2.1.2: Require proof updates alongside invariant changes.
+- [x] Subtask P2.1.2: Require proof updates alongside invariant changes.
 
 ## Exit Criteria
 - [x] Proof program is wired into CI and release gates.
@@ -50,5 +50,5 @@ Define, implement, and enforce formal proofs for orchestrator invariants.
 | Sec. 7.4 idempotency/recovery invariants | Reducer invariants, command-taxonomy transitions, and `UpdateAgent` accounting safety are formalized in Verus and mapped to executable tests | Keep proof-to-runtime-test traceability current as reducer behavior evolves | `P1.1`, `P2.1` |
 | Sec. 8.3-8.4 concurrency and retry guarantees | One-step dispatch/retry/release fairness assumptions and slot-accounting proofs are formalized | Extend to stronger starvation-freedom and eventual-processing guarantees across repeated scheduler steps | `P1.1`, `P2.1` |
 | Sec. 9.5 and Sec. 15.2 safety invariants | Workspace model proof now covers separator removal, placeholder sanitization, and sanitize fixed points for allowed keys | Add canonicalization and race-sensitive proof obligations beyond current string-level model | `P2.1` |
-| Sec. 17 and Sec. 18 formal validation gate | Quick/full proof profiles plus real interleavings/soak long-suite runners were rerun on the current tree | Make proof summaries machine-readable and enforce branch-protection policy | `P1.2`, `P2.1` |
+| Sec. 17 and Sec. 18 formal validation gate | Quick/full proof profiles plus real interleavings/soak long-suite runners were rerun on the current tree | Make proof summaries machine-readable and keep proof-touch enforcement active in release policy | `P1.2`, `P2.1` |
 <!-- SPEC_GAP_MAP_END -->

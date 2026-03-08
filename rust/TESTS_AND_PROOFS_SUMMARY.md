@@ -1,6 +1,6 @@
 # Rust Tests and Proofs Summary
 
-Last verified: 2026-03-07
+Last verified: 2026-03-08
 Scope: local workspace validation in `/Users/af/symphony/rust`
 
 ## Commands Run
@@ -11,7 +11,7 @@ Scope: local workspace validation in `/Users/af/symphony/rust`
 | `cargo test -p symphony-domain` | Passed | Reducer crate passed `27` unit/property/doctest checks, including the public invariant catalog and new rustdoc examples. |
 | `cargo test -p symphony-testkit` | Passed | Shared harness crate passed unit, conformance, integration, interleaving, soak, reducer-contract, and doctest targets. |
 | `cargo test --workspace` | Passed | Full workspace is green, including all crate/unit/integration/conformance/interleaving/soak/doctest targets. |
-| `cargo test --workspace -- --list` | Passed | Current workspace enumerates `734` executable tests. |
+| `cargo test --workspace -- --list` | Passed | Current workspace enumerates `736` executable tests. |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Passed | Workspace linting is warning-free on the current tree. |
 | `./proofs/verus/scripts/run-proof-checks.sh --profile full` | Passed | Full Verus profile passed all five phases on the current tree. |
 
